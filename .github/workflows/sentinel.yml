@@ -1,4 +1,4 @@
-name: Sentinel Security Scan
+name: Sentinel (surface + deps + LLM security)
 
 on:
   pull_request:
@@ -26,6 +26,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          # Full pipeline: defender surface inventory, npm/PyPI exploitability, semantic PR security (LLM).
           sentinel scan \
             --repo ${{ github.server_url }}/${{ github.repository }} \
             --domain ${{ vars.SENTINEL_DOMAIN }} \

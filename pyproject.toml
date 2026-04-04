@@ -5,12 +5,21 @@ build-backend = "hatchling.build"
 [project]
 name = "sentinel-sec"
 version = "0.1.0"
-description = "AI-powered attack surface monitoring, dependency risk scoring, and auth flaw detection."
+description = "Defender attack-surface monitoring, npm/PyPI exploitability-aware dependency scoring, and semantic LLM PR security review."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "Angad Josan" }]
-keywords = ["security", "attack-surface", "dependency-scanning", "auth-review", "cli"]
+keywords = [
+    "security",
+    "attack-surface",
+    "dependency-scanning",
+    "npm",
+    "pypi",
+    "llm",
+    "code-review",
+    "cli",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

@@ -1,8 +1,8 @@
-# Sentinel — AI-Powered Attack Surface & Code Security Monitor
+# Sentinel — Defender Attack Surface, Exploitability-Aware Dependencies & Semantic LLM Code Security
 ## Product Requirements & Technical Design Document
 
-**Version:** 0.1  
-**Date:** 2026-04-03  
+**Version:** 0.2  
+**Date:** 2026-04-04  
 **Author:** Angad Josan  
 **Status:** Draft
 
@@ -18,7 +18,7 @@
 6. [Agent Orchestration & Trigger Model](#6-agent-orchestration--trigger-model)
 7. [Module 1 — Attack Surface Mapping](#7-module-1--attack-surface-mapping)
 8. [Module 2 — Dependency Risk Scoring](#8-module-2--dependency-risk-scoring)
-9. [Module 3 — AI Code Review for Auth Flaws](#9-module-3--ai-code-review-for-auth-flaws)
+9. [Module 3 — Semantic LLM Code Security Review (PR / Diff)](#9-module-3--semantic-llm-code-security-review-pr--diff)
 10. [CVE Data Strategy: Caching vs. Live Query](#10-cve-data-strategy-caching-vs-live-query)
 11. [Reachability Analysis Engine](#11-reachability-analysis-engine)
 12. [Data Models](#12-data-models)
@@ -34,13 +34,13 @@
 
 ## 1. Problem Statement
 
-Modern engineering teams have three blind spots that live in separate tools (or no tool at all):
+Modern engineering teams have overlapping blind spots that usually live in separate tools (or no tool at all):
 
 1. **What attack surface does this repo actually expose on the internet?** Subdomains, endpoints, TLS configs, dangling DNS — nobody has a live, repo-linked picture of this.
 2. **Which vulnerable dependencies are actually reachable?** Scanners like Dependabot flag thousands of CVEs, most unreachable. Teams tune them out. The signal-to-noise is terrible.
-3. **Does this new API route have auth?** Code review misses broken access control constantly. IDOR bugs ship because reviewers don't trace the full middleware chain.
+3. **What risky *semantics* shipped in this PR?** Broken access control and IDOR are the headline failures, but the same gap exists for injection sinks, secrets in diffs, SSRF-shaped fetches, unsafe deserialization, and weak crypto defaults — patterns that regex-heavy SAST often misses without context.
 
-These three questions share a root: *what can an attacker actually reach and exploit?* Sentinel answers all three from a single GitHub integration, unified into one risk surface per repo.
+These questions share a root: *what can an attacker actually reach and exploit?* Sentinel answers them from a single GitHub integration (or local CLI), unified into one risk surface per repo: **defender attack-surface inventory**, **exploitability-weighted dependencies (npm + PyPI in v1)**, and **LLM-backed semantic review** of the change.
 
 ---
 
@@ -49,21 +49,21 @@ These three questions share a root: *what can an attacker actually reach and exp
 ### Goals
 
 - **G1.** One-click GitHub App install — zero config to get value on an existing repo.
-- **G2.** Attack surface enumeration tied to a specific repo/org, updated on push to main.
+- **G2.** **Defender-facing** attack-surface enumeration (Crossfeed-inspired inventory: subdomains, TLS, DNS, indexed exposure) tied to a specific repo/org, updated on push to main and on schedule.
 - **G3.** Dependency risk scoring that weights CVEs by reachability, not just existence.
-- **G4.** AI-powered PR review that flags missing/misconfigured auth on new routes before merge.
+- **G4.** AI-powered PR / diff review that flags **semantic** security issues before merge: access control and auth middleware alignment, IDOR-shaped handlers, common injection flows, secrets in code, SSRF-shaped network calls, dangerous deserialization, and weak TLS/crypto usage — with structured JSON findings, CWE mapping where applicable, and bounded context (never full-repo dump to the LLM).
 - **G5.** Web dashboard and CLI that surface findings in a digestible, shareable format.
 - **G6.** High demo value — findings should be dramatic and explainable in a tweet.
-- **G7.** **CLI-native scan UX:** `sentinel scan` is the primary command. By default it (a) streams **Rich** terminal output (progress, per-stage summaries, and auth findings with short LLM rationale), (b) persists unified artifacts to disk, and (c) **starts the local dashboard** bound to that report (same behavior as `sentinel dashboard`), respecting `dashboard.auto_open`. **`--quiet`** disables (a) and (c) for CI and headless agents — artifacts and exit codes only.
-- **G8.** **LLM-native output:** CLI text is written so humans *and* coding agents can triage from logs — especially the auth stage, which includes route identifiers, severity, and a concise natural-language explanation alongside structured IDs (CWE, file:line). Quiet mode still writes full JSON for machines.
+- **G7.** **CLI-native scan UX:** `sentinel scan` is the primary command. By default it (a) streams **Rich** terminal output (progress, per-stage summaries, and **code-security** findings with short LLM rationale), (b) persists unified artifacts to disk, and (c) **starts the local dashboard** bound to that report (same behavior as `sentinel dashboard`), respecting `dashboard.auto_open`. **`--quiet`** disables (a) and (c) for CI and headless agents — artifacts and exit codes only.
+- **G8.** **LLM-native output:** CLI text is written so humans *and* coding agents can triage from logs — especially the **code security** stage, which includes location, category, severity, and a concise natural-language explanation alongside structured IDs (CWE, file:line). Quiet mode still writes full JSON for machines.
 - **G9.** **CLI without GitHub App:** Local `sentinel scan --repo <url>` works on any repository the operator can read — typically a **public** GitHub URL via anonymous clone or API, or a **private** repo when `GITHUB_TOKEN` / `gh auth` supplies credentials. No App install is required for this path.
 
 ### Non-Goals (v1)
 
 - **NG1.** Automated exploitation or active fuzzing (passive enumeration only).
 - **NG2.** Non-GitHub SCM support (GitLab, Bitbucket) — out of scope for v1.
-- **NG3.** Multi-language deep static analysis beyond Python and JavaScript/TypeScript in v1.
-- **NG4.** SAST beyond auth/access-control patterns — not a general code scanner.
+- **NG3.** **Formal verification** or **binary-only** closed-source dependency blobs without lockfile/manifest signals — out of scope for v1.
+- **NG4.** **Guaranteed completeness** — the LLM stage is a high-signal reviewer, not a soundness proof; deterministic dep and surface stages complement it but cannot eliminate all logical bugs.
 - **NG5.** **Hosted** Sentinel (GitHub App / multi-tenant cloud) scanning a repo **without** that customer having installed the App — avoids drive-by abuse, ensures we only read code under explicit OAuth/App grants, and keeps private repos out of our infra unless authorized. **This does not apply to the local CLI:** running Sentinel on your laptop against a public repo you clone is in scope (G9).
 
 ### Scope split: hosted vs CLI
@@ -108,21 +108,21 @@ User lands on sentinel.dev
 
 ---
 
-### User Flow 2 — PR Opened with New API Route
+### User Flow 2 — PR Opened (semantic security review)
 
 ```
 Dev opens PR: "feat: add /api/admin/users endpoint"
   → GitHub sends pull_request webhook (action: opened/synchronize)
   → Sentinel receives webhook
   → Diff extraction: identify new/modified files
-  → Route detection: find new route definitions in diff
-  → Auth middleware context: fetch existing auth patterns from repo
-  → Claude prompt: "Does this route have proper auth? IDOR risks?"
-  → Claude returns structured JSON: [{ route, issue_type, severity, explanation }]
+  → Route / handler detection: find new endpoints and high-risk sinks in diff
+  → Context fetch: auth middleware patterns, existing protected routes, config that defines trust boundaries
+  → LLM prompt: structured review for access control, IDOR, injection, secrets, SSRF-shaped calls, deserialization, crypto/TLS misuse
+  → Model returns JSON: [{ location, category, issue_type, severity, cwe_id, explanation, fix_suggestion }]
   → Sentinel posts GitHub Check Run (status: action_required) + PR comment
-  → Developer sees inline annotation: "⚠ /api/admin/users has no auth middleware — potential IDOR"
+  → Developer sees inline annotation: e.g. "⚠ New admin route may bypass established auth middleware" or "⚠ User input flows to shell/exec sink"
   → Dev fixes it, pushes
-  → Sentinel re-reviews, posts: "✓ Auth check: no issues found"
+  → Sentinel re-reviews, posts: "✓ Code security review: no issues found"
 ```
 
 ---
@@ -159,10 +159,10 @@ User opens dashboard
           - Risk-scored package list, sortable
           - CVE details + reachability trace ("called via app.py:134 → utils/http.py:22")
           - Fix recommendations
-      → "Auth Review" tab:
+      → "Code security" tab:
           - PR history with review results
-          - Open issues (unfixed routes)
-          - Auth middleware map (what patterns we detected)
+          - Open issues (unfixed findings by category)
+          - Detected middleware / trust-boundary map (auth patterns, gateway headers, etc.)
 ```
 
 ---
@@ -187,7 +187,7 @@ $ sentinel report --repo org/repo --format json > report.json
 $ sentinel scan --repo org/repo [--domain myapp.com]
 
   → Stdout: Rich UI — per-stage progress, summary tables, top N findings per stage
-  → Auth stage: each row includes route, severity, CWE, file:line, and a 1–2 line LLM rationale
+  → Code security stage: each row includes location, category, severity, CWE, and a 1–2 line LLM rationale
        (optimized for human skim and for agents reading build logs)
   → Disk: unified findings + configured export formats under --output (default ./sentinel-report)
   → Local dashboard: binds dashboard.port (default 4000), serves the report just written;
@@ -230,13 +230,13 @@ $ sentinel scan --repo org/repo --quiet
 │                     Worker Pool (Celery)                        │
 │                                                                 │
 │  ┌──────────────────┐  ┌─────────────────┐  ┌───────────────┐  │
-│  │  Attack Surface  │  │  Dep Risk Score │  │   AI Review   │  │
-│  │  Worker          │  │  Worker         │  │   Worker      │  │
-│  │                  │  │                 │  │               │  │
-│  │  subfinder       │  │  dep parser     │  │  diff parser  │  │
-│  │  httpx           │  │  OSV.dev cache  │  │  route detect │  │
-│  │  shodan API      │  │  reachability   │  │  Claude API   │  │
-│  │  DNS resolver    │  │  engine         │  │               │  │
+  │  │  Attack Surface  │  │  Dep Risk Score │  │ LLM Security  │  │
+  │  │  Worker          │  │  Worker         │  │  Worker       │  │
+  │  │                  │  │                 │  │               │  │
+  │  │  subfinder       │  │  dep parser     │  │  diff parser  │  │
+  │  │  httpx           │  │  OSV.dev cache  │  │  route/sink   │  │
+  │  │  shodan API      │  │  reachability   │  │  detect + LLM │  │
+  │  │  DNS resolver    │  │  engine         │  │               │  │
 │  └────────┬─────────┘  └────────┬────────┘  └───────┬───────┘  │
 └───────────┼─────────────────────┼───────────────────┼──────────┘
             │                     │                   │
@@ -338,7 +338,7 @@ def route_webhook(event_type: str, payload: dict) -> None:
 
 ### Trigger Matrix
 
-| Event | Attack Surface | Dep Risk | AI Code Review |
+| Event | Attack Surface | Dep Risk | LLM Code Security |
 |-------|---------------|----------|----------------|
 | App installed | ✓ (full scan) | ✓ (full scan) | — |
 | Push to main | ✓ (incremental) | Only if dep files changed | — |
@@ -352,7 +352,7 @@ def route_webhook(event_type: str, payload: dict) -> None:
 
 - **Attack surface** changes slowly (infra changes). Full rescan daily + incremental on push is sufficient. Heavy tool, don't over-trigger.
 - **Dep risk** is cheap and must fire on dep file changes. Also runs on PR to catch "you're adding a bad package."
-- **AI review** fires on every PR push — this is the most latency-sensitive, must complete before PR review window.
+- **LLM code security** fires on every PR push — this is the most latency-sensitive, must complete before PR review window.
 
 ### Task Queue Design
 
@@ -382,7 +382,14 @@ PENDING → RUNNING → COMPLETE
 ## 7. Module 1 — Attack Surface Mapping
 
 ### Goal
-Given a GitHub repo, determine what infrastructure it exposes on the internet.
+Given a GitHub repo (and optional domain seeds), build a **defender-facing inventory** of internet-facing assets and misconfigurations tied to that software — **Crossfeed-inspired** in purpose (continuous visibility for operators securing critical-facing web estates), **lightweight** in deployment: passive discovery, DNS hygiene, TLS analysis, and indexed third-party intel — **not** an offensive reconnaissance or exploitation toolkit.
+
+### Defender framing (Crossfeed-inspired)
+
+- **Who it is for:** security engineers, SREs, and program owners who need to answer “what do we expose, and is it configured safely?” — analogous to federal/state **critical infrastructure and elections-adjacent** surface monitoring, scaled to a repo-or-domain scope.
+- **What it avoids:** coordinated offensive scanning, credential stuffing, or exploit payloads. No “weaponized” positioning in docs or UX.
+- **Inputs:** registrable domains inferred from the repo **or** supplied via `--domain`; optional org-owned seed lists in config for hosted product.
+- **Outputs:** unified findings suitable for **triage and remediation** (TLS upgrade, dangling DNS removal, port exposure review), exportable to SARIF/HTML for existing workflows.
 
 ### CLI: `--domain` flag (optional seed)
 
@@ -391,7 +398,7 @@ Passive enumeration (Subfinder, Shodan, etc.) needs one or more **seed registrab
 - **If provided:** use it as the **primary** seed (merged with repo-derived seeds from Step 1 — dedupe). Best when you know production hostname (e.g. `app.example.com`’s registrable domain `example.com`).
 - **If omitted:** run **Step 1 only** (`parse_repo_for_domains`) to collect candidates from metadata, config, `homepage`, README URLs, etc. Enumerate each candidate; if the set is **empty**, the attack-surface stage completes with **no hosts** and the CLI prints a hint to pass `--domain` for full surface coverage.
 
-Dependency and auth stages do **not** require `--domain`; they operate on cloned source only.
+Dependency and **code security** stages do **not** require `--domain`; they operate on cloned source only.
 
 ### Input Sources
 
@@ -434,6 +441,13 @@ Step 6: TLS Analysis
         - cipher suites (flag TLS 1.0/1.1)
         - cert SANs (reveals more subdomains)
         - mismatched hostnames
+
+Step 7: HTTP security posture (in-scope hosts only)
+  └── From httpx / bounded GET probes against hosts already tied to the seed:
+        - HSTS presence and basic redirect-to-HTTPS behavior
+        - Content-Security-Policy / X-Frame-Options / Referrer-Policy signals (informational vs strict)
+        - Cookie `Secure` / `HttpOnly` hints where response headers expose Set-Cookie
+  (Recommendations only — no exploitation or session abuse.)
 ```
 
 ### Output Schema
@@ -486,18 +500,24 @@ def is_dangling(cname_target: str) -> bool:
 ## 8. Module 2 — Dependency Risk Scoring
 
 ### Goal
-Score each dependency not just by "does a CVE exist" but by "is the vulnerable code path actually reachable from this repo."
+Score each dependency by **practical exploitability** in *this* codebase — not CVE count alone: **reachable vulnerable symbols** (where OSV provides them), **transitive exposure**, **patch cadence**, **known exploits**, and **depth in the graph**. **PyPI** and **npm** are **v1 co-primary** ecosystems (equal product priority); others follow per parser maturity.
 
 ### Dependency Parsers
 
-Support matrix (v1):
+**v1 co-primary ecosystems — npm and PyPI** (equal footing in scoring, cache keys, and dashboard UX):
 
 | Ecosystem | Files | Parser |
 |-----------|-------|--------|
-| Python | `requirements.txt`, `Pipfile.lock`, `pyproject.toml` | custom regex + `tomllib` |
-| Node.js | `package.json`, `package-lock.json`, `yarn.lock` | `npm list --json` equivalent |
-| (v2) Go | `go.mod`, `go.sum` | go mod graph |
-| (v2) Rust | `Cargo.lock` | toml parser |
+| **PyPI** | `requirements.txt`, `Pipfile.lock`, `pyproject.toml`, `poetry.lock` | custom regex + `tomllib` / lockfile parsers |
+| **npm** | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` | JSON + lockfile-native graph extraction |
+
+Extended matrix (v2+):
+
+| Ecosystem | Files | Notes |
+|-----------|-------|--------|
+| Go | `go.mod`, `go.sum` | module graph + proxy metadata |
+| Rust | `Cargo.lock` | crates.io via OSV |
+| JVM / .NET / Ruby | Maven, Gradle, `*.csproj`, `Gemfile.lock` | OSV ecosystem mapping |
 
 ### CVE Data Pipeline
 
@@ -601,140 +621,96 @@ class DepRiskFinding:
 
 ---
 
-## 9. Module 3 — AI Code Review for Auth Flaws
+## 9. Module 3 — Semantic LLM Code Security Review (PR / Diff)
 
 ### Goal
-On every PR, detect new API routes/endpoints that are missing authentication, have incorrect authorization checks, or are susceptible to IDOR.
+On every PR (or `sentinel diff` in CI), perform **open-source, semantic security review** of the change: not regex-only SAST, but LLM reasoning over **bounded** context — the same product class as “does this route bypass auth middleware?” extended to **OWASP-style** categories that need **meaning** (data flow, trust boundaries, framework conventions).
 
-### Route Detection (Static Analysis)
+**In scope (v1 — all first-class in prompts and schema):**
 
-**Step 1: Detect framework**
+| Category | Examples |
+|----------|----------|
+| **Access control** | Missing auth middleware, broken middleware chain, IDOR-shaped handlers, horizontal/vertical privilege issues, auth bypass via alternate paths |
+| **Injection** | SQL/command/template injection when user input reaches a sink (heuristic + semantic) |
+| **Secrets & credentials** | API keys, tokens, private keys, passwords introduced or logged in the diff |
+| **SSRF / unsafe fetch** | User-controlled URL/host reaching HTTP client, file, or redirect chains |
+| **Deserialization** | Unsafe pickle/YAML/`eval`-class patterns on untrusted data |
+| **Crypto / TLS** | Weak algorithms, `InsecureSkipVerify`, hardcoded IVs, misuse of JWT verify flags |
 
-Heuristics based on imports in changed files:
-```python
-FRAMEWORK_SIGNATURES = {
-    "fastapi":  ["from fastapi import", "APIRouter", "@app.get", "@router."],
-    "flask":    ["from flask import Flask", "@app.route", "Blueprint"],
-    "express":  ["require('express')", "router.get(", "app.post("],
-    "django":   ["urlpatterns", "path(", "include("],
-    "nextjs":   ["export default function handler", "export async function GET"],
-    "gin":      ["gin.Default()", "r.GET(", "r.POST("],
-}
-```
+**Configurable:** `sentinel.yml` → `llm.code_security.categories` may **subset** the above for noisy repos; default is **all** categories enabled.
 
-**Step 2: Extract new routes from diff**
+**Explicit non-goals for this module:** formal verification, guaranteed soundness, or reviewing code not present in the diff/context window.
 
-Parse git diff, find added lines matching route pattern for detected framework.
+### Static pre-analysis (feeds the LLM)
 
-```python
-def extract_routes_from_diff(diff: str, framework: str) -> List[RouteInfo]:
-    # Uses tree-sitter to parse changed files, not just line-level grep
-    # Gives us: method, path pattern, handler function name, file+line
-    ...
-```
+**Step 1: Detect framework** — same `FRAMEWORK_SIGNATURES` heuristic as before (FastAPI, Flask, Express, Django, Next.js API routes, Gin, etc.).
 
-**Step 3: Gather auth context**
+**Step 2: Extract structural signals from the diff** — tree-sitter (or equivalent) over **changed files** only:
 
-```python
-def get_auth_context(repo: Repo, framework: str) -> AuthContext:
-    # Find existing auth middleware/decorators in the repo:
-    # - Search for @require_auth, @login_required, Depends(get_current_user), etc.
-    # - Read the middleware file contents (not just names)
-    # - Find examples of correctly-protected routes in the existing codebase
-    # - Detect auth pattern: JWT, session, API key, OAuth, custom
-    ...
-```
+- New/changed **routes** and HTTP methods
+- New **imports** of high-risk libraries (ORM raw SQL, child_process, `yaml.load`, `pickle`, outbound `fetch`/`axios`)
+- **Sinks** and **sources** candidates (user input parameters, headers, body parsers)
 
-**Step 4: Claude prompt construction**
+**Step 3: Gather trust-boundary context** (not only “auth”):
 
-```python
-SYSTEM_PROMPT = """
-You are a security engineer reviewing a pull request for authentication and authorization flaws.
-You will be given:
-1. New API routes being added
-2. The existing auth middleware/decorators used in this codebase
-3. Examples of correctly-protected routes in this codebase
+- Middleware / guard patterns (`Depends`, `before_request`, Express middleware chain, Next.js middleware)
+- Centralized error handlers and how they leak stack traces
+- Existing examples of **correctly** protected routes and **safe** patterns in-repo (few-shot)
 
-Identify:
-- Routes missing authentication entirely
-- Routes where the authenticated user can access other users' resources (IDOR)
-- Routes where privilege level checks are missing or incorrect
-- Routes where auth logic is reimplemented inline instead of using the established middleware
+**Step 4: Build bounded prompt packs**
 
-For each issue, return:
-{
-  "route": "POST /api/users/{id}/settings",
-  "file": "src/routes/users.py",
-  "line": 142,
-  "issue_type": "idor" | "missing_auth" | "broken_access_control" | "auth_bypass",
-  "severity": "critical" | "high" | "medium",
-  "explanation": "...",
-  "fix_suggestion": "..."
-}
+- Hard cap: `MAX_TOKENS_PER_PR_REVIEW` (see §14) — chunk by file if diff exceeds budget; prioritize route files and new handlers.
+- Include: structured route list, middleware excerpt, diff hunks, optional `secrets_scan` pre-pass hits (deterministic high-entropy / known-pattern scan **on the diff only** to reduce LLM miss rate).
 
-Return a JSON array. If no issues, return [].
-Be precise. Do not flag correctly-protected routes.
-"""
+**Step 5: LLM system instruction (normative shape)**
 
-def build_pr_review_prompt(routes: List[RouteInfo], auth_context: AuthContext, diff: str) -> str:
-    return f"""
-Codebase auth pattern: {auth_context.pattern}
+The model must return **only** a JSON array of objects with at least:
 
-Existing auth middleware (read this carefully):
-```python
-{auth_context.middleware_code[:3000]}
-```
+- `category`: `access_control` | `injection` | `secrets` | `ssrf` | `deserialization` | `crypto_tls` | `other`
+- `issue_type`: short machine slug (e.g. `missing_auth`, `idor`, `sql_injection`, `secret_in_diff`, `insecure_deserialization`)
+- `route` (optional): HTTP route pattern if applicable, else `null`
+- `method` (optional): HTTP method if applicable
+- `file`, `line`: primary location
+- `severity`: `critical` | `high` | `medium` | `low`
+- `cwe_id` (optional): integer when the model can map confidently
+- `explanation`, `fix_suggestion`: concise, actionable
 
-Examples of correctly-protected routes in this codebase:
-```
-{auth_context.examples[:2000]}
-```
+If no issues: `[]`. Instruction: **do not flag** patterns that clearly match established safe usage in the provided middleware examples.
 
-New routes being added in this PR:
-```
-{format_routes(routes)}
-```
-
-Relevant diff:
-```diff
-{diff[:6000]}
-```
-
-Review for auth flaws. Return JSON array only.
-"""
-```
-
-**Step 5: Post results to GitHub**
+**Step 6: Post results to GitHub** (hosted) / write to unified findings (CLI)
 
 ```python
-def post_pr_review(pr: PullRequest, findings: List[AuthFinding]) -> None:
+def post_pr_review(pr: PullRequest, findings: List[CodeSecurityFinding]) -> None:
     if not findings:
-        # Post passing check run
-        create_check_run(pr, conclusion="success", title="Sentinel Auth Review: No issues")
+        create_check_run(pr, conclusion="success", title="Sentinel: Code security review — no issues")
         return
-    
-    # Create Check Run (shows in PR checks bar)
-    create_check_run(pr, conclusion="action_required",
-                     title=f"Sentinel: {len(findings)} auth issue(s) found",
-                     annotations=[finding_to_annotation(f) for f in findings])
-    
-    # Post summary comment
+    create_check_run(
+        pr,
+        conclusion="action_required",
+        title=f"Sentinel: {len(findings)} code security finding(s)",
+        annotations=[finding_to_annotation(f) for f in findings],
+    )
     post_pr_comment(pr, build_summary_comment(findings))
 ```
 
-GitHub Check Run annotations appear as inline comments on the specific lines — highest-signal delivery mechanism.
+GitHub Check Run annotations remain the primary high-signal delivery path.
 
-### Auth Finding Output Schema
+### Code security finding output schema
 
 ```python
 @dataclass
-class AuthFinding:
-    route: str
-    method: str
+class CodeSecurityFinding:
+    category: Literal[
+        "access_control", "injection", "secrets", "ssrf",
+        "deserialization", "crypto_tls", "other",
+    ]
+    issue_type: str  # e.g. missing_auth, idor, sql_injection, secret_in_diff
+    route: Optional[str]
+    method: Optional[str]
     file: str
-    line: int
-    issue_type: Literal["missing_auth", "idor", "broken_access_control", "auth_bypass", "privilege_escalation"]
+    line: Optional[int]
     severity: Literal["critical", "high", "medium", "low"]
+    cwe_id: Optional[int]
     explanation: str
     fix_suggestion: str
     pr_number: int
@@ -744,6 +720,8 @@ class AuthFinding:
     prompt_tokens: int
     completion_tokens: int
 ```
+
+**Storage note:** New deployments SHOULD use table `code_security_findings` (below). Existing installs MAY migrate from `auth_findings` via additive columns + backfill `category='access_control'`.
 
 ---
 
@@ -880,7 +858,7 @@ CREATE TABLE repos (
 CREATE TABLE scans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     repo_id UUID REFERENCES repos(id),
-    scan_type TEXT NOT NULL,  -- 'attack_surface' | 'dep_risk' | 'pr_review'
+    scan_type TEXT NOT NULL,  -- 'attack_surface' | 'dep_risk' | 'code_security' | 'pr_review' (legacy alias)
     trigger TEXT NOT NULL,    -- 'push' | 'pr' | 'scheduled' | 'manual'
     commit_sha TEXT,
     pr_number INT,
@@ -929,18 +907,20 @@ CREATE TABLE dep_findings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Auth review findings
-CREATE TABLE auth_findings (
+-- Semantic LLM code security findings (supersedes legacy auth_findings)
+CREATE TABLE code_security_findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id),
     repo_id UUID REFERENCES repos(id),
     pr_number INT NOT NULL,
     commit_sha TEXT NOT NULL,
-    route TEXT NOT NULL,
-    method TEXT NOT NULL,
+    category TEXT NOT NULL,  -- access_control | injection | secrets | ssrf | deserialization | crypto_tls | other
+    issue_type TEXT NOT NULL,
+    route TEXT,
+    method TEXT,
     file TEXT NOT NULL,
     line INT,
-    issue_type TEXT NOT NULL,
+    cwe_id INT,
     severity TEXT NOT NULL,
     explanation TEXT NOT NULL,
     fix_suggestion TEXT,
@@ -949,6 +929,7 @@ CREATE TABLE auth_findings (
     llm_model TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- Legacy: CREATE TABLE auth_findings — migrate rows into code_security_findings with category='access_control'
 
 -- CVE cache (warm store)
 CREATE TABLE cve_cache (
@@ -995,7 +976,7 @@ GET  /api/v1/repos/{repo_id}
 
 POST /api/v1/repos/{repo_id}/scan
      → Trigger manual scan
-     body: { "modules": ["attack_surface", "deps", "pr_review"] }
+     body: { "modules": ["attack_surface", "deps", "code_security"] }
 
 GET  /api/v1/repos/{repo_id}/surface
      → Attack surface findings (paginated)
@@ -1005,9 +986,10 @@ GET  /api/v1/repos/{repo_id}/deps
      → Dependency findings (paginated)
      query: ?reachable=true&sort=risk_score
 
-GET  /api/v1/repos/{repo_id}/auth
-     → Auth review findings
-     query: ?resolved=false&pr=142
+GET  /api/v1/repos/{repo_id}/code-security
+     → LLM code security findings (all categories)
+     query: ?resolved=false&pr=142&category=access_control
+     (Legacy alias: GET .../auth → same handler, deprecated)
 
 GET  /api/v1/repos/{repo_id}/scans
      → Scan history
@@ -1042,7 +1024,7 @@ POST /webhooks/github
 
 1. **Structured output only** — always ask for JSON, validate with Pydantic before storing
 2. **Bounded context** — never send full file, only relevant diff + targeted context (max 8k tokens)
-3. **Few-shot examples** — include one correct-auth example and one bad-auth example in system prompt
+3. **Few-shot examples** — include short **safe** vs **unsafe** pairs per category (access control + at least one non-auth class, e.g. secret in diff)
 4. **Explicit false-positive instruction** — "Do not flag routes that are correctly protected. If you are unsure, do not flag."
 5. **Chain-of-thought suppressed** — ask for JSON directly, no reasoning preamble (reduces tokens, reduces hallucinated explanations)
 
@@ -1060,20 +1042,25 @@ ESTIMATED_COST_PER_REVIEW = 0.003  # ~$0.003 at Sonnet pricing
 ### LLM Response Validation
 
 ```python
-class AuthFindingResponse(BaseModel):
-    route: str
+class CodeSecurityFindingResponse(BaseModel):
+    category: Literal[
+        "access_control", "injection", "secrets", "ssrf",
+        "deserialization", "crypto_tls", "other",
+    ]
+    issue_type: str
+    route: Optional[str] = None
+    method: Optional[str] = None
     file: str
-    line: Optional[int]
-    issue_type: Literal["missing_auth", "idor", "broken_access_control", "auth_bypass", "privilege_escalation"]
+    line: Optional[int] = None
     severity: Literal["critical", "high", "medium", "low"]
+    cwe_id: Optional[int] = None
     explanation: str
     fix_suggestion: str
 
-def parse_llm_response(raw: str) -> List[AuthFindingResponse]:
-    # Strip markdown code fences if present
+def parse_llm_response(raw: str) -> List[CodeSecurityFindingResponse]:
     cleaned = re.sub(r"```(?:json)?", "", raw).strip()
     data = json.loads(cleaned)
-    return [AuthFindingResponse(**item) for item in data]
+    return [CodeSecurityFindingResponse(**item) for item in data]
 ```
 
 ---
@@ -1088,14 +1075,14 @@ def parse_llm_response(raw: str) -> List[AuthFindingResponse]:
 - `/repos/{owner}/{name}` — Repo detail
   - `/repos/{owner}/{name}/surface` — Attack surface tab
   - `/repos/{owner}/{name}/deps` — Dependency risk tab
-  - `/repos/{owner}/{name}/auth` — Auth review history tab
+  - `/repos/{owner}/{name}/code-security` — LLM code security history (all categories); legacy `/auth` redirects
 - `/repos/{owner}/{name}/scans/{id}` — Live scan view (WebSocket)
 
 **Key design decisions:**
 - Risk score prominently displayed: **0-100, color-coded** (green/yellow/orange/red)
 - Attack surface visualized as a simple host table (not a graph — graphs are unreadable)
 - Dep findings sorted by risk score, grouped by "Reachable / Not Reachable"
-- Auth findings shown per-PR with link to GitHub PR comment
+- Code security findings shown per-PR with category filter + link to GitHub PR comment
 
 ### CLI (`sentinel`)
 
@@ -1125,11 +1112,11 @@ sentinel demo --repo torvalds/linux  # will obviously find nothing :)
 
 | Mode | Terminal (stdout) | Dashboard | Artifacts |
 |------|---------------------|-----------|-----------|
-| **Default** | Rich progress + tables; LLM auth rows include short rationale text | Auto-start local server on `dashboard.port`, load `--output` report; browser if `auto_open` | Always written |
+| **Default** | Rich progress + tables; LLM code-security rows include category + short rationale | Auto-start local server on `dashboard.port`, load `--output` report; browser if `auto_open` | Always written |
 | **`--quiet` (`-q`)** | Suppressed (errors on stderr) | Not started | Always written |
 | **`--no-dashboard`** | Same as default | Not started | Always written |
 
-**LLM-native CLI:** Auth findings MUST render with: `route`, `severity`, `cwe_id`, `location`, `summary` (LLM-generated, ≤ 240 chars), and `detail` available in JSON/dashboard. This keeps logs useful for Cursor/Codex/CI log ingestion without opening HTML.
+**LLM-native CLI:** Code security findings MUST render with: `category`, `issue_type`, `severity`, `cwe_id`, `location`, `summary` (LLM-generated, ≤ 240 chars), and `detail` in JSON/dashboard. This keeps logs useful for Cursor/Codex/CI log ingestion without opening HTML.
 
 **Implementation notes:**
 - Dashboard subprocess: reuse the same code path as `sentinel dashboard` (uvicorn/static server); scan blocks until scan work completes, then starts the dashboard in the **background**, prints the local URL, and returns the shell prompt (or keep foreground behind a `--dashboard-foreground` future flag if needed).
@@ -1175,7 +1162,7 @@ CLI uses `rich` for colorized table output and progress bars — looks good in t
 Ideal demo repos have:
 - Real deployed infrastructure (not just "hello world")
 - Active dependency usage (complex dep tree)
-- Multiple API routes with varied auth patterns
+- Multiple API routes and a mix of safe and risky patterns (access control + at least one injectable or secret-adjacent path for demo contrast)
 - Been around long enough to accumulate some CVEs
 
 Good public demo candidates (pick one at launch):
@@ -1188,7 +1175,7 @@ Good public demo candidates (pick one at launch):
 1. "Let me run Sentinel on [repo]" — terminal, single `sentinel scan` (no second command)
 2. Rich CLI: attack surface — 3 subdomains, 1 dangling CNAME → "this is takeover-able"
 3. Rich CLI: dep risk — 2 reachable CVEs → show the call trace in the table
-4. Rich CLI: auth row with short LLM rationale for a risky route
+4. Rich CLI: code-security row (e.g. access control + one non-auth category) with short LLM rationale
 5. Browser (auto-opened dashboard) — same findings, deeper triage view
 ```
 
@@ -1276,7 +1263,7 @@ SMTP_URL=                 # for email notifications
 | `GITHUB_WEBHOOK_SECRET` | **Yes** | Must reject unsigned webhooks (or dev-only bypass behind explicit flag) |
 | `DATABASE_URL` | **Yes** | No findings persistence, installs, or multi-tenant state |
 | `REDIS_URL` | **Yes** | No Celery queue / RedBeat schedule |
-| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** for PR auth review workers | LLM jobs fail; other workers may still run |
+| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** for PR / code-security workers | LLM jobs fail; other workers may still run |
 | `SHODAN_API_KEY` | **No** (recommended) | Attack-surface stage degrades: skip or reduce Shodan-backed host/port enrichment |
 | `SLACK_WEBHOOK_URL`, `SMTP_URL` | **No** | No outbound notifications |
 
@@ -1284,7 +1271,7 @@ SMTP_URL=                 # for email notifications
 
 | Variable | Required? | If missing |
 |----------|-----------|------------|
-| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** if `auth_review` / auth stage enabled | Auth stage errors or skips with clear message |
+| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** if `code_security` enabled (alias: `auth_review`) | Code security stage errors or skips with clear message |
 | `GITHUB_TOKEN` | **No** for public `git clone` / API | **Yes** for private repos or higher rate limits |
 | `SHODAN_API_KEY` | **No** | Weaker or empty Shodan-based surface signals; Subfinder/DNS paths still work where no key is needed |
 | App/DB/Redis vars | **Not used** | — |
@@ -1304,14 +1291,14 @@ Same as **B**, but secrets live in the repo/org **Actions secrets** (e.g. `ANTHR
 | **Hosted public scanner** | From sentinel.dev: queue scans of public repo URLs without local CLI (rate-limited, abuse controls; distinct from GitHub App install) |
 | **Org-wide view** | Single dashboard for all repos in a GitHub org, rolled-up risk score |
 | **Go / Rust / Java support** | Extend dep analysis to more ecosystems |
-| **Secrets detection** | Scan commits for leaked API keys, credentials |
+| **Deeper secret scanning** | Git history / blob-level trufflehog-style beyond diff-only (v1 covers diff + deterministic entropy hints) |
 | **SBOM export** | Generate CycloneDX/SPDX SBOM from dep analysis |
 | **Jira/Linear integration** | Auto-create tickets for critical findings |
 | **Slack App** | `/sentinel scan org/repo` in Slack |
 | **Historical tracking** | Risk score over time, "did you get better or worse?" |
 | **Active attack surface** | Optional: nmap scan (with explicit user consent) for more complete port data |
 | **Full call graph** | Interprocedural reachability for Python (using `pycg`) |
-| **Custom rules** | User-defined auth patterns for bespoke middleware |
+| **Custom rules** | User-defined middleware patterns and org-specific banned APIs |
 
 ### v3 Vision ("find 5 vulnerable repos on Twitter")
 - Public database of Sentinel scan results for popular open-source repos
