@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./sentinel.png" alt="Sentinel" width="120" />
+<img src="./sentinel.png" alt="Sentinel" width="300" />
 
 # Sentinel
 
