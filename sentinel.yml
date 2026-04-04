@@ -1,0 +1,26 @@
+# sentinel.yml
+
+target:
+  repo: https://github.com/your-org/your-repo  # GitHub repo to scan
+  domain: your-app.com                          # Domain for attack surface scan
+
+stages:
+  attack_surface: true   # Toggle Subfinder + Shodan enumeration
+  dependency_risk: true  # Toggle reachability-aware dep scoring
+  auth_review: true      # Toggle LLM auth analysis
+
+llm:
+  provider: anthropic    # anthropic | openai
+  model: claude-sonnet-4-20250514
+
+output:
+  format: json           # json | html | markdown
+  path: ./sentinel-report
+
+dashboard:
+  port: 4000             # Port for `sentinel dashboard`
+  auto_open: true        # Open browser automatically on launch
+
+thresholds:
+  dep_risk_score: 7.0    # Fail CI if any dep scores above this (0–10)
+  auth_severity: high    # Fail CI at this severity or above
