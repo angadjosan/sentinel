@@ -6,7 +6,7 @@ Thanks for your interest in contributing. Before submitting a PR, please open an
 
 ## Dev environment setup
 
-**Requirements:** Python 3.11+, Git
+**Requirements:** Python 3.11 or newer (tested on 3.11 and 3.12 in CI; **3.12** recommended), Git
 
 ```bash
 # 1. Clone the repo

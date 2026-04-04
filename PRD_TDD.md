@@ -54,6 +54,9 @@ These three questions share a root: *what can an attacker actually reach and exp
 - **G4.** AI-powered PR review that flags missing/misconfigured auth on new routes before merge.
 - **G5.** Web dashboard and CLI that surface findings in a digestible, shareable format.
 - **G6.** High demo value — findings should be dramatic and explainable in a tweet.
+- **G7.** **CLI-native scan UX:** `sentinel scan` is the primary command. By default it (a) streams **Rich** terminal output (progress, per-stage summaries, and auth findings with short LLM rationale), (b) persists unified artifacts to disk, and (c) **starts the local dashboard** bound to that report (same behavior as `sentinel dashboard`), respecting `dashboard.auto_open`. **`--quiet`** disables (a) and (c) for CI and headless agents — artifacts and exit codes only.
+- **G8.** **LLM-native output:** CLI text is written so humans *and* coding agents can triage from logs — especially the auth stage, which includes route identifiers, severity, and a concise natural-language explanation alongside structured IDs (CWE, file:line). Quiet mode still writes full JSON for machines.
+- **G9.** **CLI without GitHub App:** Local `sentinel scan --repo <url>` works on any repository the operator can read — typically a **public** GitHub URL via anonymous clone or API, or a **private** repo when `GITHUB_TOKEN` / `gh auth` supplies credentials. No App install is required for this path.
 
 ### Non-Goals (v1)
 
@@ -61,7 +64,14 @@ These three questions share a root: *what can an attacker actually reach and exp
 - **NG2.** Non-GitHub SCM support (GitLab, Bitbucket) — out of scope for v1.
 - **NG3.** Multi-language deep static analysis beyond Python and JavaScript/TypeScript in v1.
 - **NG4.** SAST beyond auth/access-control patterns — not a general code scanner.
-- **NG5.** Scanning arbitrary GitHub repos without install (saved for v2 "public scanner" feature).
+- **NG5.** **Hosted** Sentinel (GitHub App / multi-tenant cloud) scanning a repo **without** that customer having installed the App — avoids drive-by abuse, ensures we only read code under explicit OAuth/App grants, and keeps private repos out of our infra unless authorized. **This does not apply to the local CLI:** running Sentinel on your laptop against a public repo you clone is in scope (G9).
+
+### Scope split: hosted vs CLI
+
+| Surface | Who needs GitHub App install? | Public repo URL |
+|---------|------------------------------|-----------------|
+| **Hosted SaaS / GitHub App webhooks** | Yes, per org/repo install | Only after install (or v2 hosted scanner) |
+| **Local `sentinel` CLI** | No | Yes — clone or fetch what your token can read |
 
 ---
 
@@ -166,6 +176,36 @@ $ sentinel pr --repo org/repo --pr 142
 $ sentinel surface --domain myapp.com
 $ sentinel report --repo org/repo --format json > report.json
 ```
+
+---
+
+### User Flow 6 — `sentinel scan` (CLI-native default + quiet mode)
+
+**Default (interactive / agent-in-terminal):**
+
+```
+$ sentinel scan --repo org/repo [--domain myapp.com]
+
+  → Stdout: Rich UI — per-stage progress, summary tables, top N findings per stage
+  → Auth stage: each row includes route, severity, CWE, file:line, and a 1–2 line LLM rationale
+       (optimized for human skim and for agents reading build logs)
+  → Disk: unified findings + configured export formats under --output (default ./sentinel-report)
+  → Local dashboard: binds dashboard.port (default 4000), serves the report just written;
+       opens browser when dashboard.auto_open is true (sentinel.yml)
+  → User triages in terminal, browser, or both without running a second command first
+```
+
+**Quiet (CI, log-shy pipelines, “write files only”):**
+
+```
+$ sentinel scan --repo org/repo --quiet
+
+  → No Rich tables, no progress UI on stdout (errors → stderr only)
+  → Does not start the local dashboard process
+  → Artifacts and --fail-on exit codes unchanged
+```
+
+**Optional:** `--no-dashboard` — keep full Rich CLI output but skip auto-starting the dashboard (terminal-only review).
 
 ---
 
@@ -343,6 +383,15 @@ PENDING → RUNNING → COMPLETE
 
 ### Goal
 Given a GitHub repo, determine what infrastructure it exposes on the internet.
+
+### CLI: `--domain` flag (optional seed)
+
+Passive enumeration (Subfinder, Shodan, etc.) needs one or more **seed registrable domains**. The `--domain` argument is **optional**:
+
+- **If provided:** use it as the **primary** seed (merged with repo-derived seeds from Step 1 — dedupe). Best when you know production hostname (e.g. `app.example.com`’s registrable domain `example.com`).
+- **If omitted:** run **Step 1 only** (`parse_repo_for_domains`) to collect candidates from metadata, config, `homepage`, README URLs, etc. Enumerate each candidate; if the set is **empty**, the attack-surface stage completes with **no hosts** and the CLI prints a hint to pass `--domain` for full surface coverage.
+
+Dependency and auth stages do **not** require `--domain`; they operate on cloned source only.
 
 ### Input Sources
 
@@ -1050,24 +1099,41 @@ def parse_llm_response(raw: str) -> List[AuthFindingResponse]:
 
 ### CLI (`sentinel`)
 
+The CLI is the **primary product surface** for local and agent-driven use. Hosted GitHub App flows post results to Check Runs and the web app; the same mental model applies: human-readable narrative + structured artifacts.
+
 ```bash
 # Install
-pip install sentinel-cli
+pip install sentinel-sec
 
-# Authenticate
+# Authenticate (when using hosted/GitHub-backed features)
 sentinel auth login   # opens browser → GitHub OAuth
 
 # Commands
 sentinel repos list
-sentinel scan --repo org/repo [--module attack_surface|deps|pr_review] [--wait]
+sentinel scan --repo org/repo [--domain SEED] [--stages ...] [--output DIR] [--quiet] [--no-dashboard]
 sentinel report --repo org/repo [--format json|table|markdown] [--output file]
 sentinel surface --repo org/repo [--live-only] [--severity high]
 sentinel deps --repo org/repo [--reachable-only] [--fix]
 sentinel pr --repo org/repo --pr 142
+sentinel dashboard [--report DIR] [--port N]   # standalone; also auto-invoked after scan by default
 
 # Demo mode (no auth required, uses sample data)
 sentinel demo --repo torvalds/linux  # will obviously find nothing :)
 ```
+
+#### `sentinel scan` behavior (normative)
+
+| Mode | Terminal (stdout) | Dashboard | Artifacts |
+|------|---------------------|-----------|-----------|
+| **Default** | Rich progress + tables; LLM auth rows include short rationale text | Auto-start local server on `dashboard.port`, load `--output` report; browser if `auto_open` | Always written |
+| **`--quiet` (`-q`)** | Suppressed (errors on stderr) | Not started | Always written |
+| **`--no-dashboard`** | Same as default | Not started | Always written |
+
+**LLM-native CLI:** Auth findings MUST render with: `route`, `severity`, `cwe_id`, `location`, `summary` (LLM-generated, ≤ 240 chars), and `detail` available in JSON/dashboard. This keeps logs useful for Cursor/Codex/CI log ingestion without opening HTML.
+
+**Implementation notes:**
+- Dashboard subprocess: reuse the same code path as `sentinel dashboard` (uvicorn/static server); scan blocks until scan work completes, then starts the dashboard in the **background**, prints the local URL, and returns the shell prompt (or keep foreground behind a `--dashboard-foreground` future flag if needed).
+- `--quiet` always implies **no** auto-dashboard; stderr-only errors on top of artifact writes.
 
 CLI uses `rich` for colorized table output and progress bars — looks good in terminal recordings for Twitter demos.
 
@@ -1119,11 +1185,11 @@ Good public demo candidates (pick one at launch):
 ### Demo Script (for Twitter video)
 
 ```
-1. "Let me run Sentinel on [repo]" — terminal, single command
-2. Attack surface comes back: 3 subdomains, 1 dangling CNAME → "this is takeover-able"
-3. Dep risk: 2 reachable CVEs highlighted → show the call trace
-4. Auth: replay a past PR that shipped a missing-auth route → "Sentinel would have caught this"
-5. Dashboard screengrab — everything in one view
+1. "Let me run Sentinel on [repo]" — terminal, single `sentinel scan` (no second command)
+2. Rich CLI: attack surface — 3 subdomains, 1 dangling CNAME → "this is takeover-able"
+3. Rich CLI: dep risk — 2 reachable CVEs → show the call trace in the table
+4. Rich CLI: auth row with short LLM rationale for a risky route
+5. Browser (auto-opened dashboard) — same findings, deeper triage view
 ```
 
 ### Demo Mode
@@ -1172,7 +1238,7 @@ startCommand = "celery -A sentinel.worker beat --scheduler redbeat.RedBeatSchedu
 ### Environment Variables
 
 ```env
-# GitHub App
+# GitHub App (hosted API + workers only)
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=   # base64-encoded PEM
 GITHUB_WEBHOOK_SECRET=
@@ -1183,12 +1249,49 @@ REDIS_URL=redis://...
 
 # External APIs
 SHODAN_API_KEY=
-ANTHROPIC_API_KEY=
+ANTHROPIC_API_KEY=        # or OPENAI_API_KEY when llm.provider=openai
 
 # Optional
+OPENAI_API_KEY=
 SLACK_WEBHOOK_URL=        # for critical CVE notifications
 SMTP_URL=                 # for email notifications
 ```
+
+#### Who configures what?
+
+| Actor | What they do |
+|-------|----------------|
+| **Sentinel operator** (you run sentinel.dev or self-host) | Sets **all** variables in the table below for API + worker + scheduler services (Railway, Docker, etc.). End users never paste `GITHUB_APP_PRIVATE_KEY`. |
+| **Customer installing the GitHub App** | **No env vars.** They authorize the App in GitHub’s UI; OAuth/installation grants scope. Optional future: BYOK LLM key or org Shodan key in a settings screen — not required for v1. |
+| **CLI user** (`pip install` on a laptop or CI) | Only the keys for the **stages they run** (see matrix). Use a shell, `.env` loaded by the CLI, or CI secrets — never commit secrets into `sentinel.yml`. |
+
+#### Required vs optional (by deployment)
+
+**A) Hosted Sentinel (FastAPI + Celery — one operator deployment)**
+
+| Variable | Required? | If missing |
+|----------|-----------|------------|
+| `GITHUB_APP_ID` | **Yes** | Cannot verify webhooks or call GitHub as the App |
+| `GITHUB_APP_PRIVATE_KEY` | **Yes** | Cannot mint installation tokens |
+| `GITHUB_WEBHOOK_SECRET` | **Yes** | Must reject unsigned webhooks (or dev-only bypass behind explicit flag) |
+| `DATABASE_URL` | **Yes** | No findings persistence, installs, or multi-tenant state |
+| `REDIS_URL` | **Yes** | No Celery queue / RedBeat schedule |
+| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** for PR auth review workers | LLM jobs fail; other workers may still run |
+| `SHODAN_API_KEY` | **No** (recommended) | Attack-surface stage degrades: skip or reduce Shodan-backed host/port enrichment |
+| `SLACK_WEBHOOK_URL`, `SMTP_URL` | **No** | No outbound notifications |
+
+**B) Local CLI only (no App, no your SaaS backend)**
+
+| Variable | Required? | If missing |
+|----------|-----------|------------|
+| `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | **Yes** if `auth_review` / auth stage enabled | Auth stage errors or skips with clear message |
+| `GITHUB_TOKEN` | **No** for public `git clone` / API | **Yes** for private repos or higher rate limits |
+| `SHODAN_API_KEY` | **No** | Weaker or empty Shodan-based surface signals; Subfinder/DNS paths still work where no key is needed |
+| App/DB/Redis vars | **Not used** | — |
+
+**C) GitHub Actions using `sentinel scan`**
+
+Same as **B**, but secrets live in the repo/org **Actions secrets** (e.g. `ANTHROPIC_API_KEY`, optional `SHODAN_API_KEY`, `GITHUB_TOKEN` is usually automatic via `permissions:`).
 
 ---
 
@@ -1198,7 +1301,7 @@ SMTP_URL=                 # for email notifications
 
 | Feature | Description |
 |---------|-------------|
-| **Public Scanner** | Scan any public GitHub repo without install — tweet-scale discovery mode |
+| **Hosted public scanner** | From sentinel.dev: queue scans of public repo URLs without local CLI (rate-limited, abuse controls; distinct from GitHub App install) |
 | **Org-wide view** | Single dashboard for all repos in a GitHub org, rolled-up risk score |
 | **Go / Rust / Java support** | Extend dep analysis to more ecosystems |
 | **Secrets detection** | Scan commits for leaked API keys, credentials |
@@ -1222,6 +1325,7 @@ SMTP_URL=                 # for email notifications
 | Decision | Choice | Why |
 |----------|--------|-----|
 | GitHub App vs Actions | App | One-click install, no repo commit needed, better UX |
+| App install vs CLI | Both | App gates **hosted** automation; **local CLI** may scan any repo the user can read (G9 / NG5) |
 | OSV.dev vs Snyk | OSV.dev | Free, open, machine-readable, no rate limits on bulk |
 | Cache CVEs vs live | Cache (24hr) | Latency: 150 pkgs × 200ms = 30s unacceptable |
 | tree-sitter vs regex | tree-sitter | Correct AST parsing, handles edge cases, multi-language |
