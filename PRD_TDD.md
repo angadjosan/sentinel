@@ -229,7 +229,7 @@ $ sentinel report --repo org/repo --format json > report.json
 | AI Review | Anthropic Claude API (claude-sonnet-4-6) |
 | Dashboard | Next.js 16 (App Router) |
 | CLI | Python, Click + Rich |
-| Deployment | Docker Compose (self-host) / Railway or Fly.io (hosted) |
+| Deployment | Railway (API + workers), Vercel (dashboard), Supabase (DB), Upstash (Redis) |
 
 ---
 
@@ -1139,48 +1139,35 @@ Good public demo candidates (pick one at launch):
 
 ## 18. Infrastructure & Deployment
 
-### Self-Hosted (v1 primary)
+### Hosted SaaS
 
-```yaml
-# docker-compose.yml
-services:
-  api:
-    build: ./api
-    env_file: .env
-    ports: ["8000:8000"]
-    depends_on: [db, redis]
-  
-  worker:
-    build: ./api
-    command: celery -A sentinel.worker worker -Q high_priority,default,low_priority
-    depends_on: [db, redis]
-  
-  scheduler:
-    build: ./api
-    command: celery -A sentinel.worker beat
-    depends_on: [redis]
-  
-  dashboard:
-    build: ./dashboard
-    ports: ["3000:3000"]
-  
-  db:
-    image: postgres:18
-    volumes: [postgres_data:/var/lib/postgresql/data]
+| Service | Provider | Notes |
+|---------|----------|-------|
+| API (FastAPI) | Railway | One service, auto-deploy from `main` |
+| Celery workers | Railway | Separate Railway service, same repo/image |
+| Celery beat | Railway | Separate Railway service for scheduler |
+| PostgreSQL | Supabase | Managed Postgres, connection pooling via Supabase pooler |
+| Redis | Upstash | Serverless Redis, pay-per-request, no idle cost |
+| Dashboard (Next.js) | Vercel | Auto-deploy from `main`, edge CDN |
 
-  redis:
-    image: redis:8-alpine
+**Deploy flow:**
+1. Push to `main` → Railway redeploys API + workers, Vercel redeploys dashboard
+2. Supabase handles DB migrations via `supabase db push` in CI
+3. GitHub App webhook URL points to Railway API service URL
+
+**Railway services config (`railway.toml`):**
+```toml
+[services.api]
+startCommand = "uvicorn sentinel.main:app --host 0.0.0.0 --port $PORT"
+
+[services.worker]
+startCommand = "celery -A sentinel.worker worker -Q high_priority,default,low_priority --concurrency 4"
+
+[services.scheduler]
+startCommand = "celery -A sentinel.worker beat --scheduler redbeat.RedBeatScheduler"
 ```
 
-One-command setup: `docker compose up -d`  
-GitHub App registration: documented in README, takes 5 minutes
-
-### Hosted SaaS (v2)
-
-- Deploy API + workers on Railway or Fly.io
-- PostgreSQL: Supabase or Railway Postgres
-- Redis: Upstash (serverless Redis)
-- Dashboard: Vercel
+> Celery beat uses [redbeat](https://github.com/sibson/redbeat) so the schedule lives in Upstash Redis rather than a local file — safe for stateless Railway containers.
 
 ### Environment Variables
 
