@@ -220,14 +220,14 @@ $ sentinel report --repo org/repo --format json > report.json
 | Layer | Technology |
 |-------|-----------|
 | API | Python 3.12, FastAPI |
-| Task Queue | Celery 5.x + Redis 7 |
-| Database | PostgreSQL 16 |
-| Cache | Redis 7 |
+| Task Queue | Celery 5.x + Redis 8 |
+| Database | PostgreSQL 18 |
+| Cache | Redis 8 |
 | Attack Surface | subfinder, httpx, Shodan API, dnspython |
 | Dep Analysis | custom parser + OSV.dev REST API |
 | Reachability | tree-sitter (Python/JS AST) |
 | AI Review | Anthropic Claude API (claude-sonnet-4-6) |
-| Dashboard | Next.js 14 (App Router) |
+| Dashboard | Next.js 16 (App Router) |
 | CLI | Python, Click + Rich |
 | Deployment | Docker Compose (self-host) / Railway or Fly.io (hosted) |
 
@@ -1031,7 +1031,7 @@ def parse_llm_response(raw: str) -> List[AuthFindingResponse]:
 
 ## 15. Dashboard & CLI
 
-### Dashboard (Next.js 14)
+### Dashboard (Next.js 16)
 
 **Pages:**
 - `/` — Landing page (install CTA)
@@ -1165,11 +1165,11 @@ services:
     ports: ["3000:3000"]
   
   db:
-    image: postgres:16
+    image: postgres:18
     volumes: [postgres_data:/var/lib/postgresql/data]
-  
+
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
 ```
 
 One-command setup: `docker compose up -d`  
