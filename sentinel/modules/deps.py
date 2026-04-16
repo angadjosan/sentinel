@@ -19,12 +19,14 @@ from sentinel.parsers.package_json import parse_package_json
 logger = logging.getLogger(__name__)
 
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
+OSV_VULN_URL = "https://api.osv.dev/v1/vulns/{}"
 
 # ---------------------------------------------------------------------------
 # OSV query helpers
 # ---------------------------------------------------------------------------
 
 _BATCH_SIZE = 100
+_DETAIL_CONCURRENCY = 20  # max parallel vuln detail fetches
 
 
 async def query_osv_batch(packages: list[dict]) -> list[dict]:
@@ -35,11 +37,11 @@ async def query_osv_batch(packages: list[dict]) -> list[dict]:
         {"name": str, "version": str, "ecosystem": "PyPI" | "npm"}
 
     Returns the raw ``results`` list from the OSV response — one element per
-    input package (each element is a dict with a ``"vulns"`` key, or ``{}``
-    if no vulnerabilities were found).
+    input package (each element is a dict with a ``"vulns"`` key containing
+    full vulnerability details, or ``{}`` if no vulnerabilities were found).
 
-    Network / timeout errors are logged as warnings and an empty list is
-    returned so callers can continue gracefully.
+    Note: The batch endpoint only returns {id, modified} per vuln. We fetch
+    full details for each unique vuln ID in parallel.
     """
     if not packages:
         return []
@@ -60,7 +62,30 @@ async def query_osv_batch(packages: list[dict]) -> list[dict]:
             response = await client.post(OSV_BATCH_URL, json={"queries": queries})
             response.raise_for_status()
             data = response.json()
-            return data.get("results", [])
+            raw_results = data.get("results", [])
+
+            # Collect unique vuln IDs across all results
+            all_ids: set[str] = set()
+            for result in raw_results:
+                for vuln in result.get("vulns", []):
+                    if vuln.get("id"):
+                        all_ids.add(vuln["id"])
+
+            if not all_ids:
+                return [{} for _ in raw_results]
+
+            # Fetch full details for each unique ID in parallel
+            full_vulns = await _fetch_vuln_details(list(all_ids), client)
+            vuln_map: dict[str, dict] = {v["id"]: v for v in full_vulns if v.get("id")}
+
+            # Re-assemble results with full vuln objects
+            enriched = []
+            for result in raw_results:
+                ids = [v["id"] for v in result.get("vulns", []) if v.get("id")]
+                full = [vuln_map[i] for i in ids if i in vuln_map]
+                enriched.append({"vulns": full} if full else {})
+            return enriched
+
     except httpx.TimeoutException:
         logger.warning("OSV.dev query timed out — skipping batch of %d packages", len(packages))
         return []
@@ -70,6 +95,25 @@ async def query_osv_batch(packages: list[dict]) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("OSV.dev query failed: %s — skipping batch", exc)
         return []
+
+
+async def _fetch_vuln_details(vuln_ids: list[str], client: httpx.AsyncClient) -> list[dict]:
+    """Fetch full vuln details for a list of OSV IDs in parallel."""
+    import asyncio
+    semaphore = asyncio.Semaphore(_DETAIL_CONCURRENCY)
+
+    async def fetch_one(vuln_id: str) -> dict:
+        async with semaphore:
+            try:
+                resp = await client.get(OSV_VULN_URL.format(vuln_id), timeout=15.0)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Failed to fetch vuln %s: %s", vuln_id, exc)
+                return {"id": vuln_id}  # return stub so we still have the ID
+
+    results = await asyncio.gather(*[fetch_one(vid) for vid in vuln_ids])
+    return list(results)
 
 
 # ---------------------------------------------------------------------------
