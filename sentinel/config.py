@@ -43,6 +43,8 @@ class SentinelConfig(BaseSettings):
     fail_on: Literal["critical", "high", "medium", "low", "never"] = "high"
     dashboard_port: int = 4000
     dashboard_auto_open: bool = True
+    redis_url: str = "redis://localhost:6379/0"
+    github_webhook_secret: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
