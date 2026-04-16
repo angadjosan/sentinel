@@ -1,7 +1,7 @@
 """Shared Pydantic models for all Sentinel modules."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import uuid4
 
@@ -44,7 +44,7 @@ class AttackSurfaceFinding(BaseModel):
 class UnifiedReport(BaseModel):
     scan_id: str = Field(default_factory=lambda: str(uuid4()))
     repo: str
-    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     dep_findings: list[DepFinding] = Field(default_factory=list)
     code_security_findings: list[CodeSecurityFinding] = Field(default_factory=list)
     attack_surface_findings: list[AttackSurfaceFinding] = Field(default_factory=list)
