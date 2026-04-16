@@ -45,6 +45,8 @@ class SentinelConfig(BaseSettings):
     dashboard_auto_open: bool = True
     redis_url: str = "redis://localhost:6379/0"
     github_webhook_secret: Optional[str] = None
+    github_app_id: Optional[str] = None          # reads GITHUB_APP_ID
+    github_app_private_key: Optional[str] = None  # reads GITHUB_APP_PRIVATE_KEY (PEM or base64)
 
     @model_validator(mode="before")
     @classmethod

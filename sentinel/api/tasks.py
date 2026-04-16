@@ -49,24 +49,23 @@ def _installation_id_from_payload(payload: dict[str, Any]) -> int | None:
     max_retries=3,
 )
 def enqueue_pr_review(self, payload: dict[str, Any]) -> dict[str, Any]:
-    """Run PR security review (code + deps on diff)."""
+    """Run PR security review (code + deps on diff), then post GitHub Check Run."""
     from sentinel.scan import run_scan
+    from sentinel.github.auth import get_installation_token
+    from sentinel.github.checks import post_check_run, post_pr_comment
 
     config = load_config()
     repo_url = _repo_url_from_payload(payload)
     installation_id = _installation_id_from_payload(payload)
 
-    pr_number: int | None = None
-    pr_data = payload.get("pull_request")
-    if isinstance(pr_data, dict):
-        pr_number = pr_data.get("number")
+    pr_data = payload.get("pull_request", {})
+    pr_number: int | None = pr_data.get("number") if isinstance(pr_data, dict) else None
+    head_sha: str | None = pr_data.get("head", {}).get("sha") if isinstance(pr_data, dict) else None
 
-    logger.info(
-        "PR review scan: repo=%s pr=%s installation=%s",
-        repo_url,
-        pr_number,
-        installation_id,
-    )
+    # repo slug for Check Run API (owner/repo)
+    repo_slug = payload.get("repository", {}).get("full_name", "")
+
+    logger.info("PR review scan: repo=%s pr=%s installation=%s", repo_url, pr_number, installation_id)
 
     try:
         report = asyncio.run(
@@ -77,6 +76,17 @@ def enqueue_pr_review(self, payload: dict[str, Any]) -> dict[str, Any]:
                 pr_number=pr_number,
             )
         )
+
+        # Post results back to GitHub if we have an installation token
+        if installation_id and head_sha and repo_slug:
+            async def _post_results() -> None:
+                token = await get_installation_token(installation_id)
+                await post_check_run(repo_slug, head_sha, report, token)
+                if pr_number:
+                    await post_pr_comment(repo_slug, pr_number, report, token)
+
+            asyncio.run(_post_results())
+
     except Exception as exc:
         logger.error("PR review scan failed: %s", exc, exc_info=True)
         raise self.retry(exc=exc, countdown=2 ** self.request.retries * 30)

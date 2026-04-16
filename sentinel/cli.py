@@ -131,6 +131,11 @@ def scan(
     # 4. Write report
     report_path = write_report(report, config.output_dir)
 
+    # 4a. Start dashboard (non-quiet mode only)
+    if not quiet and config.dashboard_auto_open:
+        from sentinel.dashboard_server import start_dashboard
+        start_dashboard(port=config.dashboard_port, auto_open=True, report_path=report_path)
+
     # 5. Print findings + summary
     if not quiet:
         if report.dep_findings:
@@ -143,6 +148,22 @@ def scan(
     # 6. Exit 1 if findings breach threshold
     if _should_fail(report, config.fail_on):
         sys.exit(1)
+
+
+@cli.command()
+@click.option("--report", default=None, help="Path to findings.json")
+@click.option("--port", default=4000, help="Port to serve on")
+def dashboard(report, port):
+    """Open the local security findings dashboard."""
+    from sentinel.dashboard_server import start_dashboard
+    from sentinel.config import load_config
+    config = load_config()
+    start_dashboard(
+        port=port or config.dashboard_port,
+        auto_open=config.dashboard_auto_open,
+        report_path=report,
+        blocking=True,
+    )
 
 
 @cli.command("show")

@@ -1,0 +1,14 @@
+[build]
+builder = "NIXPACKS"
+
+[[services]]
+name = "api"
+startCommand = "uvicorn sentinel.api.app:app --host 0.0.0.0 --port $PORT"
+
+[[services]]
+name = "worker-high"
+startCommand = "celery -A sentinel.api.tasks.celery_app worker -Q high_priority -c 2"
+
+[[services]]
+name = "worker-default"
+startCommand = "celery -A sentinel.api.tasks.celery_app worker -Q default,low_priority -c 1"
