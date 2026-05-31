@@ -32,14 +32,11 @@ Scans a diff for vulnerabilities. If no file IDs are given, scans the whole diff
 **Step 1 — Context graph update (runs first):**
 Takes the diff and materializes it as new nodes in the context graph. New nodes are tagged as such so the graph always knows which parts of its architecture are freshly introduced vs. established. This is the only place the context graph is written to — there is no separate build step.
 
-**Step 2 — Exploit path analysis:**
-As the agent reads through the diff, it overlays the new nodes on the existing context graph and asks: *does adding these nodes open a new attack path through the graph?* A new handler that skips auth is only flagged if the graph shows it's reachable from an untrusted entry point; a new utility that touches secrets is only flagged if there's a path from user-controlled input to it.
-
-**Step 3 — Standard scans:**
-- **SAST:** Agent inspects the diff in context of the updated graph.
-- **SCA:** Sources dependency vulnerabilities from published CVEs; checks software supply chain.
+**Step 2 — Scan:**
+Agent reads the diff overlaid on the updated context graph. Does this change open a new attack path? A new handler that skips auth is only flagged if the graph shows it's reachable from an untrusted entry point. A pattern match (CVE, codesmell, secret) is only surfaced if the graph confirms it's actually reachable in this codebase.
+- **SAST:** novel and known vuln patterns in context of the graph
+- **SCA:** CVE matches filtered by reachability — not CVE count, but whether the vulnerable codepath is callable from this app
 - **Secret scanning**
-- **Reachability filter:** Prunes findings via context graph + traditional reachability analysis.
 
 Adds findings to the cloud database with an ID, context, and how to fix.
 
@@ -93,6 +90,51 @@ Reviews a plan (file, IDE plan mode output, or freeform) for security issues.
 
 - Queries the context graph for security concerns.
 - Updates the plan with better, more secure practices. With `--with-retry`, reruns automatically to verify the updated plan is clean of security issues
+
+## Context Graph
+
+The context graph is what makes contextual reasoning possible. Instead of re-reading the whole codebase on every scan, the agent pulls a 2–3-hop subgraph around the touched code — who calls this function, what middleware guards this route, does user input flow here — and reasons against that slice. That's what kills false positives and surfaces novel vulns.
+
+### Two layers
+
+**Structural (deterministic, built from code)**
+
+A Code Property Graph (CPG): AST + control flow + data flow fused into one model. Built with [tree-sitter](https://tree-sitter.github.io/), which parses any language incrementally with no dependencies.
+
+- **Nodes:** functions, routes, files, classes, middleware, external dependencies
+- **Edges:** `CALLS`, `IMPORTS`, `FLOWS_TO`, `GUARDED_BY`, `DEPENDS_ON`
+
+What we extract for security:
+- Route → middleware chain → handler (does every public route pass through auth?)
+- Data sources (`req.body`, query params) → where they flow (injection surface)
+- Which app code actually calls each dependency (SCA reachability: not "does this CVE match a library?" but "does this app ever reach the vulnerable codepath?")
+
+**Semantic (LLM-derived, layered on top)**
+
+Structural graphs tell you what the code does. Semantic labels tell you what it means.
+
+For each module, an agent reads the code and its structural neighbors and writes labels onto nodes: *"this is the JWT auth middleware," "this handler is the payment endpoint," "this module sanitizes user input before DB writes."*
+
+Each time `sentinel source` updates the graph with a new diff, an agent also writes developer intent onto the affected nodes: *"this commit added a new route that skips the rate limiter every sibling route uses."* This is the layer that catches novel vulns — a structural scan alone wouldn't see that pattern.
+
+### Onboarding
+
+On first use, `sentinel scan` detects an empty graph and runs a full-repo bootstrap before scanning: tree-sitter parses every file (structural pass), then an agent enriches each module with semantic labels (one LLM call per file cluster). This is the only slow run. After that, every update is incremental — only changed files get re-parsed and re-enriched.
+
+### Storage
+
+**Neo4j** — property graph with Cypher. Node properties carry semantic labels and security metadata. Edge types carry the relationship (`CALLS`, `GUARDED_BY`, etc.). Free tier is sufficient for most repos; self-hostable for air-gapped environments.
+
+### Query at scan time
+
+1. Extract the functions and routes touched by the diff.
+2. Pull each node's 2–3-hop neighborhood from the graph (callers, callees, middleware chain, data sources).
+3. Serialize that subgraph as context into the agent prompt alongside the diff.
+4. Agent reasons: is this change reachable and exploitable given the architecture?
+
+The agent never re-reads the full codebase. The graph is the memory.
+
+---
 
 ## Database
 - All findings stored here with IDs, context, and fix instructions.
