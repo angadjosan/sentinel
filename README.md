@@ -33,10 +33,12 @@ Scans a diff for vulnerabilities. If no file IDs are given, scans the whole diff
 Takes the diff and materializes it as new nodes in the context graph. New nodes are tagged as such so the graph always knows which parts of its architecture are freshly introduced vs. established. This is the only place the context graph is written to — there is no separate build step.
 
 **Step 2 — Scan:**
-Agent reads the diff overlaid on the updated context graph. Does this change open a new attack path? A new handler that skips auth is only flagged if the graph shows it's reachable from an untrusted entry point. A pattern match (CVE, codesmell, secret) is only surfaced if the graph confirms it's actually reachable in this codebase.
-- **SAST:** novel and known vuln patterns in context of the graph
-- **SCA:** CVE matches filtered by reachability — not CVE count, but whether the vulnerable codepath is callable from this app
-- **Secret scanning**
+This is the scan. The agent looks at the raw diff and the updated context graph together and asks: does this change open a new attack path?
+
+Three scan types run here:
+- **SAST:** inspects the diff for known and novel vuln patterns, reasoned against the graph
+- **SCA:** traditional software supply chain analysis (CVE matching, dependency vulnerabilities) — plus reachability analysis on the graph to confirm whether the vulnerable code is actually callable from this app
+- **Secret scanning:** traditional secret detection
 
 Adds findings to the cloud database with an ID, context, and how to fix.
 
