@@ -29,14 +29,24 @@ Findings that have been manually ignored get suppressed via a fingerprint-based 
 
 Scans a diff for vulnerabilities. If no file IDs are given, scans the whole diff.
 
-- **SAST:** Agent inspects the diff in context of the codebase graph — does the incoming code create vulnerabilities relative to the architecture?
+**Step 1 — Context graph update (runs first):**
+Takes the diff and materializes it as new nodes in the context graph. New nodes are tagged as such so the graph always knows which parts of its architecture are freshly introduced vs. established. This is the only place the context graph is written to — there is no separate build step.
+
+**Step 2 — Exploit path analysis:**
+As the agent reads through the diff, it overlays the new nodes on the existing context graph and asks: *does adding these nodes open a new attack path through the graph?* A new handler that skips auth is only flagged if the graph shows it's reachable from an untrusted entry point; a new utility that touches secrets is only flagged if there's a path from user-controlled input to it.
+
+**Step 3 — Standard scans:**
+- **SAST:** Agent inspects the diff in context of the updated graph.
 - **SCA:** Sources dependency vulnerabilities from published CVEs; checks software supply chain.
 - **Secret scanning**
 - **Reachability filter:** Prunes findings via context graph + traditional reachability analysis.
 
 Adds findings to the cloud database with an ID, context, and how to fix.
-- Local run → loaded as a dev session
-- CI run → loaded onto the branch with a CI ID
+
+**Context graph lifecycle:**
+- Local run → updates the context graph for the dev session; findings loaded as a dev session.
+- CI run → updates an isolated branch context graph in the cloud; findings loaded onto the branch with a CI ID.
+- CD → does not re-run `sentinel source`; instead merges the branch context graph into the main graph once the branch lands.
 
 ---
 
@@ -84,21 +94,11 @@ Reviews a plan (file, IDE plan mode output, or freeform) for security issues.
 - Queries the context graph for security concerns.
 - Updates the plan with better, more secure practices. With `--with-retry`, reruns automatically to verify the updated plan is clean of security issues
 
----
-
-## Architecture
-
-### Database
+## Database
 - All findings stored here with IDs, context, and fix instructions.
 - Dashboard for monitoring.
 - LLM-queryable.
-- Hosts the production view of the context graph.
-
-### Context Graph
-- Built incrementally: on every diff in CD, an agent reverse-engineers the session and reasoning from the diff and adds it to the graph.
-- To bootstrap from scratch: replay commit by commit.
-
----
+- Hosts the production context graph. Branch graphs (written by CI) are merged in here on deploy; the graph always reflects the architecture of `main`.
 
 ## Evals
 
