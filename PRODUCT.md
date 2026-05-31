@@ -1,3 +1,5 @@
+This is close. Will do line-by-line and make it perfect. Then will draw architecture diagram (or have claude make it)
+
 # Sentinel — Product Specification
 
 Sentinel is an agent harness for application security. The core product is a set of reasoning agents — each with a defined tool set, memory access pattern, and loop structure — that work together to find, verify, and remediate vulnerabilities. The infrastructure (graph store, findings DB, CLI) exists to make those agents smarter and faster, not the other way around.
