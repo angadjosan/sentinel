@@ -1,3 +1,5 @@
+https://aisle.com/blog/ai-cybersecurity-after-mythos-the-jagged-frontier
+
 
 # Why Claude Thinks we win
 
