@@ -1,5 +1,7 @@
 This is close. Will do line-by-line and make it perfect. Then will draw architecture diagram (or have claude make it)
 
+Large enterprises don't have very large diffs, so it's okay to think in terms of loading everything into context, loading the context graph in as well, and doing it in terms of small diffs now. To do, think about how Claude Code and CodeCodex handle large diffs and large codebases. We might have to do some grepping.
+
 Things I don't like in this:
 1. They need to focus on not every single thing is an agent. Some of these things are just normal. For example, secret scanning should be normal.
 2. The bring your own key kind of auth system is okay and could be made better and more intuitive, but it's fine for an MVP.Third, make this a new line, please. All of these agents shouldn't really be separated. I think I don't really like that. Context graph is probably fine. We can probably do real engineering there. I don't like the orchestration portion.
