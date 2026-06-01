@@ -1,5 +1,9 @@
 This is close. Will do line-by-line and make it perfect. Then will draw architecture diagram (or have claude make it)
 
+Things I don't like in this:
+1. They need to focus on not every single thing is an agent. Some of these things are just normal. For example, secret scanning should be normal.
+2. The bring your own key kind of auth system is okay and could be made better and more intuitive, but it's fine for an MVP.Third, make this a new line, please. All of these agents shouldn't really be separated. I think I don't really like that. Context graph is probably fine. We can probably do real engineering there. I don't like the orchestration portion.
+
 # Sentinel — Product Specification
 
 Sentinel is an agent harness for application security. The core product is a set of reasoning agents — each with a defined tool set, memory access pattern, and loop structure — that work together to find, verify, and remediate vulnerabilities. The infrastructure (graph store, findings DB, CLI) exists to make those agents smarter and faster, not the other way around.

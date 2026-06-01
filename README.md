@@ -18,9 +18,6 @@ A naked LLM can't do this either: no persistent architectural context (it re-der
 # Solution
 
 An open source cybersecurity agent harness that integrates with all model providers.
-
-Findings that have been manually ignored get suppressed via a fingerprint-based suppression store (file + line + vuln type hash) carried forward on the context graph.
-
 ---
 
 ## Commands
@@ -29,11 +26,15 @@ Findings that have been manually ignored get suppressed via a fingerprint-based 
 
 Scans a diff for vulnerabilities. If no file IDs are given, scans the whole diff.
 
+Findings that have been manually ignored get suppressed via a fingerprint-based suppression store (file + line + vuln type hash) carried forward on the context graph.
+
 **Step 1 — Context graph update (runs first):**
 Takes the diff and materializes it as new nodes in the context graph. New nodes are tagged as such so the graph always knows which parts of its architecture are freshly introduced vs. established. This is the only place the context graph is written to — there is no separate build step.
 
 **Step 2 — Scan:**
 This is the scan. The agent looks at the raw diff and the updated context graph together and asks: does this change open a new attack path?
+
+Thing to think about here: we need to think in terms of loading up the LLM with fresh context in terms of new CVEs from the OWASP website.
 
 Three scan types run here:
 - **SAST:** inspects the diff for known and novel vuln patterns, reasoned against the graph
@@ -157,3 +158,7 @@ Published as: raw model vs. raw model + Sentinel.
 ## Long Vision
 
 Sentinel becomes an open prompt: a powerful natural-language interface for querying security state across your entire codebase.
+
+
+1. A set of open source evals for all cybersecurity things.
+2. An RL environment for labs to learn how to use Sentinel.
