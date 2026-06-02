@@ -1,3 +1,23 @@
+Things to think about
+
+- how to fit into context. Manage large and small diffs. Manage token efficiency. Large enterprises don't have very large diffs, so it's okay to think in terms of loading everything into context, loading the context graph in as well, and doing it in terms of small diffs now. To do, think about how Claude Code and CodeCodex handle large diffs and large codebases. We might have to do some grepping.
+
+- How to build/query the graph. Think about graph as a better version of AST. Reverse engineer - how would we query/attack it?
+
+-- https://claude.ai/chat/9bab4460-80a1-4aa0-beb5-d894b13a32d5
+
+-- https://github.com/DeusData/codebase-memory-mcp
+
+-- Think about access controls as metadata in the graph. Security roles built into the graph
+
+-- Trees: https://tree-sitter.github.io/tree-sitter/
+
+- How to manage cloud runs, parallelism, ease of developer use (login to API, switch models, good Cli + skill, minimizing token use)
+
+- Storing session traces really well
+
+- How to build replicable pentest runner
+
 # Problem
 
 1. Everyone can now build software products. Thus, everyone needs application security.
@@ -18,6 +38,7 @@ A naked LLM can't do this either: no persistent architectural context (it re-der
 # Solution
 
 An open source cybersecurity agent harness that integrates with all model providers.
+
 ---
 
 ## Commands
@@ -52,18 +73,41 @@ Adds findings to the cloud database with an ID, context, and how to fix.
 
 ### `sentinel pentest <id | description | empty>`
 
-Attempts to actually exploit a vulnerability in a realistic replica of the app.
+Attempts to actually exploit a vulnerability in a realistic replica of the app. Confirmation requires a runtime oracle — agent hypothesis alone is not sufficient.
 
-A per-app `sentinel-app-runner.sh` defines how to boot the environment (editable; also used by CI).
+A per-app `sentinel-app-runner.sh` defines how to boot the environment (editable; also used by CI). In addition to the standard boot, it defines sanitizer build variants used by the pentest step:
+
+- `build:asan` — compiled with `-fsanitize=address,undefined` (heap overflow, stack overflow, use-after-free, double-free, UBSan violations)
+- `build:msan` — compiled with `-fsanitize=memory` (uninitialized memory reads — only available on LLVM/Clang)
+- `build:tsan` — compiled with `-fsanitize=thread` (data races, lock-order violations)
+- `build:coverage` — compiled with LLVM coverage instrumentation (`-fprofile-instr-generate -fcoverage-mapping`) for the fuzzing feedback loop
+
+These variants are optional for interpreted-language apps but required for any target with native code (C/C++, CGo, Python C extensions, Node native addons, JNI, Rust FFI).
 
 **Procedure (runs in the cloud):**
-- Boot the app with production-like secrets and config.
-- Load the target vuln from ID or natural language. If empty, do agent-driven endpoint fuzzing with source code access.
-- Attempt exploitation. The agent greps source while attacking, enabling targeted exploits over generic payloads.
+
+1. **Boot** the app with production-like secrets and config (plain build).
+2. **Instrument** — if native code is detected, boot a parallel sanitizer-enabled instance (`build:asan`). Attach a debugger to it. The agent can inject debug logic, add trace points, and inspect heap state directly on this instance.
+3. **Load target** — from vuln ID, natural language description, or empty (agent-driven). If empty, rank functions by attack surface and run endpoint fuzzing with source code access.
+4. **Exploit attempt** — the agent attacks both the plain and sanitizer builds simultaneously, grepping source while probing, enabling targeted exploits over generic payloads.
+5. **Fuzzing tier** (for memory safety and native code) — for each suspicious code location, the agent generates a fuzzer harness targeting that function. The harness is compiled with `build:asan` + `build:coverage` and run through libFuzzer. After each fuzzing round, LLVM coverage data (`coverage.profdata`) is processed and executed branches with ±3 lines of surrounding source are fed back to the agent to direct the next iteration. This loop continues until a sanitizer crash confirms the hypothesis or coverage plateaus.
+6. **Concurrency tier** — for code with shared mutable state, goroutines, threads, or async patterns, a `build:tsan` instance is run under concurrent load. The agent drives concurrent requests to trigger scheduling windows that expose races.
+7. **Native extension tier** — for apps with Python C API, Node N-API, JNI, CGo, or Rust FFI, the agent generates function-level fuzzer harnesses that bypass the HTTP interface entirely, targeting library internals unreachable through API endpoints.
+
+**Confirmation oracle:**
+
+A finding is confirmed only if one of the following is true — agent judgment alone is not an outcome:
+- A sanitizer error fired on a reproducible input (`ASan`, `MSan`, `UBSan`, or `TSan` error with stack trace)
+- A deterministic behavioral proof was demonstrated: data exfiltrated, authentication bypassed, command executed, privilege escalated
+
+This gate is the equivalent of Mythos's "run the actual project, confirm or reject suspicions with a debugger." Every confirmed finding carries the sanitizer stack trace or the behavioral proof as evidence in the database record.
 
 **Outcomes:**
-- Exploitable → status: `reproduced via pentest`. Additional fix detail added.
+- Sanitizer crash confirmed → status: `reproduced via pentest (memory safety)` — includes sanitizer type, stack trace, and triggering input
+- TSan race confirmed → status: `reproduced via pentest (concurrency)` — includes racing goroutine/thread stacks
+- Behavioral exploit confirmed → status: `reproduced via pentest (logic)` — includes proof artifact
 - Not exploitable → status: `not reproducible`. Suppressed or discarded depending on settings.
+- Fuzzing exhausted, no crash → status: `not reproducible (fuzz exhausted)` — includes coverage plateau data
 
 ---
 
@@ -111,6 +155,7 @@ What we extract for security:
 - Route → middleware chain → handler (does every public route pass through auth?)
 - Data sources (`req.body`, query params) → where they flow (injection surface)
 - Which app code actually calls each dependency (SCA reachability: not "does this CVE match a library?" but "does this app ever reach the vulnerable codepath?")
+- FFI boundaries — where managed code crosses into native code, surfacing it as a pentest target for the sanitizer and fuzzing tiers
 
 **Semantic (LLM-derived, layered on top)**
 
@@ -149,9 +194,14 @@ The agent never re-reads the full codebase. The graph is the memory.
 
 Published as: raw model vs. raw model + Sentinel.
 
-1. Can the agent successfully load the app? (Node, Python, etc.)
+1. Can the agent successfully load the app? (Node, Python, C/C++, Go, etc.)
 2. Can the agent surface all true positive vulnerabilities in the environment?
+   - Web/logic vulns: OWASP Top 10, auth bypass, injection, SSRF
+   - Memory safety vulns: heap overflow, use-after-free, uninitialized read, integer overflow → corruption
+   - Concurrency vulns: data races, lock-order violations
 3. Can the agent correctly eliminate false positives — turning them into true negatives — via pentesting?
+4. Does the sanitizer oracle fire on all confirmed memory safety findings? (Zero confirmed memory safety findings without a sanitizer stack trace is a passing grade; any confirmed finding without one is a failing grade.)
+5. Coverage: what fraction of crash-triggering inputs were found by the fuzzing tier vs. required manual harness authoring?
 
 ---
 

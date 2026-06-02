@@ -1,5 +1,8 @@
 https://aisle.com/blog/ai-cybersecurity-after-mythos-the-jagged-frontier
-
+https://x.com/houjun_liu/status/2054233718269595869
+https://arxiv.org/pdf/2605.08382
+https://github.com/sisl/SecureForge
+https://cycode.com/blog/context-intelligence-graph-ai-application-security/
 
 # Why Claude Thinks we win
 
@@ -20,11 +23,7 @@ EVERYBODY has the same list of features. Just build them better. Closer to custo
 
 The only thing that matters is "is my slop from the slop cannon secure?" Fundamentally, the rest of this is noise.
 
-https://x.com/paul_cal/status/2042139619840475491
-
 Remember, competitors are for the enterprise market. If we handle this natively, we win our market. Consider — these are all paradigms that need evals. But we let the model get better. Thin harness. Just build the tools for the above, no skills / context bloat. Just tools and queryable data for the above.
-
-https://cycode.com/blog/context-intelligence-graph-ai-application-security/
 
 Look at the comparison pages: https://www.aikido.dev/comparison/snyk-alternative?utm_source=google&utm_medium=cpc&utm_campaign=20133222939&utm_adgroup=155320928630&device=c&matchtype=e=&gclid=CjwKCAjw8uTQBhAdEiwAVvtJygHLDa1Btzgf328QZvgREsgzEZHXHzovvvKJg5VDr5vPA6PiKKF3RRoCT4sQAvD_BwE&utm_term=snyk&utm_campaign=20133222939&utm_source=google&utm_medium=cpc&utm_content=155320928630&hsa_acc=4523967680&hsa_cam=20133222939&hsa_grp=155320928630&hsa_ad=805434417273&hsa_src=g&hsa_tgt=kwd-398981753190&hsa_kw=snyk&hsa_mt=e&hsa_net=adwords&hsa_ver=3&gad_source=1&gad_campaignid=20133222939&gbraid=0AAAAApQ3BFgiG-2NJ2Mo0EwenHGHJ8l75&gclid=CjwKCAjw8uTQBhAdEiwAVvtJygHLDa1Btzgf328QZvgREsgzEZHXHzovvvKJg5VDr5vPA6PiKKF3RRoCT4sQAvD_BwE
 
