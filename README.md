@@ -46,13 +46,13 @@ Findings that have been manually ignored get suppressed via a fingerprint-based 
 The diff is sent to Sentinel's cloud worker, which materializes it as new or updated nodes in the branch or dev session graph. tree-sitter re-parses only the changed byte ranges (incremental — O(change), not O(file)), upserts the affected nodes, and marks them `is_new: true`. An agent then writes semantic intent onto the new nodes. This is the only place the context graph is written to — there is no separate build step. See **Context Graph** for the full schema.
 
 **Step 2 — Context loading:**
-Extracts the functions and routes touched by the diff. Traverses the graph from those seed nodes — following edges to completion, bounded by edge kind rather than hop count. Serializes the resulting subgraph as structured context into the agent prompt alongside the raw diff. The agent never re-reads the full codebase. See **Context Management** for how this works.
+Extracts the functions and routes touched by the diff. Traverses the graph from those seed nodes — following security-critical edges to produce a bootstrap subgraph serialized into the agent's starting context. The agent then reads source files directly as it reasons, using the graph as a navigation index for what to read. Live graph queries remain available throughout the scan for paths discovered while reading code. See **Context Management** for how this works.
 
 **Step 3 — Scan:**
 The agent looks at the raw diff and the serialized subgraph together and asks: does this change open a new attack path?
 
 Three scan types run here:
-- **SAST:** inspects the diff for known and novel vuln patterns, reasoned against the graph.
+- **SAST:** the agent reads the diff and the affected source files directly, using the graph to orient — which routes are entry points, which functions are sinks, what guards exist. It looks for: injection patterns (SQL, command, template, path traversal) on taint paths from untrusted parameters to sinks; auth gaps (a new or modified route that skips middleware every sibling route uses, detectable via missing `GUARDED_BY` edges); privilege escalation paths (anonymous entry points reaching admin-privileged functions); business logic flaws and novel vulns that don't match any signature — surfaced by comparing the semantic `intent` written on new nodes against the expected behavior of the surrounding architecture. A new handler whose intent diverges from its siblings (e.g. skips rate limiting, accepts a broader input set, returns data the caller shouldn't see) is flagged regardless of whether any CVE or rule matches it.
 - **SCA:** CVE matching and dependency vulnerability analysis against the NVD/NIST and OSV.dev feeds — plus reachability analysis on the graph to confirm whether the vulnerable code is actually callable from this app. For statically typed languages, reachability is high-confidence. For dynamically typed languages (Python, Ruby, JavaScript), dynamic dispatch and monkey-patching mean reachability is a best-effort signal, not a guarantee — the agent notes this uncertainty explicitly in findings rather than suppressing them.
 - **Secret scanning:** entropy analysis and regex pattern matching detect credentials, API keys, and tokens in the diff. Graph-aware: detected secrets are traced through `FLOWS_TO` edges to identify whether they reach logged sinks, external HTTP calls, or persisted storage — distinguishing secrets that are merely present from secrets that are actively exfiltrated. Suppresses known-safe patterns (test fixtures, example values, documentation snippets) via a fingerprint allowlist.
 
@@ -91,7 +91,7 @@ Variants are optional for interpreted-language apps. For any target with native 
 
 **Source-aware pentest:**
 
-Before probing, the agent loads the context graph subgraph for the target finding: its node, callers, callees, data sources, and any `GUARDED_BY` or `FLOWS_TO` edges. This gives the agent a structural map of what to attack — which endpoints reach the vulnerable code, what inputs flow into it, what guards (if any) stand between the entry point and the sink. The agent greps source while probing, using the graph as a navigation index rather than reading files blindly.
+Before probing, the agent loads the context graph subgraph for the target finding — its node, callers, callees, data sources, and any `GUARDED_BY` or `FLOWS_TO` edges — and reads the relevant source files directly. The graph tells it where to look; reading the code tells it exactly what it's attacking. The agent uses the graph as a navigation index to identify which entry points reach the vulnerable sink, what guards stand in the way, and which call paths to target — then reads the actual handler and sink implementations before forming exploit payloads. Live graph queries remain available throughout the pentest run.
 
 **Procedure (runs in the cloud):**
 
@@ -136,14 +136,8 @@ Lists all vulnerabilities with their current status.
 
 ### `sentinel pull <id>`
 
-Applies the fix for a specific vulnerability ID to the local working tree.
 
-1. **Load finding** — fetches the finding record from the cloud database: vuln type, affected node(s), severity, and the remediation instructions the scanner generated.
-2. **Plan the fix** — the agent loads the finding's subgraph (entry point, sink, taint path, and any `GUARDED_BY` context) and drafts a minimal code change that closes the attack path without altering surrounding behavior.
-3. **Apply** — edits are written to the local working tree as a clean diff. Nothing is committed automatically; the developer reviews and commits.
-4. **Verify (optional)** — with `--run-pentest`, `sentinel pentest` is re-run against the patched code to confirm the finding no longer reproduces before the diff is presented.
-
-If the fix is non-trivial (e.g. an architectural change is required), the agent outputs a remediation plan instead of a code edit, with the specific changes described and the graph paths that need to change.
+**Load finding** — fetches the finding record from the cloud database: vuln type, affected node(s), severity, and the remediation instructions the scanner generated. The agent outputs a remediation plan with the specific changes described and the graph paths that need to change.
 
 ---
 
@@ -151,7 +145,7 @@ If the fix is non-trivial (e.g. an architectural change is required), the agent 
 
 Reviews a plan (a file path, piped content, or IDE plan-mode output) for security issues before any code is written. Accepts a file path, freeform text, or stdin.
 
-1. **Context load** — extracts every function, route, and data flow the plan references by name. Loads their subgraphs from the cloud graph, including existing `GUARDED_BY` edges and any prior `CONFIRMED_EXPLOIT` findings on those paths.
+1. **Context load** — extracts every function, route, and data flow the plan references by name. Loads their subgraphs from the cloud graph, including existing `GUARDED_BY` edges and any prior `CONFIRMED_EXPLOIT` findings on those paths. Also reads the source files for referenced functions and routes directly — the agent reasons against both the graph structure and the actual code.
 2. **Security review** — the agent evaluates the plan against the loaded context: does the proposed change remove a guard? Add an unauthenticated entry point to an existing handler? Introduce a new taint path to an existing sink?
 3. **Annotate** — outputs the plan with inline security comments. Issues are rated by severity; each suggestion cites the specific graph paths that motivated it.
 
@@ -165,7 +159,6 @@ Manages session traces.
 
 - `list` — shows all recorded runs (local and CI) with status, finding count, and token spend.
 - `show <id>` — streams the full agent trace for a run: every graph query, every prompt, every tool call, every finding. Useful for debugging why something was or wasn't flagged.
-- `replay <id>` — re-runs the agent on the exact same diff + graph snapshot as the original run. Deterministic: same diff, same graph state, same model. Used to verify that a model upgrade doesn't regress findings.
 
 All runs are stored as append-only JSONL traces in the cloud database. The trace format is designed to be LLM-queryable: `sentinel runs show <id> | ask "why was the SQL injection in auth.go not flagged?"`.
 
@@ -186,6 +179,8 @@ Cloud run output streams back to the terminal in real time. Runs can be cancelle
 
 ### Model and API configuration
 
+In the web dashboard, provider and model selection is a dropdown: Sentinel detects which API keys are configured and populates the available providers and their models automatically. Adding a key for a new provider makes its models immediately selectable — no config editing required.
+
 ```bash
 sentinel config set model claude-opus-4-8      # switch model
 sentinel config set provider anthropic          # anthropic | openai | google | local
@@ -198,50 +193,32 @@ Sentinel integrates with all major providers. Local model support (Ollama) is av
 ### Token efficiency
 
 Token spend is the main operational cost lever. Sentinel minimizes it by:
-- **Graph-serialized context:** the agent sees the full relevant subgraph, serialized at ~30–50 tokens per node (including semantic labels and edge annotations) rather than reading raw source files. A complete taint path through 20 nodes costs ~600–1,000 tokens; the equivalent source read — 20 functions averaging 40 lines each at ~10 tokens/line — would cost ~8,000 tokens.
 - **Incremental graph updates:** only changed nodes are re-parsed and re-enriched. Unchanged architecture is already in the graph.
 - **Scan parallelism:** SAST, SCA, and secret scanning share the same graph context load — it's serialized once per scan, not once per scan type.
 - **Suppression carry-forward:** ignored findings are suppressed via fingerprint before the agent sees them — they don't consume prompt tokens on future scans.
 
 Token spend per run is logged in the run trace and surfaced in `sentinel runs list`.
 
-### Session traces and replicability
-
-Every run — local dev session or CI — produces an append-only JSONL trace capturing: diff, graph snapshot, all agent prompts and responses, all tool calls, all findings. Traces are the source of truth for debugging and evals.
-
-The pentest step is reproducible by design: `sentinel.config.json` pins the boot procedure, the graph snapshot is stored with the run, and `sentinel runs replay <id>` re-runs against the exact same state. This means pentest results are auditable — you can prove to a reviewer exactly what exploit the agent demonstrated and under what conditions.
-
-### Replicable pentest runner
-
-The `sentinel.config.json` contract (described under `sentinel pentest`) replaces ad-hoc shell scripts with a structured, versionable declaration. Key properties:
-
-- **Agent-readable:** Sentinel parses the config before executing — it can reason about what build variants are available and choose the right exploit strategy without reading shell code.
-- **Validated at init time:** `sentinel init` type-checks the config and warns on missing variants before any pentest is attempted.
-- **Committed to the repo:** the config lives next to the code it describes. When the boot procedure changes, the diff is reviewable.
-- **Sanitizer variants are optional but structured:** for interpreted languages (Python, Node, Ruby), only `boot` and `healthcheck` are required. For native code, Sentinel detects this automatically and errors if `asan` is missing.
-
 ---
 
 ## Context Management
 
-The agent never reads the full codebase. It reads the graph.
+The agent reads the graph and the code together. The graph is a navigation index — it tells the agent where to look and what security properties the architecture has. Reading the code is how the agent actually understands what's there. Neither replaces the other.
 
 On every `sentinel source` run, context loading follows this procedure:
 
 **1. Extract touched nodes from the diff**
 The diff is parsed to identify which functions, routes, classes, and files were modified. These become the "seed nodes" for context loading.
 
-**2. Traverse the graph by edge kind**
-From each seed node, Sentinel traverses the graph to completion — following edges until there's nothing left to follow — bounded by edge kind, not hop count. Cutting traversal at an arbitrary depth would miss sinks, miss guards, miss the thing that matters. `max_hops` exists only as a cycle-protection cap, not as a tuning knob.
+**2. Pre-trace bootstrap serialization**
+From each seed node, Sentinel immediately traverses security-critical edges and serializes the result as the agent's starting context: direct `CALLS` chains from touched nodes, all `FLOWS_TO` edges to known sinks, all `GUARDED_BY` edges on routes in the traversal, and any `CONFIRMED_EXPLOIT` edges touching the affected nodes. This bootstrap gives the agent immediate structural orientation — which paths exist, what guards are present, what sinks are reachable — before it reads a line of code.
 
-What gets loaded varies by scan type:
+What gets pre-traced varies by scan type:
+- **SAST:** `FLOWS_TO` to terminal sinks; `GUARDED_BY` for every route in scope; 1-hop `CALLS` context around touched functions.
+- **SCA:** `CALLS` edges inward from each vulnerable dependency node — does any app code reach the vulnerable function?
+- **Pentest attack surface:** full `CALLS` tree from every `is_entry_point=true` node to the target sink; all `FLOWS_TO` taint paths; all `GUARDED_BY` edges.
 
-- **SAST:** follow all `FLOWS_TO` edges to their terminal sinks; pull `GUARDED_BY` edges for every route in the traversal; pull 1-hop `CALLS` context around touched functions for call-site reasoning.
-- **SCA:** for each vulnerable dependency node, follow `CALLS` edges inward — does any app code reach the vulnerable function? One pass, stops when it does or exhausts the graph.
-- **Pentest attack surface:** full `CALLS` tree from every `is_entry_point=true` node down to the target sink; all `FLOWS_TO` taint paths; all `GUARDED_BY` edges. The agent gets the complete structural picture of what it's attacking.
-
-**3. Serialize for the prompt**
-The subgraph is serialized into a compact structured format before being injected into the agent prompt:
+Bootstrap serialization format:
 
 ```
 [ROUTE] POST /api/users  auth_required=false  entry_point=true
@@ -252,24 +229,25 @@ The subgraph is serialized into a compact structured format before being injecte
   ⚠ NEW (this diff)
 ```
 
-Graph loads are cheap. The serialized subgraph is dense — ~30–50 tokens per node vs. ~300–800 tokens of raw source per function — and the graph lives in the cloud alongside the scan worker. Loading the full relevant subgraph is the right default; there's no reason to artificially truncate it. See **Graph size and context budgets** below for worst-case analysis.
+**3. Code reading + interactive graph queries**
+With the bootstrap context in hand, the agent reads source files directly — the diff, the touched functions, the sink implementations, the middleware chain. The graph tells it what to read; reading the code tells it what the code actually does.
 
-**4. Grepping as a fallback**
-If the agent encounters a symbol not in the graph (e.g. a dynamically constructed call), it can grep the source as a fallback. The graph is built to minimize how often this happens — but the escape hatch exists.
+The graph query API remains live throughout the scan. As the agent reads code and encounters symbols, call patterns, or data flows not captured in the bootstrap, it queries the graph on demand — following an unexpected edge, loading a subgraph for a newly discovered symbol, checking whether a dynamically constructed call has a known target. Code reading and graph querying are interleaved: the agent follows the analysis wherever it leads, not a fixed traversal order.
+
+Grepping the source is a first-class tool, not a fallback. When the agent finds a symbol via the graph, it reads the file. When it finds something while reading a file that points elsewhere, it queries the graph or reads the next file. The graph is built for informed analysis, not token minimization.
 
 **Graph size and context budgets**
 
 A 100k-line codebase produces roughly 8,000–12,000 nodes and 30,000–80,000 edges. A 1M-line monorepo produces roughly 80,000–150,000 nodes.
 
-In practice, a typical diff (5–20 changed functions) traverses 50–300 nodes — 1,500–15,000 tokens of serialized context. Well within context window limits.
+A typical diff (5–20 changed functions) pre-traces 50–300 nodes. The agent then reads source for the nodes it actually investigates — usually a fraction of that. The graph prevents the agent from reading irrelevant code; the agent's judgment determines how deeply to read the relevant code.
 
-The pathological case is a change to a widely-called utility — a function with 500 direct callers, each with their own callees. A naive traversal could put 3,000–5,000 nodes in scope: at 40 tokens/node, that's 120,000–200,000 tokens. The serializer handles this with a relevance cascade:
-
+The pathological case for bootstrap serialization is a change to a widely-called utility — a function with 500 direct callers. The bootstrap handles this with a relevance cascade:
 1. `is_new=1` nodes (touched by the diff) — always included in full.
 2. Direct `CALLS` and `FLOWS_TO` neighbors of new nodes — always included in full.
 3. Nodes ≥2 hops from any new node — collapsed to module-level summaries (~5 tokens per module).
 
-The agent can request full traversal on a specific path of interest via tool call if a module summary is insufficient. The soft cap is 80,000 tokens of graph context; above it, everything beyond hop 1 is summarized. Token spend from graph loading is reported per-run in `sentinel runs list`.
+Deeper paths beyond the bootstrap are loaded interactively as the agent needs them.
 
 **Bootstrap (first run)**
 On `sentinel init`, the full codebase is sent to the cloud. tree-sitter parses every file (structural pass). Structural nodes and edges are built deterministically from the parse trees. Then an agent makes one LLM call per file cluster (grouped by module/directory) to write semantic labels — file clusters are typically 5–15 files; a 100k-line codebase produces ~80–120 clusters.
@@ -277,7 +255,7 @@ On `sentinel init`, the full codebase is sent to the cloud. tree-sitter parses e
 A 100k-line codebase typically bootstraps in 10–20 minutes. LLM cost depends on model: a Haiku-class model suffices for the enrichment pass (labels are short, structural context is concrete) and runs $2–5; a Sonnet-class model runs $8–15. After bootstrap, every update is incremental — only nodes touched by the diff are re-parsed and re-enriched.
 
 **Integration with `sentinel pentest`**
-The pentest step is source-aware: before probing, it loads the same subgraph context the scanner used, plus any attack path annotations the scanner wrote. The pentest agent uses the graph as a navigation index — it knows which entry points reach the vulnerable sink, what guards stand in the way, and which code paths to fuzz — rather than discovering this by reading files.
+The pentest step loads the same bootstrap subgraph the scanner used, plus any attack path annotations the scanner wrote, plus the source files for the entry points and sink. The pentest agent interleaves graph queries and code reads as it forms exploit hypotheses — using the graph to identify candidate paths and reading the implementation to understand what payload will trigger them.
 
 ---
 
@@ -358,7 +336,19 @@ CREATE TABLE findings (
 
 Security roles and access controls are properties on nodes and edges, not a separate layer. This means every graph query automatically surfaces security context without a join.
 
-Key patterns:
+The schema above defines the baseline properties. The metadata model is extensible: nodes and edges accept arbitrary additional properties via a `props` JSON column, and users can define custom security roles, trust levels, and edge kinds in `sentinel.config.json`. This supports domain-specific models — a fintech app might add `pci_in_scope=true` on nodes; an internal platform might define a `DELEGATES_TO` edge kind for service-to-service trust relationships. Custom properties participate in graph queries and serialization the same way built-in ones do.
+
+```json
+{
+  "graph": {
+    "trust_levels": ["untrusted", "validated", "trusted", "internal", "pci_validated"],
+    "edge_kinds": ["CALLS", "IMPORTS", "FLOWS_TO", "GUARDED_BY", "DEPENDS_ON", "SANITIZED_BY", "CONFIRMED_EXPLOIT", "DELEGATES_TO"],
+    "node_props": { "pci_in_scope": "boolean", "data_classification": "string" }
+  }
+}
+```
+
+Key patterns with the baseline schema:
 - **Auth gap detection:** query for `ROUTE` nodes where `auth_required=0` and at least one sibling route in the same file has `auth_required=1`. These are candidates for missing auth middleware.
 - **Taint tracking:** follow `FLOWS_TO` edges where `tainted=1` from `PARAMETER` nodes with `trust_level=untrusted` to `FUNCTION` nodes with `is_sink=1`. No `SANITIZED_BY` edge in the path = injection candidate.
 - **Privilege escalation:** find paths from `privilege=anonymous` entry points to `privilege=admin` functions with no `GUARDED_BY` edge.
@@ -443,16 +433,16 @@ The graph is authoritative but not infallible. Three sources of imprecision and 
 1. Parse diff → extract changed functions/routes/files
 2. tree-sitter incremental re-parse → upsert nodes with `is_new=1`
 3. LLM enrichment pass → write `label`, `intent`, updated `trust_level` onto new nodes
-4. `graph.neighbors(seed_nodes, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY"])` → full subgraph
-5. `graph.serialize_for_prompt(subgraph)` → inject into scan prompt
+4. Pre-trace bootstrap: `graph.neighbors(seed_nodes, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY"])` + `graph.taint_paths(...)` → serialize as starting context
+5. Agent reads source files for touched nodes and sinks; queries graph interactively as analysis develops
 6. Agent writes findings → `graph.add_node(finding)` + `graph.add_edge(FLOWS_TO)`
 
 ### Integration with `sentinel pentest`
 
-1. Load finding → `graph.neighbors(finding.node_id, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY", "DEPENDS_ON"])` → full attack surface map
-2. `graph.taint_paths(...)` → candidate exploit paths
-3. Serialize attack surface as pentest context
-4. Agent attacks; on confirmation → `graph.confirm_exploit(entry, sink, finding_id, evidence)`
+1. Load finding → pre-trace: `graph.neighbors(finding.node_id, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY", "DEPENDS_ON"])` + `graph.taint_paths(...)` → bootstrap attack surface map
+2. Agent reads source for entry points, guards, and sink implementations
+3. Agent interleaves graph queries and code reads to form exploit hypotheses and generate payloads
+4. On confirmation → `graph.confirm_exploit(entry, sink, finding_id, evidence)`
 5. `CONFIRMED_EXPLOIT` edges accumulate over time — they become training signal for which graph patterns are actually exploitable
 
 ### Storage
@@ -482,6 +472,8 @@ Dev session graphs are ephemeral: they exist while a developer is actively worki
 ---
 
 ## Evals
+
+Goal = BLOW AS MANY EVALS OUT OF THE WATER AS POSSIBLE.
 
 Published as: raw model vs. raw model + Sentinel.
 
