@@ -153,7 +153,7 @@ With `--with-retry`, the annotated plan is re-submitted automatically until no n
 
 ---
 
-### `sentinel runs [list | show <id> | replay <id>]`
+### `sentinel runs [list | show <id>]`
 
 Manages session traces.
 
