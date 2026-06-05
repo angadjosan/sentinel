@@ -554,7 +554,11 @@ Declarative config parsing is intentional here: Sentinel reads and validates `se
 
 The full codebase is transmitted once at `sentinel init` over TLS and stored encrypted at rest, keyed per repository with per-tenant encryption keys. All subsequent runs transmit only the diff. Source retention is configurable per account in the dashboard; accounts can request full deletion at any time and receive confirmation.
 
-Run traces (every prompt, every tool call, every finding) are stored as append-only JSONL and scrubbed of secret-shaped content — credentials, tokens, keys — before persistence. Scrubbing uses the same entropy analysis and regex patterns as the secret scanning pass. Traces are accessible only to members of the owning account.
+Run traces (every prompt, every tool call, every finding) are stored as append-only JSONL. Before persistence, traces are scrubbed of secret-shaped content using the same entropy analysis and regex patterns as the secret scanning pass. This scrubbing covers the trace channel — agent prompts, tool call inputs and outputs, and finding records. Three constraints bound what can appear in a trace:
+
+- **Pentest secrets stay in the VM.** The Firecracker microVM enforces that secrets injected at boot (`.env.sentinel`) are passed as environment variables, not echoed into the agent's prompt or tool outputs. The agent receives the app's *behavior* (HTTP responses, sanitizer output, coverage data) — not the raw secret values. A secret that never enters the agent's context cannot appear in the trace.
+- **`CONFIRMED_EXPLOIT` evidence is scrubbed before storage.** Behavioral proof artifacts (exfiltrated data, session tokens, admin responses) pass through the same scrubbing pipeline as trace content before being written to the findings table.
+- **Trace access is audited.** `sentinel runs show <id>` is a privileged operation — every access is logged with actor, timestamp, and run ID. Admins can read traces; trace access logs are visible to all admins and cannot be deleted.
 
 ### Tenancy and RBAC
 
