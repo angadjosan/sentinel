@@ -1,9 +1,10 @@
 # Group Notes
 
+big picture: deeply understand everything
+
 1. Tree-sitter is not the best for underlying graph. Need to revuild. Too bloated, architecture needs to be redone. Below AI updates are probably sufficient, but find SOTA. "subgraph" contextualization for each node in tree-sitter is probably not good
 2. Metadata for context graph needs to be more carefully thought through. Make the primitives more basic
-3. Why do we have both the parallel santized build and the normal build? This needs research.
-4. Big issue: this may be too technical with no users. We need to get users.
+3. Why do we have both the parallel santized build and the normal build? This needs research. Deeply understand this.
 
 # AI notes
 
@@ -62,8 +63,3 @@ No Sentinel-account auth distinct from the model API key (registering a repo in 
 4. **Cost-bomb / abuse via `sentinel.config.json`.** `boot` and `healthcheck` are shell commands executed in your cloud. Declarative parsing doesn't stop `"boot": ":(){ :|:& };:"` or using the pentest runner as free compute / a launch point to attack third parties. Need egress allowlisting, CPU/time/network budgets, and config sandboxing — none mentioned. Fuzzing "until coverage plateaus" is also unbounded compute with no budget cap (you cap tokens, not fuzz CPU).
 
 5. **Run traces may leak the secrets the agent saw.** Traces are "append-only JSONL... every prompt, every tool call." The agent reads production secrets and source. Are traces scrubbed? Where stored? This is the secret-scanning blind spot turned inward.
-
-
-# TODO:
-
-evals - pick a set of them to do and lock in

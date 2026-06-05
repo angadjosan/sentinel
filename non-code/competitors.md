@@ -4,6 +4,17 @@ https://arxiv.org/pdf/2605.08382
 https://github.com/sisl/SecureForge
 https://cycode.com/blog/context-intelligence-graph-ai-application-security/
 
+# Biggest issue with sentinel
+
+What's our value prop?
+
+Cybersec = auxiliary issue for these guys
+
+We can take $20/month if we solve cybersecurity for them COMPLETELY. Can show them cost / reward analysis. Look at what other companies do here for SMB and for enterprise
+
+- Turn tokens into security.
+
+
 # Why Claude Thinks we win
 
 First, the closed exploit loop. Re-pentesting after a fix to confirm the vulnerability is actually gone — not just that the code pattern changed — is something even Orca's new AppSec Triage Agent (launched March 2026) only does for triage, not post-fix verification. Your design uses it as a quality gate, which is architecturally distinct.

@@ -493,4 +493,8 @@ Published as: raw model vs. raw model + Sentinel.
 Sentinel becomes an open prompt: a powerful natural-language interface for querying security state across your entire codebase.
 
 1. A set of open source evals for all cybersecurity things.
-2. An RL environment for labs to learn how to use Sentinel.
+2. An RL environment for labs to learn how to use Sentinel (replace CLI + skills)
+
+Open source RL for labs to be able to do better cybersecurity - actual substance of the sentinel model wrapper. Like actually better cybersecurity
+
+Evals. Evals. Evals.
