@@ -29,7 +29,14 @@ One-time setup for a repository. Run once by any team member; the cloud graph is
 
 - Authenticates with the configured model provider (API key or OAuth) and registers the repo in Sentinel's cloud database.
 - Writes `sentinel.config.json` to the repo root — the only file `sentinel init` commits to git (see **Developer Experience**).
-- Sends the full codebase to the cloud and runs the graph bootstrap: tree-sitter parses every file (structural pass), then an agent enriches each module with semantic labels (one LLM call per file cluster). This is the only slow run — all subsequent operations are incremental. See **Bootstrap** under Context Management for timing and cost.
+- Sends the full codebase to the cloud and runs the graph bootstrap in five passes:
+  1. **Parse** — tree-sitter extracts per-file ASTs. Fast, incremental, no dependencies.
+  2. **Resolution** — cross-file name binding produces `CALLS` edges by resolving import references to their definitions. Unresolved calls (dynamic dispatch, unresolved imports) are written with `call_uncertainty` set rather than silently dropped.
+  3. **Adapter** — framework adapters emit `ROUTE` nodes, ordered `middleware_chain` edges, and `is_entry_point` flags. Each supported framework (Express, FastAPI, Next.js, Django, Rails, Spring) has a dedicated adapter; the adapter interface is open for custom frameworks via `sentinel.config.json`. Without an adapter for your framework, route-level security properties are not populated.
+  4. **Taint** — pattern-based source/sink annotation produces `FLOWS_TO` edges for known data-flow patterns (HTTP params to DB queries, env vars to outbound calls, etc.). Flows the taint pass cannot resolve are written with `taint_uncertain=true` so the agent knows to reason about them rather than treat them as clean.
+  5. **Semantic enrichment** — an agent makes one LLM call per file cluster to write `label` and `intent` onto nodes. File clusters are typically 5–15 files; a 100k-line codebase produces ~80–120 clusters.
+  
+  This is the only slow run — all subsequent operations are incremental. See **Bootstrap** under Context Management for timing and cost.
 - The resulting graph is stored in the cloud. No `sentinel.db` or other local artifacts are created.
 
 CI does not re-run `sentinel init`. Once the cloud graph exists, branch graphs and dev session graphs are created automatically on first use. `sentinel init` is a team setup step, not a pipeline step.
@@ -40,10 +47,19 @@ CI does not re-run `sentinel init`. Once the cloud graph exists, branch graphs a
 
 Scans a diff for vulnerabilities. Accepts zero or more file paths (relative to repo root) to scope the scan to a subset of the diff — useful for targeting a single changed module without re-scanning unrelated files. If no paths are given, the full diff is scanned.
 
-Findings that have been manually ignored get suppressed via a fingerprint-based suppression store (file + line + vuln type hash) carried forward on the context graph.
+**Diff scope:**
+- **Local run:** `git diff HEAD` by default (staged and unstaged changes combined). Pass `--staged` to scan staged changes only.
+- **CI run:** `git diff <merge-base>..HEAD` against the merge target, derived from PR metadata. Pass `--base <ref>` to override. The merge base is logged in every run trace and visible in `sentinel runs show <id>`.
+
+Findings that have been manually ignored get suppressed via a fingerprint-based suppression store (file + vuln_type hash) carried forward on the context graph. Fingerprints are keyed on file path and vulnerability class — not line number — so suppressions survive edits that shift line numbers.
 
 **Step 1 — Context graph update (runs first, in the cloud):**
-The diff is sent to Sentinel's cloud worker, which materializes it as new or updated nodes in the branch or dev session graph. tree-sitter re-parses only the changed byte ranges (incremental — O(change), not O(file)), upserts the affected nodes, and marks them `is_new: true`. An agent then writes semantic intent onto the new nodes. This is the only place the context graph is written to — there is no separate build step. See **Context Graph** for the full schema.
+The diff is sent to Sentinel's cloud worker, which materializes it as new or updated nodes in the branch or dev session graph. Two scopes of update run:
+
+- **Within-file re-parse (O(change)):** tree-sitter receives the old parse tree and the changed byte ranges — it re-parses only the affected subtrees, not the whole file. Affected nodes are upserted and marked `is_new: true`.
+- **Cross-file edge invalidation:** all `CALLS`, `FLOWS_TO`, and `GUARDED_BY` edges incident to any changed file are invalidated and re-derived via the resolution, adapter, and taint passes. The blast radius is determined by the reverse dependency graph — which files import the changed file, and which files it imports. This is not O(change); it is O(dependent files). For most diffs (isolated feature work) the blast radius is small; for changes to widely-imported utilities, it can be large, and the dashboard surfaces it.
+
+An agent then writes semantic intent onto the new nodes. This is the only place the context graph is written to — there is no separate build step. See **Context Graph** for the full schema.
 
 **Step 2 — Context loading:**
 Extracts the functions and routes touched by the diff. Traverses the graph from those seed nodes — following security-critical edges to produce a bootstrap subgraph serialized into the agent's starting context. The agent then reads source files directly as it reasons, using the graph as a navigation index for what to read. Live graph queries remain available throughout the scan for paths discovered while reading code. See **Context Management** for how this works.
@@ -153,6 +169,20 @@ With `--with-retry`, the annotated plan is re-submitted automatically until no n
 
 ---
 
+### `sentinel suppress <id> --reason "..."`
+
+Marks a finding as suppressed. A reason string is required — the command is rejected without one.
+
+Suppression writes an audit entry to the database recording who suppressed it, when, and why. Suppressed findings remain visible in `sentinel list` with `status: suppressed` and in the dashboard with their full audit trail — they are never silently dropped.
+
+Suppression fingerprints are keyed on `file + vuln_type` (not line number). A suppression survives edits that shift line numbers above the affected location; it tracks the vulnerability class at the file, not the exact line.
+
+By default, suppressions created by non-admin members are held for admin review before taking effect. This is configurable per account. A suppression in pending-approval state does not suppress the finding — it appears in the dashboard as `status: suppression_pending`.
+
+To remove a suppression: `sentinel suppress remove <id>` — also requires a reason and creates an audit entry.
+
+---
+
 ### `sentinel runs [list | show <id>]`
 
 Manages session traces.
@@ -176,6 +206,12 @@ Parallelism is built-in:
 - Multi-repo setups: each repo has its own cloud graph. Cross-repo SCA reachability is supported when both repos are registered under the same Sentinel account — the cloud database resolves cross-repo `DEPENDS_ON` edges at query time, so a vulnerability in a shared internal library surfaces in every service that reaches the affected function, not just in the library itself.
 
 Cloud run output streams back to the terminal in real time. Runs can be cancelled mid-flight from the CLI (`sentinel runs cancel <id>`) or from the dashboard.
+
+### Monorepo and polyglot
+
+In a repository with multiple languages or services (TypeScript frontend, Python backend, Go service), each node is namespaced by its repo-relative path: `fn:services/auth/middleware.ts:validateJWT`, `fn:services/payment/handler.py:charge`. The `language` property on each node carries the language; graph queries can filter by language or cross language boundaries freely.
+
+Cross-service HTTP calls — where one service calls another's known API route — are handled by the resolution pass when both services' routes are in the graph. The call is emitted as a `CALLS` edge with `call_uncertainty=cross_service`, treated the same as other uncertain-call paths: included in bootstrap serialization, reasoned about by the agent, and noted explicitly in findings. Service calls that can't be resolved to a known route are emitted with `call_uncertainty=unresolved_import`.
 
 ### Model and API configuration
 
@@ -250,9 +286,9 @@ The pathological case for bootstrap serialization is a change to a widely-called
 Deeper paths beyond the bootstrap are loaded interactively as the agent needs them.
 
 **Bootstrap (first run)**
-On `sentinel init`, the full codebase is sent to the cloud. tree-sitter parses every file (structural pass). Structural nodes and edges are built deterministically from the parse trees. Then an agent makes one LLM call per file cluster (grouped by module/directory) to write semantic labels — file clusters are typically 5–15 files; a 100k-line codebase produces ~80–120 clusters.
+On `sentinel init`, the full codebase is sent to the cloud and all five passes run in sequence: parse → resolution → adapters → taint → semantic enrichment. The parse and resolution passes are fast (sub-minute for 100k lines). The adapter and taint passes are also fast — pattern-matching, not whole-program analysis. The semantic enrichment pass (LLM) is the slow step: one call per file cluster, typically 5–15 files per cluster, ~80–120 clusters for a 100k-line codebase.
 
-A 100k-line codebase typically bootstraps in 10–20 minutes. LLM cost depends on model: a Haiku-class model suffices for the enrichment pass (labels are short, structural context is concrete) and runs $2–5; a Sonnet-class model runs $8–15. After bootstrap, every update is incremental — only nodes touched by the diff are re-parsed and re-enriched.
+A 100k-line codebase typically bootstraps in 10–20 minutes. LLM cost depends on model: a Haiku-class model suffices for the enrichment pass (labels are short, structural context is concrete) and runs $2–5; a Sonnet-class model runs $8–15. After bootstrap, incremental updates re-run only the passes affected by the diff — within-file re-parse for changed files, cross-file edge invalidation and re-derivation for their dependents, and semantic enrichment only for nodes marked `is_new=1`.
 
 **Integration with `sentinel pentest`**
 The pentest step loads the same bootstrap subgraph the scanner used, plus any attack path annotations the scanner wrote, plus the source files for the entry points and sink. The pentest agent interleaves graph queries and code reads as it forms exploit hypotheses — using the graph to identify candidate paths and reading the implementation to understand what payload will trigger them.
@@ -265,21 +301,23 @@ The context graph is what makes contextual reasoning possible. The agent travers
 
 ### Architecture
 
-The graph is a custom implementation — no external graph database required. It runs on SQLite with a thin Python/TypeScript query layer. This keeps it portable (the same binary runs in the cloud, in CI, and in self-hosted environments), zero-ops (no Neo4j server to manage), and agent-readable (the query API is designed for LLM tool calls, not human Cypher queries).
+The graph is a custom implementation — no external graph database required. It runs on Postgres with a thin Python/TypeScript query layer. The query API is designed for LLM tool calls, not human Cypher queries.
 
-Structural nodes and edges are built from tree-sitter parse trees. Semantic labels are written by LLM. Security metadata is first-class on every node and edge.
+The graph is built by the five-pass construction pipeline described below. Security metadata is first-class on every node and edge.
 
 ### Schema
 
 **Nodes**
 
+Nodes do not store source text — they store a pointer (`file`, `line_start`, `line_end`). The agent reads actual source on demand; the graph is a navigation index, not a code mirror.
+
 ```sql
 CREATE TABLE nodes (
   id            TEXT PRIMARY KEY,   -- "fn:auth/middleware.ts:validateJWT"
-  kind          TEXT NOT NULL,      -- FUNCTION | ROUTE | FILE | CLASS | MIDDLEWARE | DEPENDENCY | PARAMETER
+  kind          TEXT NOT NULL,      -- FUNCTION | ROUTE | FILE | CLASS | MIDDLEWARE | DEPENDENCY
   name          TEXT NOT NULL,
   file          TEXT,
-  line_start    INTEGER,
+  line_start    INTEGER,            -- source pointer (not stored text)
   line_end      INTEGER,
   language      TEXT,
 
@@ -287,8 +325,9 @@ CREATE TABLE nodes (
   trust_level   TEXT,               -- untrusted | validated | trusted | internal
   auth_required INTEGER,            -- 0/1
   privilege     TEXT,               -- admin | user | anonymous | service
-  is_entry_point INTEGER,           -- 0/1 — user-facing entry points
+  is_entry_point INTEGER,           -- 0/1 — user-facing entry points (populated by framework adapters)
   is_sink       INTEGER,            -- 0/1 — dangerous ops: db.query, exec, fs.write, eval
+  taint_uncertain INTEGER,          -- 0/1 — taint pass could not resolve flows through this node
 
   -- Semantic labels (LLM-written)
   label         TEXT,               -- "JWT auth middleware"
@@ -312,7 +351,8 @@ CREATE TABLE edges (
   -- Security metadata
   tainted           INTEGER,        -- 0/1 — this data flow carries untrusted input
   sanitized         INTEGER,        -- 0/1 — sanitization occurs on this edge
-  dynamic_dispatch  INTEGER         -- 0/1 — edge was inferred statically, not parsed (may miss runtime-resolved calls)
+  taint_uncertain   INTEGER,        -- 0/1 — taint pass could not resolve this flow; agent must reason about it
+  call_uncertainty  TEXT            -- null | dynamic_dispatch | unresolved_import | monkey_patched
 );
 ```
 
@@ -328,7 +368,7 @@ CREATE TABLE findings (
   status      TEXT,
   evidence    TEXT,                 -- sanitizer stack trace or behavioral proof
   suppressed  INTEGER,              -- 0/1
-  fingerprint TEXT UNIQUE           -- file + line + vuln_type hash for dedup
+  fingerprint TEXT UNIQUE           -- file + vuln_type hash (line-number-agnostic)
 );
 ```
 
@@ -394,25 +434,41 @@ graph.confirm_exploit(entry_node_id, sink_node_id, finding_id, evidence)
 # → writes CONFIRMED_EXPLOIT edge + updates finding status
 ```
 
-### Two layers
+### Graph construction pipeline
 
-**Structural (deterministic, built from code)**
+The graph is built in five passes. Each pass produces something the previous one cannot. Understanding the layer boundaries matters: misattributing what tree-sitter produces (an AST) versus what the resolution pass produces (`CALLS` edges) versus what the taint pass produces (`FLOWS_TO` edges) is the most common way to over-claim graph accuracy.
 
-Built with [tree-sitter](https://tree-sitter.github.io/), which parses any language incrementally with no dependencies. On `sentinel source`, tree-sitter receives the old parse tree and the changed byte ranges from the diff — it re-parses only the affected subtrees (O(change), not O(file)).
+**Pass 1 — Parse (tree-sitter)**
 
-What we extract for security:
-- Route → middleware chain → handler (does every public route pass through auth?)
-- Data sources (`req.body`, query params) → where they flow (`FLOWS_TO` edges to sinks)
-- Which app code actually calls each dependency (SCA reachability)
-- FFI boundaries — where managed code crosses into native code, surfaced as pentest targets
+[tree-sitter](https://tree-sitter.github.io/) parses each file into an AST. Fast, incremental, wide language support, no runtime dependencies. This pass extracts function boundaries, call expression sites, import statements, and class/module structure. It produces AST nodes — not a call graph, not data flow, not route structure. Those require the passes below.
 
-**Semantic (LLM-derived, layered on top)**
+**Pass 2 — Resolution (cross-file name binding)**
 
-Structural graphs tell you what the code does. Semantic labels tell you what it *means*.
+Import references are resolved to their definitions across files. A call expression `sanitizeInput(x)` becomes a `CALLS` edge pointing to the specific function definition, not a string. Unresolved calls — dynamic dispatch, computed property access, unresolved imports — are written as edges with `call_uncertainty` set rather than silently omitted. The agent knows which calls are certain and which are inferred.
+
+This pass is the prerequisite for a real call graph. Without it, `CALLS` edges are name strings, not resolved symbols, and SCA reachability analysis is unreliable.
+
+**Pass 3 — Framework adapters**
+
+Each supported framework has a dedicated adapter that reads framework-specific patterns and emits security-relevant structure the parse tree cannot express:
+- `ROUTE` nodes with HTTP method, path, and handler reference
+- Ordered `middleware_chain` edges from route to handler
+- `auth_required` flags derived from middleware presence
+- `is_entry_point` on route handlers
+
+Supported adapters: Express, FastAPI, Next.js (file-based routing), Django (`urls.py`), Rails (`routes.rb`), Spring (annotations). The adapter interface is open — custom frameworks can contribute adapters via `sentinel.config.json`. If no adapter exists for a framework, `is_entry_point` is unpopulated and route-level auth analysis does not run; this is surfaced in the coverage report rather than silently skipped.
+
+**Pass 4 — Taint annotation**
+
+Pattern-based source/sink analysis produces `FLOWS_TO` edges for known data-flow patterns: HTTP request parameters to database queries, environment variables to outbound HTTP calls, file reads to response writes, and similar. This pass handles the common cases that every web app shares. It does not perform full interprocedural taint analysis — flows through complex control structures, higher-order functions, or framework internals that don't match known patterns are written with `taint_uncertain=true`. The agent's job is to evaluate those uncertain paths, not dismiss them.
+
+**Pass 5 — Semantic enrichment (LLM)**
+
+Structural passes tell you what the code does. Semantic labels tell you what it *means*.
 
 For each module, an agent reads the code and its structural neighbors and writes `label` and `intent` onto nodes: *"this is the JWT auth middleware," "this handler is the payment endpoint."*
 
-Each time `sentinel source` updates the graph, an agent also writes developer intent onto new nodes: *"this commit added a new route that skips the rate limiter every sibling route uses."* This is the layer that catches novel vulns — structural scanning alone can't see that pattern.
+Each time `sentinel source` updates the graph, an agent also writes developer intent onto new nodes: *"this commit added a new route that skips the rate limiter every sibling route uses."* This is the layer that catches novel vulns — the structural passes alone cannot see that pattern.
 
 ### Graph Reliability
 
@@ -422,7 +478,7 @@ The graph is authoritative but not infallible. Three sources of imprecision and 
 
 **Semantic label accuracy.** LLM-written `label` and `intent` fields are best-effort. The enrichment pass validates labels against structural neighbors: a node labeled "auth middleware" with no `GUARDED_BY` edges from any route is flagged for re-enrichment. Any node touched by a diff has its labels re-derived on that run, so stale labels on actively changed code are self-correcting. Labels on dormant code may lag; this is acceptable because dormant code is never in the diff.
 
-**Dynamic dispatch.** For dynamically typed languages (Python, Ruby, JavaScript), call edges derived from static analysis may miss runtime-resolved calls — dynamic method lookup, monkey-patching, `eval()`. The graph marks inferred edges with `dynamic_dispatch=true`. The agent treats these paths as uncertain and notes it in findings. Users can manually assert edges via `graph.add_edge` when the runtime behavior is known.
+**Call uncertainty.** For dynamically typed languages (Python, Ruby, JavaScript), the resolution pass may not be able to bind a call to a specific target — dynamic method lookup, monkey-patching, `eval()`. The graph marks these edges with `call_uncertainty` set to `dynamic_dispatch`, `unresolved_import`, or `monkey_patched` rather than omitting them. The agent treats uncertain-call paths as requiring code-level verification and notes the uncertainty in findings. Users can manually assert edges via `graph.add_edge` when the runtime behavior is known.
 
 **Ground truth accumulation.** `CONFIRMED_EXPLOIT` edges provide empirical validation of taint paths the graph predicted. Over time, taint paths that have been flagged repeatedly but never confirmed are candidates for graph correction — surfaced in the dashboard as low-confidence findings.
 
@@ -432,10 +488,11 @@ The graph is authoritative but not infallible. Three sources of imprecision and 
 
 1. Parse diff → extract changed functions/routes/files
 2. tree-sitter incremental re-parse → upsert nodes with `is_new=1`
-3. LLM enrichment pass → write `label`, `intent`, updated `trust_level` onto new nodes
-4. Pre-trace bootstrap: `graph.neighbors(seed_nodes, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY"])` + `graph.taint_paths(...)` → serialize as starting context
-5. Agent reads source files for touched nodes and sinks; queries graph interactively as analysis develops
-6. Agent writes findings → `graph.add_node(finding)` + `graph.add_edge(FLOWS_TO)`
+3. Cross-file edge invalidation → re-run resolution, adapter, and taint passes for changed files and their dependents
+4. LLM enrichment pass → write `label`, `intent`, updated `trust_level` onto `is_new=1` nodes only
+5. Pre-trace bootstrap: `graph.neighbors(seed_nodes, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY"])` + `graph.taint_paths(...)` → serialize as starting context. `taint_uncertain` paths are included — the agent evaluates them, not skips them.
+6. Agent reads source files for touched nodes and sinks; queries graph interactively as analysis develops
+7. Agent writes findings → `graph.add_node(finding)` + `graph.add_edge(FLOWS_TO)`
 
 ### Integration with `sentinel pentest`
 
@@ -459,7 +516,12 @@ The cloud graph is the source of truth. The CLI is stateless — it sends diffs,
 
 Dev session graphs are ephemeral: they exist while a developer is actively working on a diff and are promoted to the branch graph when the same diff runs in CI. They appear in the dashboard as `status: session` until promoted.
 
-**Self-hosted:** for air-gapped environments, the full system can be self-hosted. The cloud worker (graph update, scan, pentest runner) ships as a Docker image; the graph is stored in SQLite behind the worker API. The CLI points at the self-hosted endpoint via `sentinel config set endpoint <url>`. The self-hosted database is a single SQLite file — portable and zero-ops.
+**Branch graph merge semantics:**
+Branch graphs are created from the main graph at the time of first CI use on that branch. When the branch lands, Sentinel performs a 3-way merge: main-at-branch-creation, current-main, and the branch graph. Nodes touched by the branch diff take the branch version; nodes untouched take the current-main version. Semantic label conflicts defer to the branch (the newer semantics). `CONFIRMED_EXPLOIT` edges from both sides are always preserved — no confirmed exploit is dropped at merge time.
+
+Dev session graphs layer on top of the branch graph as read-only overlays at query time. A dev session does not write to the branch graph until the same diff runs in CI — this is what makes local and CI scans deterministic against the same graph state. Reusing the same graph across local and CI is not incidental: it is the design property that prevents the scan from seeing different architecture depending on where it runs.
+
+Concurrent writers on the same branch: node metadata is last-write-wins; edge additions are append-only (edges are never deleted by a concurrent write).
 
 ---
 
@@ -468,6 +530,39 @@ Dev session graphs are ephemeral: they exist while a developer is actively worki
 - Dashboard for monitoring.
 - LLM-queryable.
 - Hosts the production context graph. Branch graphs (written by CI) are merged in here on deploy; the graph always reflects the architecture of `main`.
+
+---
+
+## Cloud Architecture
+
+### Pentest sandbox
+
+Every `sentinel pentest` job runs inside a Firecracker microVM provisioned fresh for that job and destroyed when it completes. The customer's `docker compose` boot command, healthcheck, and `.env.sentinel` secrets execute entirely inside the VM. Nothing from the job persists outside it.
+
+Isolation constraints enforced on every microVM:
+
+- **Egress:** limited to the app's own declared healthcheck endpoint plus any hosts explicitly listed under `"egress_allowlist"` in `sentinel.config.json`. The host network and all other tenant VMs are unreachable.
+- **Resources:** hard CPU, memory (2 GB default, configurable per account), and wall-clock time limits. Fuzzing jobs that would otherwise run unbounded are capped at the declared budget; `sentinel.config.json` can raise or lower the cap.
+- **Storage:** no persistent storage survives teardown. Secrets injected at boot are never written to disk, graph, or run traces.
+- **No lateral movement:** inter-VM networking is disabled at the hypervisor level. A job cannot reach another tenant's VM, database, or network.
+
+Declarative config parsing is intentional here: Sentinel reads and validates `sentinel.config.json` before executing anything. A `"boot"` value that is a fork bomb or attempts to use the pentest runner as free compute is caught at config parse time and rejected. Shell expansion of config values does not happen — boot and healthcheck are passed as argv arrays, not shell strings.
+
+### Data transmission and storage
+
+The full codebase is transmitted once at `sentinel init` over TLS and stored encrypted at rest, keyed per repository with per-tenant encryption keys. All subsequent runs transmit only the diff. Source retention is configurable per account in the dashboard; accounts can request full deletion at any time and receive confirmation.
+
+Run traces (every prompt, every tool call, every finding) are stored as append-only JSONL and scrubbed of secret-shaped content — credentials, tokens, keys — before persistence. Scrubbing uses the same entropy analysis and regex patterns as the secret scanning pass. Traces are accessible only to members of the owning account.
+
+### Tenancy and RBAC
+
+Each Sentinel account is an isolated tenant — separate Postgres schema, separate encryption keys, no shared state. Teams share a graph within an account. Access is role-gated:
+
+- **Admin** — full access: findings, run traces, graph queries, suppression approval, team management, account settings.
+- **Member** — read/write findings, run scans, create suppressions (held for admin approval if approval mode is enabled).
+- **Read-only** — findings and dashboard only; no scan or suppression writes.
+
+Cross-repo `DEPENDS_ON` edges are resolved at query time via read-only cross-schema queries when both repos are registered under the same account. Cross-account queries are not supported.
 
 ---
 
