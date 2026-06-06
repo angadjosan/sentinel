@@ -76,3 +76,35 @@ def test_findings_can_filter_by_repo_name():
     body = response.json()
     assert body
     assert all(finding["vuln_type"] == "sqli" for finding in body)
+
+
+def test_source_enqueue_claim_complete_and_cancel():
+    with TestClient(app) as client:
+        enqueued = client.post(
+            "/source/enqueue",
+            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('x')", "run_context": "local"},
+        )
+        assert enqueued.status_code == 200
+        task_id = enqueued.json()["task_id"]
+        run_id = enqueued.json()["run"]["id"]
+
+        claimed = client.post("/tasks/claim?worker_id=test-worker")
+        assert claimed.status_code == 200
+        assert claimed.json()["id"] == task_id
+        assert claimed.json()["status"] == "claimed"
+
+        completed = client.post(f"/tasks/{task_id}/complete", json={"trace": "worker done"})
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "completed"
+        run = client.get(f"/runs/{run_id}")
+        assert run.status_code == 200
+        assert run.json()["status"] == "completed"
+
+        second = client.post(
+            "/source/enqueue",
+            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('y')", "run_context": "local"},
+        )
+        second_task = second.json()["task_id"]
+        cancelled = client.post(f"/tasks/{second_task}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"

@@ -65,6 +65,30 @@ class SourceResponse(BaseModel):
     findings: list[FindingResponse]
 
 
+class EnqueueResponse(BaseModel):
+    task_id: str
+    run: RunResponse
+
+
+class TaskResponse(BaseModel):
+    id: str
+    run_id: str
+    kind: str
+    status: str
+    payload: dict
+    attempts: int
+    claimed_by: str | None
+    error: str | None
+
+
+class TaskCompleteRequest(BaseModel):
+    trace: str | None = None
+
+
+class TaskFailRequest(BaseModel):
+    error: str = Field(min_length=1)
+
+
 class NodeResponse(BaseModel):
     id: str
     kind: str

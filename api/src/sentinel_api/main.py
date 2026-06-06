@@ -11,14 +11,16 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, TokenSpendByComponent, User, now
+from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
+from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
 from .auth import Principal, current_principal, require_admin
 from .deps import get_db, init_schema
 from .schemas import (
     EdgeResponse,
+    EnqueueResponse,
     FindingResponse,
     GraphResponse,
     InitRequest,
@@ -29,6 +31,9 @@ from .schemas import (
     SourceRequest,
     SourceResponse,
     SuppressRequest,
+    TaskCompleteRequest,
+    TaskFailRequest,
+    TaskResponse,
 )
 
 
@@ -71,6 +76,19 @@ def finding_response(finding: Finding) -> FindingResponse:
     )
 
 
+def task_response(task: Task) -> TaskResponse:
+    return TaskResponse(
+        id=task.id,
+        run_id=task.run_id,
+        kind=task.kind,
+        status=task.status,
+        payload=json.loads(task.payload),
+        attempts=task.attempts,
+        claimed_by=task.claimed_by,
+        error=task.error,
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -105,6 +123,19 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
         ACTIVE_RUNS.dec()
 
 
+@app.post("/source/enqueue", response_model=EnqueueResponse)
+async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
+    task = await enqueue_task(
+        db,
+        repo_name=payload.repo_name,
+        kind="source",
+        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context},
+    )
+    run = await db.get(Run, task.run_id)
+    assert run is not None
+    return EnqueueResponse(task_id=task.id, run=run_response(run))
+
+
 @app.post("/source/stream")
 async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
     async def events():
@@ -115,6 +146,39 @@ async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_d
         yield f"data: {json.dumps({'kind': 'complete', 'run_id': result.run.id, 'finding_count': len(result.findings)})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.post("/tasks/claim", response_model=TaskResponse | None)
+async def claim_task(worker_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse | None:
+    claimed = await claim_next_task(db, worker_id=worker_id)
+    return task_response(claimed.task) if claimed else None
+
+
+@app.post("/tasks/{task_id}/complete", response_model=TaskResponse)
+async def complete_task_endpoint(task_id: str, payload: TaskCompleteRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse:
+    try:
+        task = await complete_task(db, task_id=task_id, trace=payload.trace)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return task_response(task)
+
+
+@app.post("/tasks/{task_id}/fail", response_model=TaskResponse)
+async def fail_task_endpoint(task_id: str, payload: TaskFailRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse:
+    try:
+        task = await fail_task(db, task_id=task_id, error=payload.error)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return task_response(task)
+
+
+@app.post("/tasks/{task_id}/cancel", response_model=TaskResponse)
+async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> TaskResponse:
+    try:
+        task = await cancel_task(db, task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return task_response(task)
 
 
 @app.post("/plan", response_model=SourceResponse)

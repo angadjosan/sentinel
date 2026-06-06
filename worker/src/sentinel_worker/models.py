@@ -125,6 +125,25 @@ class Run(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid)
+    graph_id: Mapped[str] = mapped_column(String, ForeignKey("graphs.id"), nullable=False)
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("runs.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    repo_id: Mapped[str] = mapped_column(String, ForeignKey("repos.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    payload: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    claimed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Finding(Base):
     __tablename__ = "findings"
 
