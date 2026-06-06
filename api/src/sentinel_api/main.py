@@ -24,6 +24,8 @@ from sentinel_worker.trace_store import offload_trace_if_large, read_run_trace
 from .auth import Principal, current_principal, require_admin
 from .deps import get_db, init_schema
 from .schemas import (
+    AccountConfigPatch,
+    AccountConfigResponse,
     EdgeResponse,
     EnqueueResponse,
     FindingResponse,
@@ -70,6 +72,18 @@ def run_response(run: Run) -> RunResponse:
     return RunResponse(id=run.id, kind=run.kind, status=run.status, token_spend=run.token_spend, model_used=run.model_used, trace=run.trace or "")
 
 
+def account_config_response(account: Account) -> AccountConfigResponse:
+    return AccountConfigResponse(
+        account_id=account.id,
+        provider=account.provider,
+        model=account.model,
+        api_endpoint=account.api_endpoint,
+        suppression_approval_required=account.suppression_approval_required,
+        monthly_token_budget=account.monthly_token_budget,
+        source_retention_days=account.source_retention_days,
+    )
+
+
 def finding_response(finding: Finding) -> FindingResponse:
     return FindingResponse(
         id=finding.id,
@@ -106,6 +120,35 @@ async def health() -> dict[str, str]:
 @app.get("/metrics")
 async def metrics() -> PlainTextResponse:
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/config", response_model=AccountConfigResponse)
+async def get_account_config(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> AccountConfigResponse:
+    actor = await _actor_from_principal(db, principal)
+    account = await db.get(Account, actor.account_id)
+    assert account is not None
+    return account_config_response(account)
+
+
+@app.patch("/config", response_model=AccountConfigResponse)
+async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> AccountConfigResponse:
+    actor = await _actor_from_principal(db, principal)
+    account = await db.get(Account, actor.account_id)
+    assert account is not None
+    fields = payload.model_fields_set
+    if "provider" in fields and payload.provider is not None:
+        account.provider = payload.provider
+    if "model" in fields and payload.model is not None:
+        account.model = payload.model
+    if "api_endpoint" in fields:
+        account.api_endpoint = payload.api_endpoint
+    if "suppression_approval_required" in fields and payload.suppression_approval_required is not None:
+        account.suppression_approval_required = payload.suppression_approval_required
+    if "monthly_token_budget" in fields:
+        account.monthly_token_budget = payload.monthly_token_budget
+    if "source_retention_days" in fields and payload.source_retention_days is not None:
+        account.source_retention_days = payload.source_retention_days
+    return account_config_response(account)
 
 
 @app.post("/init", response_model=RunResponse)

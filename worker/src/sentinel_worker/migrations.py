@@ -23,6 +23,17 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
             )
         )
         await conn.run_sync(Base.metadata.create_all)
+        if engine.url.get_backend_name().startswith("sqlite"):
+            rows = await conn.execute(text("PRAGMA table_info(accounts)"))
+            columns = {row[1] for row in rows}
+            if "provider" not in columns:
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN provider TEXT DEFAULT 'local'"))
+            if "model" not in columns:
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN model TEXT DEFAULT 'ollama'"))
+            if "api_endpoint" not in columns:
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN api_endpoint TEXT"))
+            if "source_retention_days" not in columns:
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN source_retention_days INTEGER DEFAULT 365"))
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:

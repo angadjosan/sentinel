@@ -102,6 +102,25 @@ class TokenBudgetRequest(BaseModel):
     monthly_token_budget: int | None = Field(default=None, ge=0)
 
 
+class AccountConfigResponse(BaseModel):
+    account_id: str
+    provider: str
+    model: str
+    api_endpoint: str | None = None
+    suppression_approval_required: bool
+    monthly_token_budget: int | None = None
+    source_retention_days: int
+
+
+class AccountConfigPatch(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+    api_endpoint: str | None = None
+    suppression_approval_required: bool | None = None
+    monthly_token_budget: int | None = Field(default=None, ge=0)
+    source_retention_days: int | None = Field(default=None, ge=1)
+
+
 class GraphMergeRequest(BaseModel):
     branch_graph_id: str = Field(min_length=1)
     main_graph_id: str = Field(min_length=1)

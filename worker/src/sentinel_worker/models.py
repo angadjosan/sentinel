@@ -26,6 +26,10 @@ class Account(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     suppression_approval_required: Mapped[bool] = mapped_column(Boolean, default=True)
     monthly_token_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider: Mapped[str] = mapped_column(String, default="local")
+    model: Mapped[str] = mapped_column(String, default="ollama")
+    api_endpoint: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_retention_days: Mapped[int] = mapped_column(Integer, default=365)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

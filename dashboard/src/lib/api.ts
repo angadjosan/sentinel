@@ -79,6 +79,16 @@ export type GraphSnapshot = {
   edges: GraphEdge[];
 };
 
+export type AccountConfig = {
+  account_id: string;
+  provider: string;
+  model: string;
+  api_endpoint: string | null;
+  suppression_approval_required: boolean;
+  monthly_token_budget: number | null;
+  source_retention_days: number;
+};
+
 const apiUrl = process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
 async function get<T>(path: string): Promise<T> {
@@ -107,6 +117,10 @@ export function findingAudit(id: string): Promise<SuppressionAudit[]> {
 
 export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
   return get<GraphSnapshot>(`/graph?limit=${limit}`);
+}
+
+export function accountConfig(): Promise<AccountConfig> {
+  return get<AccountConfig>("/config");
 }
 
 export function listRuns(): Promise<Run[]> {
