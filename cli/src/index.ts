@@ -5,6 +5,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
+import { writeApiKey } from "./auth/keychain.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff, lsFiles } from "./diff/git.js";
 
@@ -242,9 +243,14 @@ config
   .command("set")
   .argument("<key>", "Config key")
   .argument("<value>", "Config value")
-  .action((key: string, value: string) => {
+  .action(async (key: string, value: string) => {
     const root = findRepoRoot();
     const current = loadConfig(root) as Record<string, unknown>;
+    if (key === "api-key") {
+      await writeApiKey(ConfigSchema.parse(current), value);
+      console.log("stored api-key in system keychain");
+      return;
+    }
     const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck"]);
     if (!allowed.has(key)) {
       throw new Error(`Unsupported config key ${key}`);

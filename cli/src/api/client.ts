@@ -1,4 +1,5 @@
 import { loadConfig, SentinelConfig } from "../config/sentinel.config.js";
+import { readApiKey } from "../auth/keychain.js";
 
 export type Finding = {
   id: string;
@@ -25,13 +26,17 @@ export type Run = {
 export class SentinelApiClient {
   constructor(private readonly config: SentinelConfig = loadConfig()) {}
 
+  private async authHeaders(): Promise<Record<string, string>> {
+    const token = await readApiKey(this.config);
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const token = process.env.SENTINEL_API_TOKEN;
     const response = await fetch(`${this.config.apiUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(await this.authHeaders()),
         ...(init.headers ?? {})
       }
     });
@@ -135,24 +140,19 @@ export class SentinelApiClient {
     return this.request<Run>(`/runs/${id}/cancel`, { method: "POST" });
   }
 
-  trace(id: string) {
-    const token = process.env.SENTINEL_API_TOKEN;
-    return fetch(`${this.config.apiUrl}/runs/${id}/trace`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    }).then((response) => {
-      if (!response.ok) {
-        return response.text().then((text) => {
-          throw new Error(`${response.status} ${response.statusText}: ${text}`);
-        });
-      }
-      return response.text();
+  async trace(id: string) {
+    const response = await fetch(`${this.config.apiUrl}/runs/${id}/trace`, {
+      headers: await this.authHeaders()
     });
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    }
+    return response.text();
   }
 
   async *runEvents(id: string): AsyncGenerator<string> {
-    const token = process.env.SENTINEL_API_TOKEN;
     const response = await fetch(`${this.config.apiUrl}/runs/${id}/events`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
+      headers: await this.authHeaders()
     });
     if (!response.ok || !response.body) {
       throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
