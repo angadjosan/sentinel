@@ -86,3 +86,44 @@ def test_source_file_reads_are_account_scoped(monkeypatch):
         denied = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_b}"})
     assert allowed.status_code == 200
     assert denied.status_code == 404
+
+
+def test_device_auth_flow_issues_token_after_admin_approval(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    admin = create_token("device-admin", "device-account", "admin")
+    with TestClient(app) as client:
+        started = client.post("/auth/device")
+        assert started.status_code == 200
+        body = started.json()
+        assert body["device_code"]
+        assert body["user_code"]
+
+        pending = client.get(f"/auth/device/token?device_code={body['device_code']}")
+        assert pending.status_code == 202
+
+        approved = client.post(
+            "/auth/device/approve",
+            headers={"Authorization": f"Bearer {admin}"},
+            json={"user_code": body["user_code"]},
+        )
+        assert approved.status_code == 200
+
+        token = client.get(f"/auth/device/token?device_code={body['device_code']}")
+        assert token.status_code == 200
+        token_body = token.json()
+        assert token_body["account_id"] == "device-account"
+        assert token_body["user_id"] == "device-admin"
+        assert token_body["access_token"]
+
+
+def test_device_auth_approval_requires_admin(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    member = create_token("device-member", "device-member-account", "member")
+    with TestClient(app) as client:
+        started = client.post("/auth/device")
+        response = client.post(
+            "/auth/device/approve",
+            headers={"Authorization": f"Bearer {member}"},
+            json={"user_code": started.json()["user_code"]},
+        )
+    assert response.status_code == 403

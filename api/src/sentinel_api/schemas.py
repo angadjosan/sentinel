@@ -33,6 +33,23 @@ class SuppressRequest(BaseModel):
     reason: str = Field(min_length=1)
 
 
+class DeviceStartResponse(BaseModel):
+    device_code: str
+    user_code: str
+    verification_url: str
+    expires_in: int
+
+
+class DeviceTokenResponse(BaseModel):
+    access_token: str
+    account_id: str
+    user_id: str
+
+
+class DeviceApproveRequest(BaseModel):
+    user_code: str = Field(min_length=1)
+
+
 class ConfigResponse(BaseModel):
     api_url: str
     repo_name: str

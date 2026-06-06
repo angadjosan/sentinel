@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import asyncio
+import secrets
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +13,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
+from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.graph_query import GraphQuery
 from sentinel_worker.graph_merge import merge_graph
@@ -21,11 +22,14 @@ from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import offload_trace_if_large, read_run_trace
 
-from .auth import Principal, current_principal, require_admin
+from .auth import Principal, create_token, current_principal, require_admin
 from .deps import get_db, init_schema
 from .schemas import (
     AccountConfigPatch,
     AccountConfigResponse,
+    DeviceApproveRequest,
+    DeviceStartResponse,
+    DeviceTokenResponse,
     EdgeResponse,
     EnqueueResponse,
     FindingResponse,
@@ -66,6 +70,7 @@ RUNS_TOTAL = Counter("sentinel_runs_total", "Runs by kind and status", ["kind", 
 FINDINGS_TOTAL = Counter("sentinel_findings_total", "Findings by type and severity", ["vuln_type", "severity"])
 SCAN_DURATION = Histogram("sentinel_scan_duration_seconds", "Scan duration by kind", ["kind"])
 ACTIVE_RUNS = Gauge("sentinel_active_runs", "Currently active runs")
+DEVICE_CODE_TTL_SECONDS = 600
 
 
 def run_response(run: Run) -> RunResponse:
@@ -120,6 +125,55 @@ async def health() -> dict[str, str]:
 @app.get("/metrics")
 async def metrics() -> PlainTextResponse:
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/auth/device", response_model=DeviceStartResponse)
+async def start_device_auth(db: AsyncSession = Depends(get_db)) -> DeviceStartResponse:
+    device_code = secrets.token_urlsafe(32)
+    user_code = _user_code()
+    session = DeviceAuthSession(
+        device_code=device_code,
+        user_code=user_code,
+        expires_at=datetime.now(UTC) + timedelta(seconds=DEVICE_CODE_TTL_SECONDS),
+    )
+    db.add(session)
+    return DeviceStartResponse(
+        device_code=device_code,
+        user_code=user_code,
+        verification_url="/auth/device/verify",
+        expires_in=DEVICE_CODE_TTL_SECONDS,
+    )
+
+
+@app.post("/auth/device/approve", response_model=dict[str, str])
+async def approve_device_auth(payload: DeviceApproveRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, str]:
+    session = await db.scalar(select(DeviceAuthSession).where(DeviceAuthSession.user_code == payload.user_code))
+    if session is None:
+        raise HTTPException(status_code=404, detail="device code not found")
+    if _as_utc(session.expires_at) < datetime.now(UTC):
+        session.status = "expired"
+        raise HTTPException(status_code=410, detail="device code expired")
+    actor = await _actor_from_principal(db, principal)
+    session.status = "approved"
+    session.account_id = actor.account_id
+    session.user_id = actor.id
+    session.role = principal.role
+    session.approved_at = now()
+    return {"status": "approved"}
+
+
+@app.get("/auth/device/token", response_model=DeviceTokenResponse)
+async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)) -> DeviceTokenResponse:
+    session = await db.get(DeviceAuthSession, device_code)
+    if session is None:
+        raise HTTPException(status_code=404, detail="device code not found")
+    if _as_utc(session.expires_at) < datetime.now(UTC):
+        session.status = "expired"
+        raise HTTPException(status_code=410, detail="device code expired")
+    if session.status != "approved" or not session.account_id or not session.user_id:
+        raise HTTPException(status_code=202, detail="authorization pending")
+    token = create_token(session.user_id, session.account_id, session.role or "admin")
+    return DeviceTokenResponse(access_token=token, account_id=session.account_id, user_id=session.user_id)
 
 
 @app.get("/config", response_model=AccountConfigResponse)
@@ -679,6 +733,17 @@ async def _actor_from_principal(db: AsyncSession, principal: Principal) -> User:
 async def _suppression_approval_required(db: AsyncSession, account_id: str) -> bool:
     account = await db.get(Account, account_id)
     return True if account is None else account.suppression_approval_required
+
+
+def _user_code() -> str:
+    token = secrets.token_hex(4).upper()
+    return f"{token[:4]}-{token[4:]}"
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _graph_account_id(principal: Principal) -> str | None:

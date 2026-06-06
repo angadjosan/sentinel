@@ -43,6 +43,20 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class DeviceAuthSession(Base):
+    __tablename__ = "device_auth_sessions"
+
+    device_code: Mapped[str] = mapped_column(String, primary_key=True)
+    user_code: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    account_id: Mapped[str | None] = mapped_column(String, ForeignKey("accounts.id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True)
+    role: Mapped[str | None] = mapped_column(String, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Repo(Base):
     __tablename__ = "repos"
 
