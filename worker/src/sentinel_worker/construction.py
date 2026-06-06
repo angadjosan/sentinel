@@ -13,6 +13,7 @@ from .models import Edge, Node
 JS_FUNCTION_RE = re.compile(r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>")
 PY_FUNCTION_RE = re.compile(r"^\s*def\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 CALL_RE = re.compile(r"(?<!function\s)\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
+IMPORT_REF_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|import\s+[^'\n]+from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\))")
 EXPRESS_ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 PY_PARAM_RE = re.compile(r"\b(request\.(?:GET|POST|query_params|path_params)|params|query)\b")
@@ -32,6 +33,8 @@ class SourceFile:
 async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) -> list[Node]:
     await db.execute(delete(Edge).where(Edge.graph_id == graph_id).where(Edge.src.like(f"%:{source.path}:%")))
     language = language_for(source.path)
+    imports = sorted({group.split("/")[0] if not group.startswith("@") else "/".join(group.split("/")[:2]) for match in IMPORT_REF_RE.finditer(source.content) for group in match.groups() if group and not group.startswith(".")})
+    import_intent = f" Imports packages: {', '.join(imports)}." if imports else ""
     file_node = Node(
         id=f"file:{source.path}",
         graph_id=graph_id,
@@ -43,7 +46,7 @@ async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) 
         language=language,
         is_new=source.is_new,
         label=f"{source.path} source file" if not source.is_new else f"Changed {source.path}",
-        intent="Repository source file indexed into the graph.",
+        intent=f"Repository source file indexed into the graph.{import_intent}",
     )
     await db.merge(file_node)
     created = [file_node]

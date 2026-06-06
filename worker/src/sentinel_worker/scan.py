@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .construction import SourceFile, build_file_graph
 from .languages import language_for
 from .models import Finding, Graph, Node, Repo, Run, now
+from .sca import scan_dependencies
 from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
 
 
@@ -94,6 +95,7 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     findings = 0
     for file in parse_unified_diff(diff):
         await build_file_graph(db, graph.id, SourceFile(path=file.path, content=file.content, is_new=True))
+        findings += await scan_dependencies(db, graph.id, repo.id, run.id, file.path, file.content)
         findings += await _emit_pattern_findings(db, graph.id, repo.id, run.id, file)
     run.status = "completed"
     run.completed_at = now()
