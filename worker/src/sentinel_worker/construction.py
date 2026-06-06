@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ast
+import importlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import PurePosixPath
+from typing import Any
 from urllib.parse import urlparse
 
 from sqlalchemy import delete, select
@@ -39,12 +43,92 @@ class SourceFile:
     is_new: bool = False
 
 
+@dataclass(frozen=True)
+class ParsedFunction:
+    name: str
+    line_start: int
+    line_end: int
+
+
+@dataclass(frozen=True)
+class ParsedSource:
+    parse_error: bool
+    functions: list[ParsedFunction] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LocalImport:
+    imported_name: str
+    module_ref: str
+    file_path: str
+
+
+class IncrementalSyntaxIndex:
+    def __init__(self) -> None:
+        self._trees: dict[str, Any] = {}
+        self._parser_by_language: dict[str, Any] = {}
+
+    def parse(self, source: SourceFile, language: str | None) -> ParsedSource:
+        if language == "python":
+            return _parse_python_ast(source.content)
+        parser = self._parser_for(language)
+        if parser is None:
+            return ParsedSource(parse_error=_has_obvious_parse_error(source.content), functions=[])
+        source_bytes = source.content.encode()
+        previous_tree = self._trees.get(source.path)
+        tree = parser.parse(source_bytes, previous_tree)
+        self._trees[source.path] = tree
+        root = tree.root_node
+        return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))
+
+    def _parser_for(self, language: str | None) -> Any | None:
+        if language not in {"javascript", "typescript"}:
+            return None
+        if language in self._parser_by_language:
+            return self._parser_by_language[language]
+        try:
+            tree_sitter = importlib.import_module("tree_sitter")
+            grammar_module = importlib.import_module("tree_sitter_typescript" if language == "typescript" else "tree_sitter_javascript")
+        except ModuleNotFoundError:
+            self._parser_by_language[language] = None
+            return None
+        parser = tree_sitter.Parser()
+        language_factory = getattr(grammar_module, "language_typescript", None) if language == "typescript" else getattr(grammar_module, "language", None)
+        if language_factory is None:
+            self._parser_by_language[language] = None
+            return None
+        ts_language = tree_sitter.Language(language_factory())
+        if hasattr(parser, "set_language"):
+            parser.set_language(ts_language)
+        else:
+            parser.language = ts_language
+        self._parser_by_language[language] = parser
+        return parser
+
+
+_SYNTAX_INDEX = IncrementalSyntaxIndex()
+
+
 async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) -> list[Node]:
+    return await _build_file_graph(db, graph_id, source, _SYNTAX_INDEX)
+
+
+async def build_source_graph(db: AsyncSession, graph_id: str, sources: list[SourceFile]) -> list[Node]:
+    created: list[Node] = []
+    syntax_index = IncrementalSyntaxIndex()
+    for source in sources:
+        created.extend(await _build_file_graph(db, graph_id, source, syntax_index))
+    await resolve_cross_file_references(db, graph_id, sources)
+    return created
+
+
+async def _build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile, syntax_index: IncrementalSyntaxIndex) -> list[Node]:
     await db.execute(delete(Edge).where(Edge.graph_id == graph_id).where(Edge.src.like(f"%:{source.path}:%")))
     language = language_for(source.path)
+    parsed = syntax_index.parse(source, language)
     imports = _imports(source.content)
     import_intent = f" Imports packages: {', '.join(imports)}." if imports else ""
-    parse_error = _has_obvious_parse_error(source.content)
+    parse_error = parsed.parse_error
     file_node = Node(
         id=f"file:{source.path}",
         graph_id=graph_id,
@@ -64,7 +148,7 @@ async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) 
     if parse_error:
         return created
     await _emit_imports(db, graph_id, source, imports)
-    function_nodes = await _emit_functions(db, graph_id, source, language)
+    function_nodes = await _emit_functions(db, graph_id, source, language, parsed)
     route_nodes = await _emit_routes(db, graph_id, source, language)
     await _emit_calls(db, graph_id, source, function_nodes)
     await _emit_taint(db, graph_id, source, route_nodes, function_nodes)
@@ -72,29 +156,180 @@ async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) 
     return [*created, *function_nodes, *route_nodes]
 
 
-async def _emit_functions(db: AsyncSession, graph_id: str, source: SourceFile, language: str | None) -> list[Node]:
-    pattern = PY_FUNCTION_RE if language == "python" else JS_FUNCTION_RE
+async def _emit_functions(db: AsyncSession, graph_id: str, source: SourceFile, language: str | None, parsed: ParsedSource) -> list[Node]:
     nodes: list[Node] = []
-    for match in pattern.finditer(source.content):
-        name = next(group for group in match.groups() if group)
-        line = source.content[: match.start()].count("\n") + 1
+    parsed_functions = parsed.functions or _regex_functions(source.content, language)
+    for function in parsed_functions:
         node = Node(
-            id=f"fn:{source.path}:{name}",
+            id=f"fn:{source.path}:{function.name}",
             graph_id=graph_id,
             kind="FUNCTION",
-            name=name,
+            name=function.name,
             file=source.path,
-            line_start=line,
-            line_end=line,
+            line_start=function.line_start,
+            line_end=function.line_end,
             language=language,
-            is_sink=bool(SINK_RE.search(_line_at(source.content, line))),
+            is_sink=bool(SINK_RE.search(_lines_between(source.content, function.line_start, function.line_end))),
             is_new=source.is_new,
-            label=f"{name} function",
-            intent=_intent_for_name(name),
+            label=f"{function.name} function",
+            intent=_intent_for_name(function.name),
         )
         await db.merge(node)
         nodes.append(node)
     return nodes
+
+
+async def resolve_cross_file_references(db: AsyncSession, graph_id: str, sources: list[SourceFile]) -> None:
+    paths = {source.path for source in sources}
+    function_nodes = list(await db.scalars(select(Node).where(Node.graph_id == graph_id).where(Node.kind == "FUNCTION")))
+    functions_by_file_name = {(node.file or "", node.name): node for node in function_nodes}
+    for source in sources:
+        for local_import in _local_imports(source):
+            target_path = _resolve_module_path(source.path, local_import.module_ref, paths)
+            if target_path is None:
+                continue
+            target = functions_by_file_name.get((target_path, local_import.imported_name))
+            if target is None:
+                continue
+            if _calls_name(source.content, local_import.imported_name):
+                await _add_edge(db, graph_id, f"file:{source.path}", target.id, "CALLS", call_uncertainty="resolved_import")
+
+
+def _parse_python_ast(content: str) -> ParsedSource:
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return ParsedSource(parse_error=True)
+    functions = [
+        ParsedFunction(node.name, node.lineno, getattr(node, "end_lineno", node.lineno) or node.lineno)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    ]
+    functions.sort(key=lambda function: (function.line_start, function.name))
+    return ParsedSource(parse_error=False, functions=functions)
+
+
+def _tree_sitter_functions(content: str, root: Any, language: str | None) -> list[ParsedFunction]:
+    functions: list[ParsedFunction] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        stack.extend(reversed(getattr(node, "children", [])))
+        node_type = getattr(node, "type", "")
+        if node_type not in {"function_declaration", "method_definition", "generator_function_declaration", "arrow_function"}:
+            continue
+        name = _tree_sitter_function_name(content, node)
+        if name:
+            functions.append(ParsedFunction(name=name, line_start=node.start_point[0] + 1, line_end=node.end_point[0] + 1))
+    functions.sort(key=lambda function: (function.line_start, function.name))
+    return functions
+
+
+def _tree_sitter_function_name(content: str, node: Any) -> str | None:
+    name_node = node.child_by_field_name("name") if hasattr(node, "child_by_field_name") else None
+    if name_node is not None:
+        return content[name_node.start_byte : name_node.end_byte]
+    parent = getattr(node, "parent", None)
+    if parent is None:
+        return None
+    if getattr(parent, "type", "") == "variable_declarator":
+        declarator_name = parent.child_by_field_name("name")
+        if declarator_name is not None:
+            return content[declarator_name.start_byte : declarator_name.end_byte]
+    return None
+
+
+def _regex_functions(content: str, language: str | None) -> list[ParsedFunction]:
+    pattern = PY_FUNCTION_RE if language == "python" else JS_FUNCTION_RE
+    functions: list[ParsedFunction] = []
+    for match in pattern.finditer(content):
+        name = next(group for group in match.groups() if group)
+        line = content[: match.start()].count("\n") + 1
+        functions.append(ParsedFunction(name=name, line_start=line, line_end=line))
+    return functions
+
+
+def _local_imports(source: SourceFile) -> list[LocalImport]:
+    language = language_for(source.path)
+    if language == "python":
+        return _python_local_imports(source)
+    if language in {"javascript", "typescript"}:
+        return _js_local_imports(source)
+    return []
+
+
+def _python_local_imports(source: SourceFile) -> list[LocalImport]:
+    imports: list[LocalImport] = []
+    for match in re.finditer(r"^\s*from\s+([.\w]+)\s+import\s+([^\n#]+)", source.content, re.MULTILINE):
+        module_ref = match.group(1)
+        if not module_ref.startswith(".") and "." not in module_ref:
+            module_ref = f".{module_ref}"
+        for raw_name in match.group(2).split(","):
+            imported_name = raw_name.strip().split(" as ")[0].strip()
+            if imported_name and imported_name != "*":
+                imports.append(LocalImport(imported_name=imported_name, module_ref=module_ref, file_path=source.path))
+    return imports
+
+
+def _js_local_imports(source: SourceFile) -> list[LocalImport]:
+    imports: list[LocalImport] = []
+    for match in re.finditer(r"import\s+\{([^}]+)\}\s+from\s+['\"]([^'\"]+)['\"]", source.content):
+        module_ref = match.group(2)
+        if not module_ref.startswith("."):
+            continue
+        for raw_name in match.group(1).split(","):
+            imported_name = raw_name.strip().split(" as ")[0].strip()
+            if imported_name:
+                imports.append(LocalImport(imported_name=imported_name, module_ref=module_ref, file_path=source.path))
+    for match in re.finditer(r"const\s+\{([^}]+)\}\s*=\s*require\(\s*['\"]([^'\"]+)['\"]\s*\)", source.content):
+        module_ref = match.group(2)
+        if not module_ref.startswith("."):
+            continue
+        for raw_name in match.group(1).split(","):
+            imported_name = raw_name.strip().split(":")[0].strip()
+            if imported_name:
+                imports.append(LocalImport(imported_name=imported_name, module_ref=module_ref, file_path=source.path))
+    return imports
+
+
+def _resolve_module_path(source_path: str, module_ref: str, known_paths: set[str]) -> str | None:
+    base = PurePosixPath(source_path).parent
+    if module_ref.startswith("."):
+        target = (base / module_ref).as_posix()
+    else:
+        target = module_ref
+    target = _collapse_posix_path(target)
+    candidates = [
+        target,
+        f"{target}.py",
+        f"{target}.js",
+        f"{target}.ts",
+        f"{target}.tsx",
+        f"{target}/__init__.py",
+        f"{target}/index.js",
+        f"{target}/index.ts",
+    ]
+    for candidate in candidates:
+        if candidate in known_paths:
+            return candidate
+    return None
+
+
+def _collapse_posix_path(path: str) -> str:
+    parts: list[str] = []
+    for part in path.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _calls_name(content: str, name: str) -> bool:
+    return bool(re.search(rf"(?<![\w$]){re.escape(name)}\s*\(", content))
 
 
 async def _emit_routes(db: AsyncSession, graph_id: str, source: SourceFile, language: str | None) -> list[Node]:
@@ -369,6 +604,11 @@ def _line_at(content: str, line_number: int) -> str:
     if 1 <= line_number <= len(lines):
         return lines[line_number - 1]
     return ""
+
+
+def _lines_between(content: str, start: int, end: int) -> str:
+    lines = content.splitlines()
+    return "\n".join(lines[max(0, start - 1) : max(start, end)])
 
 
 async def _matching_route(db: AsyncSession, graph_id: str, method: str, path: str) -> Node | None:

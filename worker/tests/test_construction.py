@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from sentinel_worker.construction import SourceFile, build_file_graph
+from sentinel_worker.construction import SourceFile, build_file_graph, build_source_graph
 from sentinel_worker.models import Base, Edge, Graph, Node
 
 
@@ -225,3 +225,65 @@ async def test_framework_adapters_extract_routes(path: str, content: str, route_
     assert route is not None
     assert route.is_entry_point is True
     assert route.auth_required is auth_required
+
+
+@pytest.mark.asyncio
+async def test_python_ast_parser_emits_multiline_function_ranges():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(
+                    path="service.py",
+                    content="def load_user(user_id):\n    row = db.query(user_id)\n    return row\n",
+                    is_new=True,
+                ),
+            )
+        async with session.begin():
+            function = await session.get(Node, "fn:service.py:load_user")
+
+    assert function is not None
+    assert function.line_start == 1
+    assert function.line_end == 3
+    assert function.is_sink is True
+
+
+@pytest.mark.asyncio
+async def test_batch_graph_resolves_local_import_calls_across_files():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_source_graph(
+                session,
+                graph.id,
+                [
+                    SourceFile(path="services/users.js", content="export function loadUser(id) { return db.query(id); }"),
+                    SourceFile(path="routes/profile.js", content="import { loadUser } from '../services/users';\nexport function profile(req) { return loadUser(req.params.id); }"),
+                ],
+            )
+        async with session.begin():
+            target = await session.get(Node, "fn:services/users.js:loadUser")
+            edge = await session.scalar(
+                select(Edge)
+                .where(Edge.src == "file:routes/profile.js")
+                .where(Edge.dst == "fn:services/users.js:loadUser")
+                .where(Edge.kind == "CALLS")
+            )
+
+    assert target is not None
+    assert edge is not None
+    assert edge.call_uncertainty == "resolved_import"
