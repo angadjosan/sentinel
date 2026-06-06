@@ -154,6 +154,52 @@ async def test_python_monkey_patch_marks_calls_uncertain():
 
 
 @pytest.mark.asyncio
+async def test_http_calls_to_known_routes_are_marked_cross_service():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(path="services/users/app.js", content="app.post('/api/users', auth, (req, res) => res.json({ ok: true }));\napp.get('/api/profile', auth, (req, res) => res.json({ ok: true }));"),
+            )
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(
+                    path="services/billing/client.js",
+                    content="export async function sync() { await fetch('https://users.internal/api/users', { method: 'POST' }); return axios.get('/api/profile'); }",
+                ),
+            )
+        async with session.begin():
+            route = await session.get(Node, "route:services/users/app.js:POST /api/users")
+            edge = await session.scalar(
+                select(Edge)
+                .where(Edge.src == "file:services/billing/client.js")
+                .where(Edge.dst == "route:services/users/app.js:POST /api/users")
+                .where(Edge.kind == "CALLS")
+            )
+            relative_edge = await session.scalar(
+                select(Edge)
+                .where(Edge.src == "file:services/billing/client.js")
+                .where(Edge.dst == "route:services/users/app.js:GET /api/profile")
+                .where(Edge.kind == "CALLS")
+            )
+
+    assert route is not None
+    assert edge is not None
+    assert edge.call_uncertainty == "cross_service"
+    assert relative_edge is not None
+    assert relative_edge.call_uncertainty == "cross_service"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "route_id", "auth_required"),
     [

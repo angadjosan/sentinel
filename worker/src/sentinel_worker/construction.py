@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,8 @@ CALL_RE = re.compile(r"(?<!function\s)\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?
 IMPORT_REF_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|import\s+[^'\n]+from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\))")
 DYNAMIC_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\[\s*([A-Za-z_$][\w$]*)\s*\]\s*\(")
 MONKEY_PATCH_RE = re.compile(r"^\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=", re.MULTILINE)
+HTTP_CALL_RE = re.compile(r"\b(fetch|axios\.(?:get|post|put|patch|delete)|requests\.(?:get|post|put|patch|delete)|httpx\.(?:get|post|put|patch|delete))\s*\(\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
+HTTP_METHOD_RE = re.compile(r"\bmethod\s*:\s*['\"](GET|POST|PUT|PATCH|DELETE)['\"]", re.IGNORECASE)
 EXPRESS_ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 DJANGO_ROUTE_RE = re.compile(r"\bpath\(\s*['\"]([^'\"]*)['\"]")
@@ -65,6 +68,7 @@ async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) 
     route_nodes = await _emit_routes(db, graph_id, source, language)
     await _emit_calls(db, graph_id, source, function_nodes)
     await _emit_taint(db, graph_id, source, route_nodes, function_nodes)
+    await _emit_cross_service_calls(db, graph_id, source)
     return [*created, *function_nodes, *route_nodes]
 
 
@@ -260,6 +264,18 @@ async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, route
             await _add_edge(db, graph_id, route.id, sink_node.id, "CALLS")
 
 
+async def _emit_cross_service_calls(db: AsyncSession, graph_id: str, source: SourceFile) -> None:
+    file_node_id = f"file:{source.path}"
+    for match in HTTP_CALL_RE.finditer(source.content):
+        path = _http_path(match.group(2))
+        if path is None:
+            continue
+        method = _http_method(match.group(1), source.content[match.start() : match.start() + 300])
+        route = await _matching_route(db, graph_id, method, path)
+        if route is not None and route.file != source.path:
+            await _add_edge(db, graph_id, file_node_id, route.id, "CALLS", call_uncertainty="cross_service")
+
+
 async def _emit_express_guards(db: AsyncSession, graph_id: str, source: SourceFile, route: Node, args_offset: int) -> None:
     call_end = source.content.find(");", args_offset)
     if call_end < 0:
@@ -353,6 +369,38 @@ def _line_at(content: str, line_number: int) -> str:
     if 1 <= line_number <= len(lines):
         return lines[line_number - 1]
     return ""
+
+
+async def _matching_route(db: AsyncSession, graph_id: str, method: str, path: str) -> Node | None:
+    routes = await db.scalars(select(Node).where(Node.graph_id == graph_id).where(Node.kind == "ROUTE"))
+    normalized_path = _normalize_route_path(path)
+    for route in routes:
+        route_method, _, route_path = route.name.partition(" ")
+        if _normalize_route_path(route_path) != normalized_path:
+            continue
+        if route_method in {method, "ANY"} or method == "ANY":
+            return route
+    return None
+
+
+def _http_path(url: str) -> str | None:
+    if url.startswith("/"):
+        return urlparse(url).path
+    parsed = urlparse(url)
+    return parsed.path if parsed.scheme and parsed.netloc and parsed.path else None
+
+
+def _http_method(callee: str, call_fragment: str) -> str:
+    lowered = callee.lower()
+    if "." in lowered:
+        return lowered.rsplit(".", 1)[1].upper()
+    match = HTTP_METHOD_RE.search(call_fragment)
+    return match.group(1).upper() if match else "GET"
+
+
+def _normalize_route_path(path: str) -> str:
+    normalized = "/" + path.strip("/")
+    return normalized if normalized != "/" else "/"
 
 
 def _intent_for_name(name: str) -> str:
