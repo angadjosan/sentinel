@@ -203,6 +203,17 @@ class SourceFileSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AdvisoryCache(Base):
+    __tablename__ = "advisory_cache"
+
+    package: Mapped[str] = mapped_column(String, primary_key=True)
+    ecosystem: Mapped[str] = mapped_column(String, primary_key=True)
+    version: Mapped[str] = mapped_column(String, primary_key=True)
+    advisories_json: Mapped[str] = mapped_column(Text, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class TraceAccessLog(Base):
     __tablename__ = "trace_access_log"
 

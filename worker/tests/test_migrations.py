@@ -14,8 +14,11 @@ async def test_apply_migrations_records_version_and_is_idempotent():
     async with engine.begin() as conn:
         rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='runs'"))
         has_runs = rows.first() is not None
+        cache_rows = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name='advisory_cache'"))
+        has_advisory_cache = cache_rows.first() is not None
     await engine.dispose()
     assert first == [CURRENT_SCHEMA_VERSION]
     assert second == []
     assert applied == [CURRENT_SCHEMA_VERSION]
     assert has_runs is True
+    assert has_advisory_cache is True

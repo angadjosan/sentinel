@@ -5,7 +5,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sentinel_worker.construction import SourceFile, build_file_graph
 from sentinel_worker.models import Base, Finding, Graph
 from sentinel_worker.scan import get_or_create_graph, scan_diff
-from sentinel_worker.sca import parse_dependencies, scan_dependencies
+from sentinel_worker.sca import Advisory, AdvisorySource, Dependency, parse_dependencies, scan_dependencies
+
+
+class CountingAdvisorySource(AdvisorySource):
+    def __init__(self):
+        self.calls = 0
+
+    async def lookup(self, dependency: Dependency) -> list[Advisory]:
+        self.calls += 1
+        return [Advisory(dependency.name, dependency.ecosystem, dependency.version, "GHSA-cache-test", "high", "cached advisory")]
 
 
 def test_parse_package_json_dependencies_from_full_or_partial_content():
@@ -70,3 +79,21 @@ async def test_scan_diff_runs_sca_on_package_manifest():
         async with session.begin():
             finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_reachable"))
     assert finding is not None
+
+
+@pytest.mark.asyncio
+async def test_sca_caches_advisory_lookup_by_package_version():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    source = CountingAdvisorySource()
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await scan_dependencies(session, graph.id, "repo", "run-1", "package.json", '{"dependencies":{"lodash":"4.17.21"}}', source=source)
+            await scan_dependencies(session, graph.id, "repo", "run-2", "package.json", '{"dependencies":{"lodash":"4.17.21"}}', source=source)
+    await engine.dispose()
+    assert source.calls == 1

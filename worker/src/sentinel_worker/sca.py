@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Edge, Finding, Node
+from .models import AdvisoryCache, Edge, Finding, Node
 from .security import compute_fingerprint
 
 
@@ -150,7 +151,7 @@ async def scan_dependencies(
         )
         await db.merge(dep_node)
         reachable = await _has_import_reference(db, graph_id, dependency.name)
-        for advisory in await advisory_source.lookup(dependency):
+        for advisory in await _lookup_with_cache(db, dependency, advisory_source):
             vuln_type = "sca_reachable" if reachable else "sca_unreachable"
             fingerprint = compute_fingerprint(repo_id, path, f"{vuln_type}:{dependency.name}:{advisory.vuln_id}")
             existing = await db.scalar(select(Finding).where(Finding.fingerprint == fingerprint))
@@ -176,6 +177,39 @@ async def scan_dependencies(
     return count
 
 
+async def _lookup_with_cache(db: AsyncSession, dependency: Dependency, source: AdvisorySource) -> list[Advisory]:
+    cached = await db.get(AdvisoryCache, (dependency.name, dependency.ecosystem, dependency.version))
+    now_utc = datetime.now(UTC)
+    if cached is not None and _as_utc(cached.expires_at) > now_utc:
+        return [_advisory_from_json(row) for row in json.loads(cached.advisories_json)]
+
+    advisories = await source.lookup(dependency)
+    payload = json.dumps(
+        [
+            {
+                "package": advisory.package,
+                "ecosystem": advisory.ecosystem,
+                "affected_version": advisory.affected_version,
+                "vuln_id": advisory.vuln_id,
+                "severity": advisory.severity,
+                "summary": advisory.summary,
+            }
+            for advisory in advisories
+        ],
+        sort_keys=True,
+    )
+    record = AdvisoryCache(
+        package=dependency.name,
+        ecosystem=dependency.ecosystem,
+        version=dependency.version,
+        advisories_json=payload,
+        fetched_at=now_utc,
+        expires_at=now_utc + timedelta(hours=24),
+    )
+    await db.merge(record)
+    return advisories
+
+
 async def _has_import_reference(db: AsyncSession, graph_id: str, package_name: str) -> bool:
     nodes = await db.scalars(select(Node).where(Node.graph_id == graph_id).where(Node.kind.in_(["FILE", "FUNCTION"])))
     return any(node.intent and package_name in node.intent for node in nodes)
@@ -189,3 +223,20 @@ def _severity_from_osv(vuln: dict) -> str:
             if "/C:H" in score or "/I:H" in score or "/A:H" in score:
                 return "high"
     return "medium"
+
+
+def _advisory_from_json(row: dict) -> Advisory:
+    return Advisory(
+        package=row["package"],
+        ecosystem=row["ecosystem"],
+        affected_version=row["affected_version"],
+        vuln_id=row["vuln_id"],
+        severity=row["severity"],
+        summary=row["summary"],
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
