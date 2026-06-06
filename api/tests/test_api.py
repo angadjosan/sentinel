@@ -2,6 +2,8 @@ from fastapi.testclient import TestClient
 from uuid import uuid4
 
 from sentinel_api.main import app
+from sentinel_api.deps import SessionLocal
+from sentinel_worker.models import TraceAccessLog
 
 
 def test_health_endpoint():
@@ -175,3 +177,26 @@ def test_run_events_streams_trace_and_completion():
             body = "".join(response.iter_text())
     assert "plan.completed" in body
     assert '"kind": "complete"' in body
+
+
+def test_run_trace_access_is_audited():
+    import anyio
+
+    repo = f"trace-audit-{uuid4().hex}"
+    with TestClient(app) as client:
+        plan = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        )
+        assert plan.status_code == 200
+        run_id = plan.json()["run"]["id"]
+        trace = client.get(f"/runs/{run_id}/trace")
+        assert trace.status_code == 200
+
+    async def read_log_count() -> int:
+        async with SessionLocal() as session:
+            rows = await session.get(TraceAccessLog, 1)
+            all_rows = await session.execute(TraceAccessLog.__table__.select().where(TraceAccessLog.run_id == run_id))
+            return len(list(all_rows))
+
+    assert anyio.run(read_log_count) >= 1

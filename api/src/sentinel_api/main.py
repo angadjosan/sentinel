@@ -12,7 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, User, now
+from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.graph_query import GraphQuery
 from sentinel_worker.graph_merge import merge_graph
@@ -346,6 +346,7 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
     run = await db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    db.add(TraceAccessLog(run_id=run.id, actor_id=principal.user_id))
     return PlainTextResponse(run.trace or "")
 
 

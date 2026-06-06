@@ -22,11 +22,11 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 """
             )
         )
+        await conn.run_sync(Base.metadata.create_all)
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:
             return []
-        await conn.run_sync(Base.metadata.create_all)
         await conn.execute(
             text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :applied_at)"),
             {"version": CURRENT_SCHEMA_VERSION, "applied_at": datetime.now(UTC).isoformat()},
