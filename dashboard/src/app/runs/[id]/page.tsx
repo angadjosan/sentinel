@@ -1,4 +1,5 @@
 import { listRuns } from "../../../lib/api";
+import { cancelRunAction } from "../actions";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -18,7 +19,15 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
     <>
       <div className="toolbar">
         <h1>Run Trace</h1>
-        <div className="muted">{run.id}</div>
+        <div className="actions">
+          <div className="muted">{run.id}</div>
+          {canCancel(run.status) ? (
+            <form action={cancelRunAction}>
+              <input type="hidden" name="runId" value={run.id} />
+              <button type="submit" className="danger">Cancel</button>
+            </form>
+          ) : null}
+        </div>
       </div>
       <section className="grid metrics">
         <div className="panel metric">
@@ -86,6 +95,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
       </section>
     </>
   );
+}
+
+function canCancel(status: string): boolean {
+  return ["queued", "claimed", "running"].includes(status);
 }
 
 type GraphUpdateEvent = {

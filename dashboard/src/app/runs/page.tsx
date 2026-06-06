@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { listRuns } from "../../lib/api";
+import { cancelRunAction } from "./actions";
 
 export default async function RunsPage() {
   const runs = await listRuns();
@@ -18,6 +19,7 @@ export default async function RunsPage() {
               <th>Status</th>
               <th>Tokens</th>
               <th>Model</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -30,11 +32,21 @@ export default async function RunsPage() {
                 <td>{run.status}</td>
                 <td>{run.token_spend.toLocaleString()}</td>
                 <td>{run.model_used ?? "not recorded"}</td>
+                <td>
+                  {canCancel(run.status) ? (
+                    <form action={cancelRunAction}>
+                      <input type="hidden" name="runId" value={run.id} />
+                      <button type="submit" className="danger">Cancel</button>
+                    </form>
+                  ) : (
+                    <span className="muted">No action</span>
+                  )}
+                </td>
               </tr>
             ))}
             {runs.length === 0 ? (
               <tr>
-                <td colSpan={5} className="muted">
+                <td colSpan={6} className="muted">
                   No runs recorded.
                 </td>
               </tr>
@@ -44,4 +56,8 @@ export default async function RunsPage() {
       </section>
     </>
   );
+}
+
+function canCancel(status: string): boolean {
+  return ["queued", "claimed", "running"].includes(status);
 }

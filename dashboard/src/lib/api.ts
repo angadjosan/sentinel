@@ -127,6 +127,15 @@ export function listRuns(): Promise<Run[]> {
   return get<Run[]>("/runs");
 }
 
+export async function cancelRun(id: string): Promise<Run> {
+  const response = await fetch(`${apiUrl}/runs/${id}/cancel`, {
+    method: "POST",
+    cache: "no-store"
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<Run>;
+}
+
 export function tokenSpend(): Promise<Array<{ component: string; input_tokens: number; output_tokens: number; est_cost_usd: number }>> {
   return get("/analytics/token-spend");
 }

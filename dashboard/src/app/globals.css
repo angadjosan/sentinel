@@ -50,6 +50,16 @@ button.primary {
   color: #fff;
 }
 
+button.danger {
+  background: #fff;
+  border-color: #fecaca;
+  color: var(--critical);
+}
+
+button.danger:hover {
+  background: #fee2e2;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
