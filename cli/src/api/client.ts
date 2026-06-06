@@ -55,7 +55,7 @@ export class SentinelApiClient {
   }
 
   findings() {
-    return this.request<Finding[]>("/findings");
+    return this.request<Finding[]>(`/findings?repo_name=${encodeURIComponent(this.config.repoName)}`);
   }
 
   finding(id: string) {

@@ -11,7 +11,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Account, Edge, Finding, Node, Run, SuppressionAudit, TokenSpendByComponent, User, now
+from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, TokenSpendByComponent, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 
@@ -127,8 +127,15 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
 
 
 @app.get("/findings", response_model=list[FindingResponse])
-async def findings(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[FindingResponse]:
-    rows = await db.scalars(select(Finding).order_by(Finding.created_at.desc()))
+async def findings(repo_name: str | None = None, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[FindingResponse]:
+    stmt = select(Finding).order_by(Finding.created_at.desc())
+    if repo_name:
+        stmt = (
+            stmt.join(Graph, Finding.graph_id == Graph.id)
+            .join(Repo, Graph.repo_id == Repo.id)
+            .where(Repo.name == repo_name)
+        )
+    rows = await db.scalars(stmt)
     return [finding_response(row) for row in rows]
 
 

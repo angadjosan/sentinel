@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+from uuid import uuid4
 
 from sentinel_api.main import app
 
@@ -53,3 +54,25 @@ def test_plan_pull_graph_and_cancel_flow():
         cancel = client.post(f"/runs/{run_id}/cancel")
         assert cancel.status_code == 200
         assert cancel.json()["status"] == "completed"
+
+
+def test_findings_can_filter_by_repo_name():
+    suffix = uuid4().hex
+    repo_a = f"filter-a-{suffix}"
+    repo_b = f"filter-b-{suffix}"
+    with TestClient(app) as client:
+        first = client.post(
+            "/plan",
+            json={"repo_name": repo_a, "content": "exec(`run ${req.query.x}`)", "with_retry": False},
+        )
+        second = client.post(
+            "/plan",
+            json={"repo_name": repo_b, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        response = client.get(f"/findings?repo_name={repo_b}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body
+    assert all(finding["vuln_type"] == "sqli" for finding in body)
