@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import asyncio
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -50,6 +49,7 @@ from .schemas import (
     TaskResponse,
     TokenBudgetRequest,
 )
+from .sse import stream_run_events
 
 
 @asynccontextmanager
@@ -474,20 +474,8 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
 @app.get("/runs/{run_id}/events")
 async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
     async def events():
-        emitted = 0
-        while True:
-            run = await db.get(Run, run_id)
-            if run is None:
-                yield f"data: {json.dumps({'kind': 'error', 'error': 'run not found'})}\n\n"
-                return
-            lines = [line for line in (await read_run_trace(db, run)).splitlines() if line.strip()]
-            for line in lines[emitted:]:
-                yield f"data: {line}\n\n"
-            emitted = len(lines)
-            if run.status in {"completed", "failed", "cancelled"}:
-                yield f"data: {json.dumps({'kind': 'complete', 'run_id': run.id, 'status': run.status})}\n\n"
-                return
-            await asyncio.sleep(0.25)
+        async for event in stream_run_events(db, run_id):
+            yield event
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
