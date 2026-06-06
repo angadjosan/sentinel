@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import chalk from "chalk";
 import { Command } from "commander";
 
@@ -12,6 +13,38 @@ import { currentDiff, lsFiles } from "./diff/git.js";
 const program = new Command();
 
 program.name("sentinel").description("Cloud-backed application security scanner").version("0.1.0");
+
+const auth = program.command("auth").description("Manage Sentinel authentication");
+auth
+  .command("login")
+  .description("Authorize this CLI with a browser-based device code")
+  .option("--poll-interval <seconds>", "Polling interval while waiting for approval", "2")
+  .action(async (options) => {
+    const config = loadConfig();
+    const client = new SentinelApiClient(config);
+    const started = await client.startDeviceAuth();
+    const verificationUrl = absoluteUrl(config.apiUrl, started.verification_url);
+    const pollIntervalMs = Math.max(250, Math.floor(Number(options.pollInterval) * 1000));
+    if (!Number.isFinite(pollIntervalMs)) {
+      throw new Error("poll interval must be a number of seconds");
+    }
+
+    console.log(`Open ${verificationUrl}`);
+    console.log(`Enter code: ${started.user_code}`);
+    console.log(`Waiting for approval; code expires in ${Math.floor(started.expires_in / 60)} minute(s).`);
+
+    const deadline = Date.now() + started.expires_in * 1000;
+    while (Date.now() < deadline) {
+      const token = await client.deviceAuthToken(started.device_code);
+      if (token.status === "approved") {
+        await writeApiKey(config, token.access_token);
+        console.log(`logged in as ${token.user_id} for account ${token.account_id}`);
+        return;
+      }
+      await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    }
+    throw new Error("device code expired before approval");
+  });
 
 program
   .command("init")
@@ -288,4 +321,8 @@ function summarizeTokens(trace: string): { rows: Array<{ component: string; inpu
     totalInput: rows.reduce((sum, row) => sum + row.input, 0),
     totalOutput: rows.reduce((sum, row) => sum + row.output, 0)
   };
+}
+
+function absoluteUrl(apiUrl: string, pathOrUrl: string): string {
+  return new URL(pathOrUrl, apiUrl).toString();
 }

@@ -23,6 +23,22 @@ export type Run = {
   trace: string;
 };
 
+export type DeviceAuthStart = {
+  device_code: string;
+  user_code: string;
+  verification_url: string;
+  expires_in: number;
+};
+
+export type DeviceAuthToken =
+  | { status: "pending" }
+  | {
+      status: "approved";
+      access_token: string;
+      account_id: string;
+      user_id: string;
+    };
+
 export class SentinelApiClient {
   constructor(private readonly config: SentinelConfig = loadConfig()) {}
 
@@ -52,6 +68,24 @@ export class SentinelApiClient {
       method: "POST",
       body: JSON.stringify({ repo_name: this.config.repoName, files })
     });
+  }
+
+  startDeviceAuth() {
+    return this.request<DeviceAuthStart>("/auth/device", { method: "POST" });
+  }
+
+  async deviceAuthToken(deviceCode: string): Promise<DeviceAuthToken> {
+    const response = await fetch(`${this.config.apiUrl}/auth/device/token?device_code=${encodeURIComponent(deviceCode)}`, {
+      headers: await this.authHeaders()
+    });
+    if (response.status === 202) {
+      return { status: "pending" };
+    }
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    }
+    const body = (await response.json()) as Omit<Extract<DeviceAuthToken, { status: "approved" }>, "status">;
+    return { status: "approved", ...body };
   }
 
   source(diff: string, runContext: string) {
