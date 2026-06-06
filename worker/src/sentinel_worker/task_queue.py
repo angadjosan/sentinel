@@ -16,8 +16,8 @@ class ClaimedTask:
     payload: dict
 
 
-async def enqueue_task(db: AsyncSession, *, repo_name: str, kind: str, payload: dict) -> Task:
-    graph = await get_or_create_graph(db, repo_name)
+async def enqueue_task(db: AsyncSession, *, repo_name: str, kind: str, payload: dict, account_id: str | None = None) -> Task:
+    graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind=kind, status="queued", trace=trace_event("task.queued", task_kind=kind))
     db.add(run)
     await db.flush()

@@ -52,14 +52,17 @@ def trace_event(kind: str, **fields: object) -> str:
     return json.dumps(payload, sort_keys=True)
 
 
-async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: str = "dev") -> Graph:
+async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: str = "dev", account_id: str | None = None) -> Graph:
     account = None
     repo = None
     from .models import Account
 
-    account = await db.scalar(select(Account).where(Account.name == account_name))
+    if account_id is not None:
+        account = await db.get(Account, account_id)
+    else:
+        account = await db.scalar(select(Account).where(Account.name == account_name))
     if account is None:
-        account = Account(name=account_name)
+        account = Account(id=account_id, name=account_name if account_id is None else account_id) if account_id else Account(name=account_name)
         db.add(account)
         await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.account_id == account.id).where(Repo.name == repo_name))
@@ -75,8 +78,8 @@ async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: st
     return graph
 
 
-async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]) -> Run:
-    graph = await get_or_create_graph(db, repo_name)
+async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str], *, account_id: str | None = None) -> Run:
+    graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="init", status="running")
     db.add(run)
     await db.flush()
@@ -91,8 +94,8 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     return run
 
 
-async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context: str = "local") -> Run:
-    graph = await get_or_create_graph(db, repo_name)
+async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context: str = "local", account_id: str | None = None) -> Run:
+    graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="source", status="running", trace=trace_event("scan.started", run_context=run_context))
     db.add(run)
     await db.flush()
@@ -119,8 +122,8 @@ async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run
     return findings
 
 
-async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_retry: bool = False) -> tuple[Run, list[Finding]]:
-    graph = await get_or_create_graph(db, repo_name)
+async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_retry: bool = False, account_id: str | None = None) -> tuple[Run, list[Finding]]:
+    graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="plan", status="running", trace=trace_event("plan.started", with_retry=with_retry))
     db.add(run)
     await db.flush()

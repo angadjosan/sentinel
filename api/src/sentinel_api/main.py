@@ -101,7 +101,7 @@ async def metrics() -> PlainTextResponse:
 
 @app.post("/init", response_model=RunResponse)
 async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    run = await bootstrap_repo(db, payload.repo_name, payload.files)
+    run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     return run_response(run)
 
@@ -111,7 +111,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
     ACTIVE_RUNS.inc()
     start = datetime.now(UTC)
     try:
-        run = await scan_diff(db, payload.repo_name, payload.diff, run_context=payload.run_context)
+        run = await scan_diff(db, payload.repo_name, payload.diff, run_context=payload.run_context, account_id=_graph_account_id(principal))
         rows = await db.scalars(select(Finding).where(Finding.run_id == run.id))
         findings = list(rows)
         for finding in findings:
@@ -130,6 +130,7 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
         repo_name=payload.repo_name,
         kind="source",
         payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context},
+        account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
     assert run is not None
@@ -183,7 +184,7 @@ async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db),
 
 @app.post("/plan", response_model=SourceResponse)
 async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
-    run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry)
+    run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
         FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
@@ -193,12 +194,18 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
 @app.get("/findings", response_model=list[FindingResponse])
 async def findings(repo_name: str | None = None, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[FindingResponse]:
     stmt = select(Finding).order_by(Finding.created_at.desc())
+    joined_graph = False
     if repo_name:
         stmt = (
             stmt.join(Graph, Finding.graph_id == Graph.id)
             .join(Repo, Graph.repo_id == Repo.id)
             .where(Repo.name == repo_name)
         )
+        joined_graph = True
+    if principal.account_id != "dev":
+        if not joined_graph:
+            stmt = stmt.join(Graph, Finding.graph_id == Graph.id)
+        stmt = stmt.where(Graph.account_id == principal.account_id)
     rows = await db.scalars(stmt)
     return [finding_response(row) for row in rows]
 
@@ -494,3 +501,7 @@ async def _actor_from_principal(db: AsyncSession, principal: Principal) -> User:
 async def _suppression_approval_required(db: AsyncSession, account_id: str) -> bool:
     account = await db.get(Account, account_id)
     return True if account is None else account.suppression_approval_required
+
+
+def _graph_account_id(principal: Principal) -> str | None:
+    return None if principal.account_id == "dev" else principal.account_id
