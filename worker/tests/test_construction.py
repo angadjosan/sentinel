@@ -129,6 +129,31 @@ async def test_build_file_graph_emits_import_edges_and_dynamic_dispatch_uncertai
 
 
 @pytest.mark.asyncio
+async def test_python_monkey_patch_marks_calls_uncertain():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(path="patch.py", content="module.func = patched_func\nmodule.func()\n", is_new=True),
+            )
+        async with session.begin():
+            target = await session.get(Node, "fn:patch.py:module.func")
+            edge = await session.scalar(select(Edge).where(Edge.dst == "fn:patch.py:module.func").where(Edge.kind == "CALLS"))
+
+    assert target is not None
+    assert edge is not None
+    assert edge.call_uncertainty == "monkey_patched"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "route_id", "auth_required"),
     [

@@ -15,6 +15,7 @@ PY_FUNCTION_RE = re.compile(r"^\s*def\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 CALL_RE = re.compile(r"(?<!function\s)\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
 IMPORT_REF_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|import\s+[^'\n]+from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\))")
 DYNAMIC_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\[\s*([A-Za-z_$][\w$]*)\s*\]\s*\(")
+MONKEY_PATCH_RE = re.compile(r"^\s*([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=", re.MULTILINE)
 EXPRESS_ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 DJANGO_ROUTE_RE = re.compile(r"\bpath\(\s*['\"]([^'\"]*)['\"]")
@@ -145,6 +146,7 @@ async def _emit_routes(db: AsyncSession, graph_id: str, source: SourceFile, lang
 async def _emit_calls(db: AsyncSession, graph_id: str, source: SourceFile, functions: list[Node]) -> None:
     by_name = {node.name: node for node in functions}
     file_node_id = f"file:{source.path}"
+    monkey_patched = {f"{match.group(1)}.{match.group(2)}" for match in MONKEY_PATCH_RE.finditer(source.content)}
     for match in DYNAMIC_CALL_RE.finditer(source.content):
         target = f"{match.group(1)}[{match.group(2)}]"
         dynamic_id = f"fn:{source.path}:{target}"
@@ -168,7 +170,8 @@ async def _emit_calls(db: AsyncSession, graph_id: str, source: SourceFile, funct
     for match in CALL_RE.finditer(source.content):
         callee_name = match.group(1).split(".")[-1]
         dst = by_name.get(callee_name)
-        if dst is not None:
+        uncertainty = "monkey_patched" if match.group(1) in monkey_patched else None
+        if dst is not None and uncertainty is None:
             await _add_edge(db, graph_id, file_node_id, dst.id, "CALLS")
         elif "." in match.group(1) or callee_name in {"eval", "exec", "spawn", "system", "popen", "query", "execute"}:
             sink_id = f"fn:{source.path}:{match.group(1)}"
@@ -189,7 +192,7 @@ async def _emit_calls(db: AsyncSession, graph_id: str, source: SourceFile, funct
                     intent="External or unresolved call target.",
                 )
             )
-            await _add_edge(db, graph_id, file_node_id, sink_id, "CALLS", call_uncertainty="unresolved_import")
+            await _add_edge(db, graph_id, file_node_id, sink_id, "CALLS", call_uncertainty=uncertainty or "unresolved_import")
 
 
 async def _emit_imports(db: AsyncSession, graph_id: str, source: SourceFile, imports: list[str]) -> None:
