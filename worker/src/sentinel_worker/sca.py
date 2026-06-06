@@ -87,6 +87,48 @@ class OSVAdvisorySource(AdvisorySource):
         return advisories
 
 
+class NVDAdvisorySource(AdvisorySource):
+    def __init__(self, base_url: str = "https://services.nvd.nist.gov/rest/json/cves/2.0", api_key: str | None = None):
+        self.base_url = base_url
+        self.api_key = api_key
+
+    async def lookup(self, dependency: Dependency) -> list[Advisory]:
+        headers = {"apiKey": self.api_key} if self.api_key else {}
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                self.base_url,
+                params={"keywordSearch": dependency.name, "keywordExactMatch": "", "noRejected": "", "resultsPerPage": 50},
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        return parse_nvd_advisories(payload, dependency)
+
+
+def parse_nvd_advisories(payload: dict, dependency: Dependency) -> list[Advisory]:
+    advisories: list[Advisory] = []
+    seen: set[str] = set()
+    for item in payload.get("vulnerabilities", []):
+        cve = item.get("cve", {})
+        vuln_id = cve.get("id")
+        if not vuln_id or vuln_id in seen:
+            continue
+        if not _nvd_mentions_affected_dependency(cve, dependency):
+            continue
+        seen.add(vuln_id)
+        advisories.append(
+            Advisory(
+                package=dependency.name,
+                ecosystem=dependency.ecosystem,
+                affected_version=dependency.version,
+                vuln_id=vuln_id,
+                severity=_severity_from_nvd(cve),
+                summary=_english_description(cve) or "NVD dependency advisory",
+            )
+        )
+    return advisories
+
+
 def parse_dependencies(path: str, content: str) -> list[Dependency]:
     if path.endswith("package-lock.json"):
         try:
@@ -229,6 +271,95 @@ def _severity_from_osv(vuln: dict) -> str:
             if "/C:H" in score or "/I:H" in score or "/A:H" in score:
                 return "high"
     return "medium"
+
+
+def _severity_from_nvd(cve: dict) -> str:
+    metrics = cve.get("metrics", {})
+    for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for item in metrics.get(key, []):
+            severity = item.get("cvssData", {}).get("baseSeverity") or item.get("baseSeverity")
+            if severity:
+                return str(severity).lower()
+    return "medium"
+
+
+def _english_description(cve: dict) -> str | None:
+    for description in cve.get("descriptions", []):
+        if description.get("lang") == "en" and description.get("value"):
+            return str(description["value"])
+    return None
+
+
+def _nvd_mentions_affected_dependency(cve: dict, dependency: Dependency) -> bool:
+    package = _normalize_package_name(dependency.name)
+    for match in _iter_cpe_matches(cve.get("configurations", [])):
+        if not match.get("vulnerable", True):
+            continue
+        criteria = str(match.get("criteria", "")).lower()
+        if package not in _normalize_package_name(criteria):
+            continue
+        if _nvd_version_matches(match, dependency.version):
+            return True
+    return False
+
+
+def _iter_cpe_matches(configurations: list[dict]):
+    for configuration in configurations:
+        yield from _iter_cpe_node(configuration)
+
+
+def _iter_cpe_node(node: dict):
+    for match in node.get("cpeMatch", []):
+        yield match
+    for child in node.get("nodes", []):
+        yield from _iter_cpe_node(child)
+
+
+def _nvd_version_matches(match: dict, version: str) -> bool:
+    cpe_version = _version_from_cpe(str(match.get("criteria", "")))
+    if cpe_version not in ("", "*", "-") and _compare_versions(version, cpe_version) == 0:
+        return True
+    if start := match.get("versionStartIncluding"):
+        if _compare_versions(version, str(start)) < 0:
+            return False
+    if start := match.get("versionStartExcluding"):
+        if _compare_versions(version, str(start)) <= 0:
+            return False
+    if end := match.get("versionEndIncluding"):
+        if _compare_versions(version, str(end)) > 0:
+            return False
+    if end := match.get("versionEndExcluding"):
+        if _compare_versions(version, str(end)) >= 0:
+            return False
+    return any(match.get(key) for key in ("versionStartIncluding", "versionStartExcluding", "versionEndIncluding", "versionEndExcluding"))
+
+
+def _version_from_cpe(criteria: str) -> str:
+    parts = criteria.split(":")
+    return parts[5] if len(parts) > 5 else ""
+
+
+def _compare_versions(left: str, right: str) -> int:
+    left_parts = _version_parts(left)
+    right_parts = _version_parts(right)
+    width = max(len(left_parts), len(right_parts))
+    left_parts.extend([0] * (width - len(left_parts)))
+    right_parts.extend([0] * (width - len(right_parts)))
+    if left_parts == right_parts:
+        return 0
+    return -1 if left_parts < right_parts else 1
+
+
+def _version_parts(version: str) -> list[int]:
+    parts: list[int] = []
+    for part in re.split(r"[.\-+_]", version):
+        match = re.match(r"(\d+)", part)
+        parts.append(int(match.group(1)) if match else 0)
+    return parts or [0]
+
+
+def _normalize_package_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
 def _advisory_from_json(row: dict) -> Advisory:

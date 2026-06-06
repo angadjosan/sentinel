@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sentinel_worker.construction import SourceFile, build_file_graph
 from sentinel_worker.models import Base, Finding, Graph
 from sentinel_worker.scan import get_or_create_graph, scan_diff
-from sentinel_worker.sca import Advisory, AdvisorySource, Dependency, parse_dependencies, scan_dependencies
+from sentinel_worker.sca import Advisory, AdvisorySource, Dependency, parse_dependencies, parse_nvd_advisories, scan_dependencies
 
 
 class CountingAdvisorySource(AdvisorySource):
@@ -52,6 +52,77 @@ def test_parse_pyproject_and_gemfile_lock_dependencies():
     assert pyproject[0].ecosystem == "pypi"
     assert gemfile[0].name == "rails"
     assert gemfile[0].ecosystem == "rubygems"
+
+
+def test_parse_nvd_advisories_matches_explicit_cpe_version():
+    dependency = Dependency("lodash", "4.17.20", "npm", "package-lock.json")
+    advisories = parse_nvd_advisories(
+        {
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "id": "CVE-2021-23337",
+                        "descriptions": [{"lang": "en", "value": "lodash command injection"}],
+                        "metrics": {"cvssMetricV31": [{"cvssData": {"baseSeverity": "HIGH"}}]},
+                        "configurations": [
+                            {
+                                "nodes": [
+                                    {
+                                        "cpeMatch": [
+                                            {
+                                                "vulnerable": True,
+                                                "criteria": "cpe:2.3:a:lodash:lodash:4.17.20:*:*:*:*:node.js:*:*",
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+        dependency,
+    )
+
+    assert advisories == [Advisory("lodash", "npm", "4.17.20", "CVE-2021-23337", "high", "lodash command injection")]
+
+
+def test_parse_nvd_advisories_matches_version_ranges_only_when_affected():
+    payload = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2024-0001",
+                    "descriptions": [{"lang": "en", "value": "affected range"}],
+                    "metrics": {"cvssMetricV31": [{"cvssData": {"baseSeverity": "CRITICAL"}}]},
+                    "configurations": [
+                        {
+                            "nodes": [
+                                {
+                                    "cpeMatch": [
+                                        {
+                                            "vulnerable": True,
+                                            "criteria": "cpe:2.3:a:example:django:*:*:*:*:*:python:*:*",
+                                            "versionStartIncluding": "3.0.0",
+                                            "versionEndExcluding": "3.2.5",
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    affected = parse_nvd_advisories(payload, Dependency("django", "3.2.0", "pypi", "requirements.txt"))
+    fixed = parse_nvd_advisories(payload, Dependency("django", "3.2.5", "pypi", "requirements.txt"))
+
+    assert affected[0].vuln_id == "CVE-2024-0001"
+    assert affected[0].severity == "critical"
+    assert fixed == []
 
 
 @pytest.mark.asyncio
