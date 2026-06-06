@@ -56,6 +56,13 @@ export class SentinelApiClient {
     });
   }
 
+  enqueueSource(diff: string, runContext: string) {
+    return this.request<{ task_id: string; run: Run }>("/source/enqueue", {
+      method: "POST",
+      body: JSON.stringify({ repo_name: this.config.repoName, diff, run_context: runContext })
+    });
+  }
+
   findings() {
     return this.request<Finding[]>(`/findings?repo_name=${encodeURIComponent(this.config.repoName)}`);
   }
@@ -140,5 +147,34 @@ export class SentinelApiClient {
       }
       return response.text();
     });
+  }
+
+  async *runEvents(id: string): AsyncGenerator<string> {
+    const token = process.env.SENTINEL_API_TOKEN;
+    const response = await fetch(`${this.config.apiUrl}/runs/${id}/events`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    });
+    if (!response.ok || !response.body) {
+      throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const chunk = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        for (const line of chunk.split("\n")) {
+          if (line.startsWith("data: ")) {
+            yield line.slice("data: ".length);
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
   }
 }

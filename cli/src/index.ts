@@ -44,10 +44,17 @@ program
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
+  .option("--queue", "Queue scan for cloud worker instead of running synchronously")
   .action(async (paths: string[], options) => {
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
     const runContext = process.env.CI ? "ci" : "local";
-    const result = await new SentinelApiClient().source(diff, runContext);
+    const client = new SentinelApiClient();
+    if (options.queue) {
+      const queued = await client.enqueueSource(diff, runContext);
+      console.log(`queued task ${queued.task_id}; run ${queued.run.id}`);
+      return;
+    }
+    const result = await client.source(diff, runContext);
     for (const finding of result.findings) {
       console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type} ${finding.id}`);
       console.log(`  ${finding.title}`);
@@ -202,6 +209,21 @@ runs
         console.log(`  ${row.component}: ${row.input.toLocaleString()} in + ${row.output.toLocaleString()} out = ${(row.input + row.output).toLocaleString()}`);
       }
       console.log(`  Total: ${summary.totalInput.toLocaleString()} in + ${summary.totalOutput.toLocaleString()} out = ${(summary.totalInput + summary.totalOutput).toLocaleString()}`);
+    }
+  });
+runs
+  .command("watch")
+  .argument("<id>", "Run ID")
+  .action(async (id: string) => {
+    const client = new SentinelApiClient();
+    for await (const event of client.runEvents(id)) {
+      console.log(event);
+      try {
+        const parsed = JSON.parse(event) as { kind?: string; status?: string };
+        if (parsed.kind === "complete" || parsed.status === "failed" || parsed.status === "cancelled") break;
+      } catch {
+        // Non-JSON trace lines are still useful to display.
+      }
     }
   });
 runs
