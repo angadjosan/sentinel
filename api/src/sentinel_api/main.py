@@ -19,6 +19,7 @@ from sentinel_worker.graph_merge import merge_graph
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
+from sentinel_worker.trace_store import offload_trace_if_large, read_run_trace
 
 from .auth import Principal, current_principal, require_admin
 from .deps import get_db, init_schema
@@ -336,6 +337,7 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
     run = Run(graph_id=finding.graph_id, kind="pentest", status="completed", completed_at=now())
     run.trace = trace_event("pentest.oracle.evaluated", confirmed=oracle_result.confirmed, oracle_kind=oracle_result.kind)
     db.add(run)
+    await offload_trace_if_large(db, run)
     if oracle_result.confirmed:
         if finding.node_id:
             await GraphQuery(db, finding.graph_id).confirm_exploit(finding.node_id, finding.node_id, finding.id, oracle_result)
@@ -369,7 +371,7 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     db.add(TraceAccessLog(run_id=run.id, actor_id=principal.user_id))
-    return PlainTextResponse(run.trace or "")
+    return PlainTextResponse(await read_run_trace(db, run))
 
 
 @app.get("/runs/{run_id}/events")
@@ -381,7 +383,7 @@ async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal:
             if run is None:
                 yield f"data: {json.dumps({'kind': 'error', 'error': 'run not found'})}\n\n"
                 return
-            lines = [line for line in (run.trace or "").splitlines() if line.strip()]
+            lines = [line for line in (await read_run_trace(db, run)).splitlines() if line.strip()]
             for line in lines[emitted:]:
                 yield f"data: {line}\n\n"
             emitted = len(lines)
@@ -402,6 +404,7 @@ async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal:
         run.status = "cancelled"
         run.completed_at = now()
         run.trace = "\n".join([run.trace or "", trace_event("run.cancelled")]).strip()
+        await offload_trace_if_large(db, run)
     return run_response(run)
 
 

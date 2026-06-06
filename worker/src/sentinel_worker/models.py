@@ -125,6 +125,14 @@ class Run(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class RunTraceChunk(Base):
+    __tablename__ = "run_traces"
+
+    run_id: Mapped[str] = mapped_column(String, ForeignKey("runs.id"), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chunk: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class Task(Base):
     __tablename__ = "tasks"
 

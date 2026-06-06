@@ -14,6 +14,7 @@ from .models import Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
 from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
 from .source_store import store_source_snapshot
+from .trace_store import offload_trace_if_large
 
 
 SQLI_RE = re.compile(r"(query|execute)\s*\([^)]*(\+|\$\{|format\(|f['\"])", re.IGNORECASE)
@@ -91,6 +92,7 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     run.status = "completed"
     run.completed_at = now()
     run.trace = trace_event("init.completed", file_count=len(files))
+    await offload_trace_if_large(db, run)
     return run
 
 
@@ -119,6 +121,7 @@ async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run
     run.status = "completed"
     run.completed_at = now()
     run.trace = "\n".join([run.trace, trace_event("scan.completed", finding_count=findings)])
+    await offload_trace_if_large(db, run)
     return findings
 
 
@@ -135,6 +138,7 @@ async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_re
     run.status = "completed"
     run.completed_at = now()
     run.trace = "\n".join([run.trace, trace_event("plan.completed", finding_count=len(findings))])
+    await offload_trace_if_large(db, run)
     return run, findings
 
 

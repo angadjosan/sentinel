@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Run, Task, now
 from .scan import get_or_create_graph, trace_event
+from .trace_store import offload_trace_if_large
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ async def complete_task(db: AsyncSession, *, task_id: str, trace: str | None = N
         run.status = "completed"
         run.completed_at = now()
         run.trace = "\n".join(part for part in [run.trace, trace, trace_event("task.completed", task_id=task.id)] if part)
+        await offload_trace_if_large(db, run)
     return task
 
 
@@ -75,6 +77,7 @@ async def fail_task(db: AsyncSession, *, task_id: str, error: str) -> Task:
         run.status = "failed"
         run.completed_at = now()
         run.trace = "\n".join([run.trace or "", trace_event("task.failed", task_id=task.id, error=error)]).strip()
+        await offload_trace_if_large(db, run)
     return task
 
 
@@ -89,6 +92,7 @@ async def cancel_task(db: AsyncSession, *, task_id: str) -> Task:
         run.status = "cancelled"
         run.completed_at = now()
         run.trace = "\n".join([run.trace or "", trace_event("task.cancelled", task_id=task.id)]).strip()
+        await offload_trace_if_large(db, run)
     return task
 
 
