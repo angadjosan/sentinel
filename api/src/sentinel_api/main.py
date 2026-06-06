@@ -34,6 +34,7 @@ from .schemas import (
     TaskCompleteRequest,
     TaskFailRequest,
     TaskResponse,
+    TokenBudgetRequest,
 )
 
 
@@ -108,6 +109,7 @@ async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), pr
 
 @app.post("/source", response_model=SourceResponse)
 async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
+    await _check_token_budget(db, principal)
     ACTIVE_RUNS.inc()
     start = datetime.now(UTC)
     try:
@@ -125,6 +127,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
 
 @app.post("/source/enqueue", response_model=EnqueueResponse)
 async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
+    await _check_token_budget(db, principal)
     task = await enqueue_task(
         db,
         repo_name=payload.repo_name,
@@ -184,6 +187,7 @@ async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db),
 
 @app.post("/plan", response_model=SourceResponse)
 async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
+    await _check_token_budget(db, principal)
     run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
@@ -430,12 +434,48 @@ async def confirmation_rate(db: AsyncSession = Depends(get_db), principal: Princ
     return {"total": int(total), "confirmed": int(confirmed), "rate": (float(confirmed) / float(total)) if total else 0.0}
 
 
+@app.put("/admin/accounts/{account_id}/token-budget")
+async def set_token_budget(account_id: str, payload: TokenBudgetRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str | None]:
+    account = await db.get(Account, account_id)
+    if account is None:
+        account = Account(id=account_id, name=account_id)
+        db.add(account)
+        await db.flush()
+    account.monthly_token_budget = payload.monthly_token_budget
+    return {"account_id": account.id, "monthly_token_budget": account.monthly_token_budget}
+
+
 def _percentile(values: list[float], percentile: float) -> float:
     if not values:
         return 0.0
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * percentile)))
     return ordered[index]
+
+
+async def _check_token_budget(db: AsyncSession, principal: Principal) -> None:
+    account_id = _graph_account_id(principal)
+    if account_id is None:
+        return
+    account = await db.get(Account, account_id)
+    if account is None or account.monthly_token_budget is None:
+        return
+    start = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    spent = await db.scalar(
+        select(func.sum(Run.token_spend))
+        .join(Graph, Run.graph_id == Graph.id)
+        .where(Graph.account_id == account_id)
+        .where(Run.created_at >= start)
+    ) or 0
+    if int(spent) >= account.monthly_token_budget:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "monthly_token_budget_exceeded",
+                "spent": int(spent),
+                "budget": account.monthly_token_budget,
+            },
+        )
 
 
 def node_response(node: Node) -> NodeResponse:

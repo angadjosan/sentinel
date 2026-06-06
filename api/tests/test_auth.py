@@ -50,3 +50,22 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     assert findings_b.status_code == 200
     assert {finding["vuln_type"] for finding in findings_a.json()} == {"sqli"}
     assert {finding["vuln_type"] for finding in findings_b.json()} == {"cmdi"}
+
+
+def test_monthly_token_budget_blocks_new_runs(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token = create_token("budget-admin", "budget-account", "admin")
+    with TestClient(app) as client:
+        budget = client.put(
+            "/admin/accounts/budget-account/token-budget",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"monthly_token_budget": 0},
+        )
+        assert budget.status_code == 200
+        response = client.post(
+            "/plan",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"repo_name": "budget-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        )
+    assert response.status_code == 429
+    assert response.json()["detail"]["error"] == "monthly_token_budget_exceeded"

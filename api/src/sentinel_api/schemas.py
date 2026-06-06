@@ -89,6 +89,10 @@ class TaskFailRequest(BaseModel):
     error: str = Field(min_length=1)
 
 
+class TokenBudgetRequest(BaseModel):
+    monthly_token_budget: int | None = Field(default=None, ge=0)
+
+
 class NodeResponse(BaseModel):
     id: str
     kind: str
