@@ -98,6 +98,15 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
     assert repo is not None
+    await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context)
+    return run
+
+
+async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run: Run, diff: str, run_context: str = "local") -> int:
+    if run.status != "running":
+        run.status = "running"
+    if not run.trace:
+        run.trace = trace_event("scan.started", run_context=run_context)
     findings = 0
     for file in parse_unified_diff(diff):
         await store_source_snapshot(db, repo_id=repo.id, commit_hash=run.id, file_path=file.path, content=file.content)
@@ -107,7 +116,7 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     run.status = "completed"
     run.completed_at = now()
     run.trace = "\n".join([run.trace, trace_event("scan.completed", finding_count=findings)])
-    return run
+    return findings
 
 
 async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_retry: bool = False) -> tuple[Run, list[Finding]]:
