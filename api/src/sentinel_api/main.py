@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.graph_query import GraphQuery
+from sentinel_worker.graph_merge import merge_graph
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
@@ -25,6 +26,7 @@ from .schemas import (
     EnqueueResponse,
     FindingResponse,
     GraphResponse,
+    GraphMergeRequest,
     InitRequest,
     NodeResponse,
     PentestRequest,
@@ -385,6 +387,18 @@ async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depen
     nodes = list(await db.scalars(select(Node).limit(limit)))
     edges = list(await db.scalars(select(Edge).limit(limit)))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.post("/admin/graphs/merge")
+async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str]:
+    branch = await db.get(Graph, payload.branch_graph_id)
+    main = await db.get(Graph, payload.main_graph_id)
+    if branch is None or main is None:
+        raise HTTPException(status_code=404, detail="branch or main graph not found")
+    if principal.account_id != "dev" and (branch.account_id != principal.account_id or main.account_id != principal.account_id):
+        raise HTTPException(status_code=403, detail="cannot merge graphs from another account")
+    copied = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
+    return {"branch_graph_id": payload.branch_graph_id, "main_graph_id": payload.main_graph_id, "copied": copied}
 
 
 @app.get("/analytics/token-spend")

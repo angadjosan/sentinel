@@ -93,6 +93,11 @@ class TokenBudgetRequest(BaseModel):
     monthly_token_budget: int | None = Field(default=None, ge=0)
 
 
+class GraphMergeRequest(BaseModel):
+    branch_graph_id: str = Field(min_length=1)
+    main_graph_id: str = Field(min_length=1)
+
+
 class NodeResponse(BaseModel):
     id: str
     kind: str
