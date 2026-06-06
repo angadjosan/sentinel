@@ -3,12 +3,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .languages import language_for
-from .models import SourceFileSnapshot
+from .models import Account, Repo, SourceFileSnapshot
 
 
 DEV_SOURCE_KEY = "sentinel-dev-source-key"
@@ -46,8 +48,8 @@ async def store_source_snapshot(
         language=language_for(file_path),
         deleted=deleted,
     )
-    await db.merge(snapshot)
-    return snapshot
+    stored = await db.merge(snapshot)
+    return stored
 
 
 async def read_source_snapshot(db: AsyncSession, *, repo_id: str, commit_hash: str, file_path: str) -> str:
@@ -55,3 +57,17 @@ async def read_source_snapshot(db: AsyncSession, *, repo_id: str, commit_hash: s
     if snapshot is None or snapshot.deleted:
         raise FileNotFoundError(file_path)
     return decrypt_source(snapshot.content_enc)
+
+
+async def enforce_source_retention_for_account(db: AsyncSession, account_id: str, *, current_time: datetime | None = None) -> int:
+    account = await db.get(Account, account_id)
+    if account is None:
+        return 0
+    cutoff = (current_time or datetime.now(UTC)) - timedelta(days=account.source_retention_days)
+    result = await db.execute(
+        delete(SourceFileSnapshot).where(
+            SourceFileSnapshot.repo_id.in_(select(Repo.id).where(Repo.account_id == account_id)),
+            SourceFileSnapshot.created_at < cutoff,
+        )
+    )
+    return int(result.rowcount or 0)
