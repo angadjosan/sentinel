@@ -1,4 +1,5 @@
 import pytest
+import json
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from sqlalchemy import select
@@ -58,3 +59,21 @@ async def test_secret_severity_reflects_exfiltration_sink():
         finding = await session.scalar(select(Finding).where(Finding.vuln_type == "secret_leak"))
     assert finding is not None
     assert finding.severity == "critical"
+
+
+@pytest.mark.asyncio
+async def test_scan_trace_reports_blast_radius_and_adapter_coverage():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+      async with session.begin():
+        run = await scan_diff(session, "repo", "+++ b/app.js\n+app.get('/u', (req,res)=> res.json({ok:true}))")
+    events = [json.loads(line) for line in run.trace.splitlines()]
+    graph_update = next(event for event in events if event["kind"] == "graph_update.completed")
+    coverage = next(event for event in events if event["kind"] == "adapter.coverage")
+    assert graph_update["changed_files"] == 1
+    assert graph_update["blast_radius_files"] == 1
+    assert coverage["matched_files"] == ["app.js"]
+    assert coverage["unmatched_files"] == []
