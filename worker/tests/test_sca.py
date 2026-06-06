@@ -17,6 +17,15 @@ def test_parse_package_json_dependencies_from_full_or_partial_content():
     assert partial[0].version == "4.17.21"
 
 
+def test_parse_pyproject_and_gemfile_lock_dependencies():
+    pyproject = parse_dependencies("pyproject.toml", 'dependencies = ["django==3.2.0"]')
+    gemfile = parse_dependencies("Gemfile.lock", "GEM\n  specs:\n    rails (6.1.0)\n")
+    assert pyproject[0].name == "django"
+    assert pyproject[0].ecosystem == "pypi"
+    assert gemfile[0].name == "rails"
+    assert gemfile[0].ecosystem == "rubygems"
+
+
 @pytest.mark.asyncio
 async def test_sca_emits_reachable_dependency_finding():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

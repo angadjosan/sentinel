@@ -14,6 +14,8 @@ from .security import compute_fingerprint
 
 REQUIREMENT_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)==([^\s#]+)", re.MULTILINE)
 IMPORT_RE = re.compile(r"\b(?:import|require\()\s*['\"]?(@?[A-Za-z0-9_.\-\/]+)")
+PYPROJECT_DEP_RE = re.compile(r"['\"]([A-Za-z0-9_.\-]+)==([^'\"]+)['\"]")
+GEM_LOCK_RE = re.compile(r"^\s{4}([A-Za-z0-9_.\-]+)\s+\(([^)]+)\)", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,7 @@ class BuiltinAdvisorySource(AdvisorySource):
         Advisory("lodash", "npm", "4.17.21", "CVE-2021-23337", "high", "lodash command injection in template handling"),
         Advisory("django", "pypi", "3.2.0", "CVE-2021-33203", "medium", "Django potential directory traversal issue"),
         Advisory("express", "npm", "4.17.0", "GHSA-example-express", "medium", "Express vulnerable version example advisory"),
+        Advisory("rails", "rubygems", "6.1.0", "CVE-2021-22885", "high", "Rails vulnerable version example advisory"),
     ]
 
     async def lookup(self, dependency: Dependency) -> list[Advisory]:
@@ -97,6 +100,10 @@ def parse_dependencies(path: str, content: str) -> list[Dependency]:
         return deps
     if path.endswith("requirements.txt"):
         return [Dependency(name=match.group(1), version=match.group(2), ecosystem="pypi", manifest_path=path) for match in REQUIREMENT_RE.finditer(content)]
+    if path.endswith("pyproject.toml"):
+        return [Dependency(name=match.group(1), version=match.group(2), ecosystem="pypi", manifest_path=path) for match in PYPROJECT_DEP_RE.finditer(content)]
+    if path.endswith("Gemfile.lock"):
+        return [Dependency(name=match.group(1), version=match.group(2), ecosystem="rubygems", manifest_path=path) for match in GEM_LOCK_RE.finditer(content)]
     return []
 
 
