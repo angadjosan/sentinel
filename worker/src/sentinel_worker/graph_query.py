@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -34,7 +34,7 @@ class GraphQuery:
             stmt = select(Edge).where(Edge.graph_id == self.graph_id).where(Edge.src == current)
             if edge_kinds:
                 stmt = stmt.where(Edge.kind.in_(edge_kinds))
-            edges = list(await self.db.scalars(stmt))
+            edges = list(await self.db.scalars(stmt.order_by(Edge.kind.asc(), Edge.dst.asc(), Edge.id.asc())))
             for edge in edges:
                 node = await self.db.get(Node, edge.dst)
                 if node is None:
@@ -60,7 +60,7 @@ class GraphQuery:
             stmt = select(Edge).where(Edge.graph_id == self.graph_id).where(Edge.src == current)
             if edge_kinds:
                 stmt = stmt.where(Edge.kind.in_(edge_kinds))
-            for edge in list(await self.db.scalars(stmt)):
+            for edge in list(await self.db.scalars(stmt.order_by(Edge.kind.asc(), Edge.dst.asc(), Edge.id.asc()))):
                 if edge.dst not in path:
                     queue.append((edge.dst, [*path, edge.dst]))
         return paths
@@ -88,19 +88,38 @@ class GraphQuery:
 
     async def serialize_for_prompt(self, node_ids: list[str], max_hops: int = 1) -> str:
         lines: list[str] = []
-        included: set[str] = set()
+        included_nodes: set[str] = set()
+        included_edges: set[int] = set()
         for node_id in node_ids:
             node = await self.db.get(Node, node_id)
-            if node is None:
+            if node is None or node.id in included_nodes:
                 continue
-            lines.append(self._format_node(node, 0))
-            included.add(node.id)
+            lines.extend(self._format_node_block(node))
+            included_nodes.add(node.id)
+            route_has_guard = False
+            module_summaries: dict[str, Counter[str]] = defaultdict(Counter)
             for neighbor in await self.neighbors(node.id, edge_kinds=["CALLS", "FLOWS_TO", "GUARDED_BY", "CONFIRMED_EXPLOIT"], max_hops=max_hops):
-                if neighbor.node.id in included:
+                if neighbor.depth >= 2:
+                    module_summaries[_module_for(neighbor.node)][neighbor.node.kind] += 1
                     continue
-                lines.append(f"  -> {neighbor.edge.kind} {self._format_node(neighbor.node, neighbor.depth)}")
-                included.add(neighbor.node.id)
-        return "\n".join(lines)
+                if neighbor.edge.id in included_edges:
+                    continue
+                included_edges.add(neighbor.edge.id)
+                if neighbor.edge.kind == "GUARDED_BY":
+                    route_has_guard = True
+                lines.append(f"  -> {neighbor.edge.kind}{self._format_edge_attrs(neighbor.edge)}  {self._format_node_inline(neighbor.node)}")
+                if neighbor.node.label:
+                    lines.append(f'    label: "{neighbor.node.label}"')
+                if neighbor.node.intent:
+                    lines.append(f'    intent: "{neighbor.node.intent}"')
+                included_nodes.add(neighbor.node.id)
+            if node.kind == "ROUTE" and not route_has_guard:
+                lines.append("  -> GUARDED_BY  none")
+            for module, counts in sorted(module_summaries.items()):
+                summary = ", ".join(f"{count} {kind.lower()}" for kind, count in sorted(counts.items()))
+                lines.append(f"  -> [MODULE] {module} -- {summary}")
+            lines.append("")
+        return "\n".join(lines).strip()
 
     async def confirm_exploit(self, entry_node_id: str, sink_node_id: str, finding_id: str, oracle_result: OracleResult) -> Finding:
         if not oracle_result.confirmed:
@@ -135,7 +154,17 @@ class GraphQuery:
                 return True
         return False
 
-    def _format_node(self, node: Node, depth: int) -> str:
+    def _format_node_block(self, node: Node) -> list[str]:
+        lines = [self._format_node_inline(node)]
+        if node.label:
+            lines.append(f'  label: "{node.label}"')
+        if node.intent:
+            lines.append(f'  intent: "{node.intent}"')
+        if node.is_new:
+            lines.append("  ! NEW (this diff)")
+        return lines
+
+    def _format_node_inline(self, node: Node) -> str:
         flags = []
         if node.is_entry_point:
             flags.append("entry_point=true")
@@ -143,9 +172,31 @@ class GraphQuery:
             flags.append("auth_required=true")
         if node.is_sink:
             flags.append("sink=true")
+        if node.trust_level:
+            flags.append(f"trust_level={node.trust_level}")
         if node.is_new:
-            flags.append("NEW")
-        details = " ".join(flags)
-        label = f" label={node.label}" if node.label else ""
+            flags.append("is_new=true")
+        details = "  ".join(flags)
         pointer = f" {node.file}:{node.line_start}" if node.file else ""
-        return f"[{node.kind}] {node.name}{pointer}{label} {details}".strip()
+        return f"[{node.kind}] {node.name}{pointer}  {details}".strip()
+
+    def _format_edge_attrs(self, edge: Edge) -> str:
+        attrs = []
+        if edge.order_index is not None:
+            attrs.append(f"order={edge.order_index}")
+        if edge.tainted:
+            attrs.append("tainted=true")
+        if edge.sanitized:
+            attrs.append("sanitized=true")
+        if edge.taint_uncertain:
+            attrs.append("taint_uncertain=true")
+        if edge.call_uncertainty:
+            attrs.append(f"call_uncertainty={edge.call_uncertainty}")
+        return f"  {'  '.join(attrs)}" if attrs else ""
+
+
+def _module_for(node: Node) -> str:
+    if not node.file:
+        return "external"
+    parts = node.file.replace("\\", "/").split("/")
+    return "/".join(parts[:-1]) or "."
