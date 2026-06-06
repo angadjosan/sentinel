@@ -7,7 +7,7 @@ import signal
 import structlog
 
 from .db import create_engine, create_sessionmaker
-from .models import Base
+from .migrations import apply_migrations
 from .runner import run_one_task
 
 
@@ -17,8 +17,7 @@ log = structlog.get_logger()
 async def run_worker(*, worker_id: str, poll_interval: float = 2.0, stop: asyncio.Event | None = None) -> None:
     engine = create_engine()
     sessionmaker = create_sessionmaker(engine)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    await apply_migrations(engine)
     stop_event = stop or asyncio.Event()
     try:
         while not stop_event.is_set():
