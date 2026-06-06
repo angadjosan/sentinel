@@ -160,3 +160,18 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
         assert confirmed.json()["confirmed"] is True
         graph = client.get("/graph")
     assert any(edge["kind"] == "CONFIRMED_EXPLOIT" for edge in graph.json()["edges"])
+
+
+def test_run_events_streams_trace_and_completion():
+    repo = f"events-{uuid4().hex}"
+    with TestClient(app) as client:
+        plan = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        )
+        assert plan.status_code == 200
+        run_id = plan.json()["run"]["id"]
+        with client.stream("GET", f"/runs/{run_id}/events") as response:
+            body = "".join(response.iter_text())
+    assert "plan.completed" in body
+    assert '"kind": "complete"' in body

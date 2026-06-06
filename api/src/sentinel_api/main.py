@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
@@ -344,6 +345,27 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return PlainTextResponse(run.trace or "")
+
+
+@app.get("/runs/{run_id}/events")
+async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
+    async def events():
+        emitted = 0
+        while True:
+            run = await db.get(Run, run_id)
+            if run is None:
+                yield f"data: {json.dumps({'kind': 'error', 'error': 'run not found'})}\n\n"
+                return
+            lines = [line for line in (run.trace or "").splitlines() if line.strip()]
+            for line in lines[emitted:]:
+                yield f"data: {line}\n\n"
+            emitted = len(lines)
+            if run.status in {"completed", "failed", "cancelled"}:
+                yield f"data: {json.dumps({'kind': 'complete', 'run_id': run.id, 'status': run.status})}\n\n"
+                return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @app.post("/runs/{run_id}/cancel", response_model=RunResponse)
