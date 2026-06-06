@@ -11,7 +11,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Edge, Finding, Node, Run, SuppressionAudit, User, now
+from sentinel_worker.models import Account, Edge, Finding, Node, Run, SuppressionAudit, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 
@@ -162,13 +162,22 @@ async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession =
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    actor = await _dev_actor(db)
-    finding.status = "suppressed"
-    finding.suppressed = True
+    if principal.role == "readonly":
+        raise HTTPException(status_code=403, detail="readonly users cannot suppress findings")
+    actor = await _actor_from_principal(db, principal)
+    approval_required = await _suppression_approval_required(db, actor.account_id)
+    if principal.role != "admin" and approval_required:
+        finding.status = "suppression_pending"
+        finding.suppressed = False
+        action = "suppress"
+    else:
+        finding.status = "suppressed"
+        finding.suppressed = True
+        action = "suppress"
     finding.suppressed_by = actor.id
     finding.suppressed_at = now()
     finding.suppression_reason = payload.reason
-    db.add(SuppressionAudit(finding_id=finding.id, action="suppress", actor_id=actor.id, reason=payload.reason))
+    db.add(SuppressionAudit(finding_id=finding.id, action=action, actor_id=actor.id, reason=payload.reason))
     return finding_response(finding)
 
 
@@ -177,11 +186,36 @@ async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    actor = await _dev_actor(db)
+    actor = await _actor_from_principal(db, principal)
     finding.status = "open"
     finding.suppressed = False
     finding.suppression_reason = None
     db.add(SuppressionAudit(finding_id=finding.id, action="unsuppress", actor_id=actor.id, reason=payload.reason))
+    return finding_response(finding)
+
+
+@app.post("/findings/{finding_id}/suppress/approve", response_model=FindingResponse)
+async def approve_suppression(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> FindingResponse:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    actor = await _actor_from_principal(db, principal)
+    finding.status = "suppressed"
+    finding.suppressed = True
+    finding.suppressed_at = now()
+    db.add(SuppressionAudit(finding_id=finding.id, action="approve", actor_id=actor.id, reason=payload.reason))
+    return finding_response(finding)
+
+
+@app.post("/findings/{finding_id}/suppress/reject", response_model=FindingResponse)
+async def reject_suppression(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> FindingResponse:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    actor = await _actor_from_principal(db, principal)
+    finding.status = "open"
+    finding.suppressed = False
+    db.add(SuppressionAudit(finding_id=finding.id, action="reject", actor_id=actor.id, reason=payload.reason))
     return finding_response(finding)
 
 
@@ -284,8 +318,6 @@ def edge_response(edge: Edge) -> EdgeResponse:
 
 
 async def _dev_actor(db: AsyncSession) -> User:
-    from sentinel_worker.models import Account
-
     account = await db.scalar(select(Account).where(Account.name == "dev"))
     if account is None:
         account = Account(name="dev")
@@ -297,3 +329,24 @@ async def _dev_actor(db: AsyncSession) -> User:
         db.add(user)
         await db.flush()
     return user
+
+
+async def _actor_from_principal(db: AsyncSession, principal: Principal) -> User:
+    if principal.user_id == "dev":
+        return await _dev_actor(db)
+    account = await db.get(Account, principal.account_id)
+    if account is None:
+        account = Account(id=principal.account_id, name=principal.account_id)
+        db.add(account)
+        await db.flush()
+    user = await db.get(User, principal.user_id)
+    if user is None:
+        user = User(id=principal.user_id, account_id=account.id, email=f"{principal.user_id}@sentinel.local", role=principal.role)
+        db.add(user)
+        await db.flush()
+    return user
+
+
+async def _suppression_approval_required(db: AsyncSession, account_id: str) -> bool:
+    account = await db.get(Account, account_id)
+    return True if account is None else account.suppression_approval_required

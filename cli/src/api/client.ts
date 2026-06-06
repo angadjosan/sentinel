@@ -87,6 +87,20 @@ export class SentinelApiClient {
     });
   }
 
+  approveSuppression(id: string, reason: string) {
+    return this.request<Finding>(`/findings/${id}/suppress/approve`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    });
+  }
+
+  rejectSuppression(id: string, reason: string) {
+    return this.request<Finding>(`/findings/${id}/suppress/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    });
+  }
+
   pentest(id: string, sanitizerOutput = "", behavioralProof?: string, proofDetail = "") {
     return this.request<Finding>("/pentest", {
       method: "POST",

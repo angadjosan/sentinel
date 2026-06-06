@@ -163,6 +163,22 @@ suppress
     const finding = await new SentinelApiClient().unsuppress(id, options.reason);
     console.log(`${finding.id}\t${finding.status}`);
   });
+suppress
+  .command("approve")
+  .argument("<id>", "Finding ID")
+  .requiredOption("--reason <reason>", "Approval reason")
+  .action(async (id: string, options) => {
+    const finding = await new SentinelApiClient().approveSuppression(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
+  });
+suppress
+  .command("reject")
+  .argument("<id>", "Finding ID")
+  .requiredOption("--reason <reason>", "Rejection reason")
+  .action(async (id: string, options) => {
+    const finding = await new SentinelApiClient().rejectSuppression(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
+  });
 
 const runs = program.command("runs").description("Manage run traces");
 runs
