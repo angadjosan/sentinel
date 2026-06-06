@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shlex
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -21,6 +22,37 @@ class MicroVMPlan:
     boot_argv: list[str]
     healthcheck_argv: list[str]
     egress_rules: list[str]
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    argv: list[str]
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+
+
+class SandboxExecutor:
+    async def run(self, argv: list[str], *, timeout_seconds: int = 30) -> CommandResult:
+        raise NotImplementedError
+
+
+class DryRunSandboxExecutor(SandboxExecutor):
+    async def run(self, argv: list[str], *, timeout_seconds: int = 30) -> CommandResult:
+        return CommandResult(argv=argv, exit_code=0, stdout="dry-run")
+
+
+class LocalSubprocessSandboxExecutor(SandboxExecutor):
+    async def run(self, argv: list[str], *, timeout_seconds: int = 30) -> CommandResult:
+        process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+            return CommandResult(argv=argv, exit_code=process.returncode or 0, stdout=stdout.decode(errors="replace"), stderr=stderr.decode(errors="replace"))
+        except asyncio.TimeoutError:
+            process.kill()
+            stdout, stderr = await process.communicate()
+            return CommandResult(argv=argv, exit_code=-1, stdout=stdout.decode(errors="replace"), stderr=stderr.decode(errors="replace"), timed_out=True)
 
 
 def build_microvm_plan(config: PentestSandboxConfig) -> MicroVMPlan:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from .vm import CommandResult, SandboxExecutor
 
 
 INTEGER_TYPES = {"int", "unsigned int", "uint32_t", "int32_t", "size_t", "uint64_t", "int64_t"}
@@ -28,6 +31,31 @@ class FuzzerHarness:
     compile_command: list[str]
     run_command: list[str]
     afl_fallback_command: list[str]
+
+
+@dataclass(frozen=True)
+class FuzzerExecutionResult:
+    compile_result: CommandResult
+    run_result: CommandResult | None
+    coverage_lines: list[str]
+    sanitizer_output: str
+
+
+SANITIZER_RE = re.compile(r"(ERROR: AddressSanitizer|AddressSanitizer|ThreadSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-buffer-overflow|use-after-free|data race)", re.IGNORECASE)
+COVERAGE_RE = re.compile(r"(?:COVERED|coverage|cov:|#\d+)", re.IGNORECASE)
+
+
+async def execute_fuzzer_harness(harness: FuzzerHarness, executor: SandboxExecutor, *, compile_timeout: int = 120, run_timeout: int = 300) -> FuzzerExecutionResult:
+    compile_result = await executor.run(harness.compile_command, timeout_seconds=compile_timeout)
+    if compile_result.exit_code != 0:
+        return FuzzerExecutionResult(compile_result=compile_result, run_result=None, coverage_lines=[], sanitizer_output=_sanitizer_text([compile_result]))
+    run_result = await executor.run(harness.run_command, timeout_seconds=run_timeout)
+    return FuzzerExecutionResult(
+        compile_result=compile_result,
+        run_result=run_result,
+        coverage_lines=_coverage_lines(run_result),
+        sanitizer_output=_sanitizer_text([compile_result, run_result]),
+    )
 
 
 def generate_libfuzzer_harness(target: FuzzerTarget, *, output_name: str = "fuzzer", max_total_time: int = 300) -> FuzzerHarness:
@@ -101,3 +129,17 @@ def _safe_identifier(value: str) -> str:
     if not cleaned or cleaned[0].isdigit():
         return f"arg_{cleaned}"
     return cleaned
+
+
+def _coverage_lines(result: CommandResult) -> list[str]:
+    lines = [line.strip() for line in f"{result.stdout}\n{result.stderr}".splitlines()]
+    return [line for line in lines if line and COVERAGE_RE.search(line)][:200]
+
+
+def _sanitizer_text(results: list[CommandResult]) -> str:
+    chunks: list[str] = []
+    for result in results:
+        text = f"{result.stdout}\n{result.stderr}".strip()
+        if SANITIZER_RE.search(text):
+            chunks.append(text)
+    return "\n".join(chunks)
