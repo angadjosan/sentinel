@@ -36,6 +36,15 @@ def test_parse_package_lock_dependencies():
     assert deps[0].ecosystem == "npm"
 
 
+def test_parse_yarn_and_pnpm_lock_dependencies():
+    yarn = parse_dependencies("yarn.lock", 'lodash@^4.17.21:\n  version "4.17.21"\n  resolved "https://registry.yarnpkg.com/lodash"\n')
+    pnpm = parse_dependencies("pnpm-lock.yaml", "packages:\n  /lodash@4.17.21:\n    resolution: {}\n")
+    assert yarn[0].name == "lodash"
+    assert yarn[0].version == "4.17.21"
+    assert pnpm[0].name == "lodash"
+    assert pnpm[0].version == "4.17.21"
+
+
 def test_parse_pyproject_and_gemfile_lock_dependencies():
     pyproject = parse_dependencies("pyproject.toml", 'dependencies = ["django==3.2.0"]')
     gemfile = parse_dependencies("Gemfile.lock", "GEM\n  specs:\n    rails (6.1.0)\n")

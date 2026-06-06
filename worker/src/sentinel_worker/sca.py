@@ -17,6 +17,8 @@ REQUIREMENT_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)==([^\s#]+)", re.MULTILINE)
 IMPORT_RE = re.compile(r"\b(?:import|require\()\s*['\"]?(@?[A-Za-z0-9_.\-\/]+)")
 PYPROJECT_DEP_RE = re.compile(r"['\"]([A-Za-z0-9_.\-]+)==([^'\"]+)['\"]")
 GEM_LOCK_RE = re.compile(r"^\s{4}([A-Za-z0-9_.\-]+)\s+\(([^)]+)\)", re.MULTILINE)
+YARN_ENTRY_RE = re.compile(r"^\"?((?:@[^/\s@]+/)?[^@\s\"]+)@[^:\n]+\"?:\n(?:  .+\n)*?  version \"([^\"]+)\"", re.MULTILINE)
+PNPM_PACKAGE_RE = re.compile(r"^\s{2}/?((?:@[^/\s@]+/)?[^@\s/]+)@([^:\n]+):", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,10 @@ def parse_dependencies(path: str, content: str) -> list[Dependency]:
             if isinstance(package, dict) and package.get("version"):
                 deps.append(Dependency(name=name, version=str(package["version"]), ecosystem="npm", manifest_path=path))
         return deps
+    if path.endswith("yarn.lock"):
+        return [Dependency(name=match.group(1), version=match.group(2), ecosystem="npm", manifest_path=path) for match in YARN_ENTRY_RE.finditer(content)]
+    if path.endswith("pnpm-lock.yaml"):
+        return [Dependency(name=match.group(1), version=match.group(2), ecosystem="npm", manifest_path=path) for match in PNPM_PACKAGE_RE.finditer(content)]
     if path.endswith("package.json"):
         try:
             payload = json.loads(content)
