@@ -26,10 +26,12 @@ export class SentinelApiClient {
   constructor(private readonly config: SentinelConfig = loadConfig()) {}
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const token = process.env.SENTINEL_API_TOKEN;
     const response = await fetch(`${this.config.apiUrl}${path}`, {
       ...init,
       headers: {
         "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init.headers ?? {})
       }
     });
@@ -127,6 +129,16 @@ export class SentinelApiClient {
   }
 
   trace(id: string) {
-    return fetch(`${this.config.apiUrl}/runs/${id}/trace`).then((response) => response.text());
+    const token = process.env.SENTINEL_API_TOKEN;
+    return fetch(`${this.config.apiUrl}/runs/${id}/trace`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    }).then((response) => {
+      if (!response.ok) {
+        return response.text().then((text) => {
+          throw new Error(`${response.status} ${response.statusText}: ${text}`);
+        });
+      }
+      return response.text();
+    });
   }
 }
