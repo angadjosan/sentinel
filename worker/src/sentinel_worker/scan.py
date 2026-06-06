@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .construction import SourceFile, build_file_graph
+from .enrichment import enrich_graph_nodes
 from .languages import language_for
 from .models import Edge, Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
@@ -89,10 +90,11 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     for path, content in files.items():
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
         await build_file_graph(db, graph.id, SourceFile(path=path, content=content, is_new=False))
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
-    run.trace = trace_event("init.completed", file_count=len(files))
+    run.trace = "\n".join(part for part in [run.trace, trace_event("init.completed", file_count=len(files))] if part)
     await offload_trace_if_large(db, run)
     return run
 
@@ -129,6 +131,7 @@ async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run
                 unmatched_adapter_files.append(file.path)
         findings += await scan_dependencies(db, graph.id, repo.id, run.id, file.path, file.content)
         findings += await _emit_pattern_findings(db, graph.id, repo.id, run.id, file)
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={file.path: file.content for file in files}, only_new=True)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()

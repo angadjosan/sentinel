@@ -50,6 +50,8 @@ async def test_bootstrap_stores_source_separately_from_nodes():
     assert node.intent is not None
     assert "password" not in node.intent
     assert source == "const password = 'secret';"
+    assert run.token_spend > 0
+    assert "semantic_enrichment" in run.trace
 
 
 @pytest.mark.asyncio

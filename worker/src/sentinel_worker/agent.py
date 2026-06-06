@@ -34,7 +34,10 @@ class MockLLMProvider:
 
     async def complete(self, *, system: str, data: str, model: str) -> LLMCallResult:
         words_in = len(system.split()) + len(data.split())
-        content = "No issues found." if not data.strip() else f"Reviewed {len(data)} bytes."
+        if "annotate a security context graph" in system.lower():
+            content = _mock_enrichment_response(data)
+        else:
+            content = "No issues found." if not data.strip() else f"Reviewed {len(data)} bytes."
         return LLMCallResult(content=content, input_tokens=words_in, output_tokens=len(content.split()), model=model, provider=self.provider)
 
 
@@ -115,3 +118,21 @@ class SentinelLLMClient:
         for marker in forbidden_markers:
             if marker in system:
                 raise ChannelViolationError(f"repository content marker found in system prompt: {marker}")
+
+
+def _mock_enrichment_response(data: str) -> str:
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return json.dumps({"annotations": []})
+    annotations = []
+    for node in payload.get("nodes", []):
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        kind = str(node.get("kind", "node")).lower()
+        name = str(node.get("name", node["id"]))
+        label = f"{name} {kind}".strip()
+        intent = f"{name} is a {kind} node discovered from structural graph context."
+        trust_level = "untrusted" if kind == "parameter" else ("trusted" if node.get("auth_required") else None)
+        annotations.append({"node_id": node["id"], "label": label[:80], "intent": intent, "trust_level": trust_level})
+    return json.dumps({"annotations": annotations}, sort_keys=True)
