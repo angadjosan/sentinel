@@ -1,8 +1,9 @@
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sentinel_worker.models import Base, Run
-from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
+from sentinel_worker.task_queue import _claimable_task_stmt, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
 
 @pytest.mark.asyncio
@@ -52,3 +53,11 @@ async def test_cancel_task_updates_run_status():
             run = await session.get(Run, task.run_id)
     assert run is not None
     assert run.status == "cancelled"
+
+
+def test_claimable_task_query_uses_postgres_skip_locked():
+    compiled = str(_claimable_task_stmt(["source", "plan"]).compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    assert "FOR UPDATE SKIP LOCKED" in compiled
+    assert "tasks.status = 'queued'" in compiled
+    assert "tasks.kind IN ('source', 'plan')" in compiled

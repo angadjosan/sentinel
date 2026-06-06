@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Run, Task, now
@@ -39,10 +39,7 @@ async def enqueue_task(db: AsyncSession, *, repo_name: str, kind: str, payload: 
 
 
 async def claim_next_task(db: AsyncSession, *, worker_id: str, kinds: list[str] | None = None) -> ClaimedTask | None:
-    stmt = select(Task).where(Task.status == "queued").order_by(Task.created_at.asc())
-    if kinds:
-        stmt = stmt.where(Task.kind.in_(kinds))
-    task = await db.scalar(stmt.limit(1))
+    task = await db.scalar(_claimable_task_stmt(kinds))
     if task is None:
         return None
     task.status = "claimed"
@@ -115,3 +112,10 @@ async def _get_task(db: AsyncSession, task_id: str) -> Task:
     if task is None:
         raise ValueError("task not found")
     return task
+
+
+def _claimable_task_stmt(kinds: list[str] | None = None) -> Select[tuple[Task]]:
+    stmt = select(Task).where(Task.status == "queued").order_by(Task.created_at.asc()).limit(1)
+    if kinds:
+        stmt = stmt.where(Task.kind.in_(kinds))
+    return stmt.with_for_update(skip_locked=True)
