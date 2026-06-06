@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
@@ -5,12 +7,13 @@ from sentinel_api.main import app
 
 
 def _create_finding(client: TestClient, token: str, marker: str) -> str:
+    unique = f"{marker}-{uuid4().hex}"
     response = client.post(
         "/plan",
         headers={"Authorization": f"Bearer {token}"},
         json={
-            "repo_name": f"repo-{marker}",
-            "content": f"Add route that calls exec(`convert ${{req.query.file}}`) // {marker}",
+            "repo_name": f"repo-{unique}",
+            "content": f"Add route that calls exec(`convert ${{req.query.file}}`) // {unique}",
             "with_retry": False,
         },
     )

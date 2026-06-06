@@ -7,7 +7,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Run
+from .models import Run, TokenSpendByComponent
 from .security import scrub_secrets
 
 
@@ -82,6 +82,21 @@ class SentinelLLMClient:
             "iteration": iteration,
         }
         run.token_spend += result.input_tokens + result.output_tokens
+        aggregate = await db.get(TokenSpendByComponent, (run_id, component, result.model))
+        if aggregate is None:
+            db.add(
+                TokenSpendByComponent(
+                    run_id=run_id,
+                    component=component,
+                    model=result.model,
+                    provider=result.provider,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                )
+            )
+        else:
+            aggregate.input_tokens += result.input_tokens
+            aggregate.output_tokens += result.output_tokens
         line = json.dumps(event, sort_keys=True)
         run.trace = "\n".join(part for part in [run.trace, scrub_secrets(line)] if part)
 

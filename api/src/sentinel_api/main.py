@@ -11,7 +11,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Account, Edge, Finding, Node, Run, SuppressionAudit, User, now
+from sentinel_worker.models import Account, Edge, Finding, Node, Run, SuppressionAudit, TokenSpendByComponent, User, now
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 
@@ -283,6 +283,24 @@ async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depen
 
 @app.get("/analytics/token-spend")
 async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, int | str]]:
+    rows = await db.execute(
+        select(
+            TokenSpendByComponent.component,
+            func.sum(TokenSpendByComponent.input_tokens),
+            func.sum(TokenSpendByComponent.output_tokens),
+        ).group_by(TokenSpendByComponent.component)
+    )
+    result = [
+        {
+            "component": component,
+            "input_tokens": int(input_tokens or 0),
+            "output_tokens": int(output_tokens or 0),
+            "est_cost_usd": 0,
+        }
+        for component, input_tokens, output_tokens in rows
+    ]
+    if result:
+        return result
     total = await db.scalar(select(func.sum(Run.token_spend))) or 0
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
 

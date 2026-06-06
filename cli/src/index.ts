@@ -193,7 +193,16 @@ runs
   .command("show")
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
-    console.log(await new SentinelApiClient().trace(id));
+    const trace = await new SentinelApiClient().trace(id);
+    console.log(trace);
+    const summary = summarizeTokens(trace);
+    if (summary.totalInput + summary.totalOutput > 0) {
+      console.log("\n--- Token Summary ---");
+      for (const row of summary.rows) {
+        console.log(`  ${row.component}: ${row.input.toLocaleString()} in + ${row.output.toLocaleString()} out = ${(row.input + row.output).toLocaleString()}`);
+      }
+      console.log(`  Total: ${summary.totalInput.toLocaleString()} in + ${summary.totalOutput.toLocaleString()} out = ${(summary.totalInput + summary.totalOutput).toLocaleString()}`);
+    }
   });
 runs
   .command("cancel")
@@ -227,3 +236,26 @@ program.parseAsync().catch((error) => {
   console.error(chalk.red(`Error: ${error.message}`));
   process.exitCode = 2;
 });
+
+function summarizeTokens(trace: string): { rows: Array<{ component: string; input: number; output: number }>; totalInput: number; totalOutput: number } {
+  const totals = new Map<string, { input: number; output: number }>();
+  for (const line of trace.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { kind?: string; component?: string; input_tokens?: number; output_tokens?: number };
+      if (event.kind !== "token_event" || !event.component) continue;
+      const current = totals.get(event.component) ?? { input: 0, output: 0 };
+      current.input += event.input_tokens ?? 0;
+      current.output += event.output_tokens ?? 0;
+      totals.set(event.component, current);
+    } catch {
+      continue;
+    }
+  }
+  const rows = Array.from(totals.entries()).map(([component, counts]) => ({ component, input: counts.input, output: counts.output }));
+  return {
+    rows,
+    totalInput: rows.reduce((sum, row) => sum + row.input, 0),
+    totalOutput: rows.reduce((sum, row) => sum + row.output, 0)
+  };
+}
