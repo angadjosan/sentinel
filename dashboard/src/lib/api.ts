@@ -48,6 +48,37 @@ export type SuppressionAudit = {
   created_at: string;
 };
 
+export type GraphNode = {
+  id: string;
+  kind: string;
+  name: string;
+  file: string | null;
+  line_start: number | null;
+  line_end: number | null;
+  language: string | null;
+  auth_required: boolean;
+  is_entry_point: boolean;
+  is_sink: boolean;
+  label: string | null;
+  intent: string | null;
+};
+
+export type GraphEdge = {
+  id: number;
+  src: string;
+  dst: string;
+  kind: string;
+  tainted: boolean;
+  sanitized: boolean;
+  taint_uncertain: boolean;
+  call_uncertainty: string | null;
+};
+
+export type GraphSnapshot = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
 const apiUrl = process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
 async function get<T>(path: string): Promise<T> {
@@ -72,6 +103,10 @@ export function pullFinding(id: string): Promise<PullFinding> {
 
 export function findingAudit(id: string): Promise<SuppressionAudit[]> {
   return get<SuppressionAudit[]>(`/findings/${id}/audit`);
+}
+
+export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
+  return get<GraphSnapshot>(`/graph?limit=${limit}`);
 }
 
 export function listRuns(): Promise<Run[]> {

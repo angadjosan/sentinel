@@ -276,6 +276,88 @@ a {
   gap: 8px;
 }
 
+.search {
+  display: flex;
+  gap: 8px;
+}
+
+.search input {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 34px;
+  min-width: 260px;
+  padding: 0 10px;
+}
+
+.graph-summary {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.node-list,
+.edge-list {
+  display: grid;
+  gap: 10px;
+  max-height: 720px;
+  overflow: auto;
+}
+
+.graph-node {
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--muted);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.graph-node.route {
+  border-left-color: var(--low);
+}
+
+.graph-node.function {
+  border-left-color: var(--muted);
+}
+
+.graph-node.dependency,
+.graph-node.sink {
+  border-left-color: var(--high);
+}
+
+.graph-node.middleware {
+  border-left-color: var(--accent);
+}
+
+.node-title {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+}
+
+.node-title span,
+.node-flags span {
+  background: var(--surface-muted);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 7px;
+}
+
+.node-flags {
+  display: flex;
+  gap: 6px;
+}
+
+.edge-row {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  padding: 8px 0;
+}
+
 .trace {
   background: #0b1220;
   border-radius: 6px;
@@ -294,7 +376,8 @@ a {
 
 @media (max-width: 900px) {
   .grid.metrics,
-  .grid.two {
+  .grid.two,
+  .graph-summary {
     grid-template-columns: 1fr;
   }
 
