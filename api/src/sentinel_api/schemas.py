@@ -14,6 +14,12 @@ class SourceRequest(BaseModel):
     run_context: str = "local"
 
 
+class PlanRequest(BaseModel):
+    repo_name: str = Field(min_length=1)
+    content: str
+    with_retry: bool = False
+
+
 class PentestRequest(BaseModel):
     repo_name: str = Field(min_length=1)
     finding_id: str | None = None
@@ -57,3 +63,34 @@ class FindingResponse(BaseModel):
 class SourceResponse(BaseModel):
     run: RunResponse
     findings: list[FindingResponse]
+
+
+class NodeResponse(BaseModel):
+    id: str
+    kind: str
+    name: str
+    file: str | None
+    line_start: int | None
+    line_end: int | None
+    language: str | None
+    auth_required: bool
+    is_entry_point: bool
+    is_sink: bool
+    label: str | None
+    intent: str | None
+
+
+class EdgeResponse(BaseModel):
+    id: int
+    src: str
+    dst: str
+    kind: str
+    tainted: bool
+    sanitized: bool
+    taint_uncertain: bool
+    call_uncertainty: str | None
+
+
+class GraphResponse(BaseModel):
+    nodes: list[NodeResponse]
+    edges: list[EdgeResponse]

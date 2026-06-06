@@ -85,6 +85,56 @@ program
   });
 
 program
+  .command("pull")
+  .description("Fetch remediation context for a finding")
+  .argument("<id>", "Finding ID")
+  .action(async (id: string) => {
+    const result = await new SentinelApiClient().pull(id);
+    console.log(`${result.finding.severity.toUpperCase()} ${result.finding.vuln_type}: ${result.finding.title}`);
+    console.log(result.finding.description);
+    console.log("\nRemediation plan:");
+    for (const item of result.remediation_plan) {
+      console.log(`- ${item}`);
+    }
+    if (result.node) {
+      console.log(`\nGraph node: ${JSON.stringify(result.node, null, 2)}`);
+    }
+  });
+
+program
+  .command("plan")
+  .description("Review a plan file, stdin, or inline text for security issues")
+  .argument("[input...]", "File path or inline text")
+  .option("--with-retry", "Run retry review passes")
+  .action(async (input: string[], options) => {
+    const joined = input.join(" ");
+    let content = joined;
+    if (joined && existsSync(joined)) {
+      content = readFileSync(joined, "utf8");
+    } else if (!joined && !process.stdin.isTTY) {
+      content = await new Promise<string>((resolve) => {
+        let data = "";
+        process.stdin.setEncoding("utf8");
+        process.stdin.on("data", (chunk) => {
+          data += chunk;
+        });
+        process.stdin.on("end", () => resolve(data));
+      });
+    }
+    if (!content.trim()) {
+      throw new Error("Provide a plan file, inline plan text, or stdin content.");
+    }
+    const result = await new SentinelApiClient().plan(content, Boolean(options.withRetry));
+    for (const finding of result.findings) {
+      console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type}: ${finding.title}`);
+      console.log(`  ${finding.description}`);
+      console.log(`  fix: ${finding.remediation}`);
+    }
+    console.log(`plan run ${result.run.id} completed with ${result.findings.length} issue(s)`);
+    process.exitCode = result.findings.length > 0 ? 1 : 0;
+  });
+
+program
   .command("pentest")
   .description("Attempt to confirm a finding with oracle evidence")
   .argument("<id>", "Finding ID")
@@ -129,14 +179,32 @@ runs
   .action(async (id: string) => {
     console.log(await new SentinelApiClient().trace(id));
   });
+runs
+  .command("cancel")
+  .argument("<id>", "Run ID")
+  .action(async (id: string) => {
+    const run = await new SentinelApiClient().cancelRun(id);
+    console.log(`${run.id}\t${run.status}`);
+  });
 
-program
-  .command("config")
-  .description("Show current config")
-  .argument("[action]", "show")
-  .action((action = "show") => {
-    if (action !== "show") throw new Error("Only `sentinel config show` is currently supported.");
-    console.log(JSON.stringify(loadConfig(), null, 2));
+const config = program.command("config").description("Manage local Sentinel config");
+config.command("show").action(() => {
+  console.log(JSON.stringify(loadConfig(), null, 2));
+});
+config
+  .command("set")
+  .argument("<key>", "Config key")
+  .argument("<value>", "Config value")
+  .action((key: string, value: string) => {
+    const root = findRepoRoot();
+    const current = loadConfig(root) as Record<string, unknown>;
+    const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck"]);
+    if (!allowed.has(key)) {
+      throw new Error(`Unsupported config key ${key}`);
+    }
+    current[key] = value;
+    writeConfig(ConfigSchema.parse(current), root);
+    console.log(`set ${key}`);
   });
 
 program.parseAsync().catch((error) => {

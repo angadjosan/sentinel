@@ -159,6 +159,22 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     return run
 
 
+async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_retry: bool = False) -> tuple[Run, list[Finding]]:
+    graph = await get_or_create_graph(db, repo_name)
+    run = Run(graph_id=graph.id, kind="plan", status="running", trace=trace_event("plan.started", with_retry=with_retry))
+    db.add(run)
+    await db.flush()
+    repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
+    assert repo is not None
+    pseudo_file = DiffFile("plan.txt", content)
+    await _emit_pattern_findings(db, graph.id, repo.id, run.id, pseudo_file)
+    findings = list(await db.scalars(select(Finding).where(Finding.run_id == run.id)))
+    run.status = "completed"
+    run.completed_at = now()
+    run.trace = "\n".join([run.trace, trace_event("plan.completed", finding_count=len(findings))])
+    return run, findings
+
+
 async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, run_id: str, file: DiffFile) -> int:
     specs: list[tuple[str, str, str, str, str]] = []
     if SQLI_RE.search(file.content):
@@ -189,5 +205,10 @@ async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, 
                     fingerprint=fingerprint,
                 )
             )
+            count += 1
+        else:
+            existing.run_id = run_id
+            existing.status = "open" if not existing.confirmed else existing.status
+            existing.updated_at = now()
             count += 1
     return count

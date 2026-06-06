@@ -58,6 +58,21 @@ export class SentinelApiClient {
     return this.request<Finding[]>("/findings");
   }
 
+  finding(id: string) {
+    return this.request<Finding>(`/findings/${id}`);
+  }
+
+  pull(id: string) {
+    return this.request<{ finding: Finding; node: unknown; remediation_plan: string[] }>(`/findings/${id}/pull`);
+  }
+
+  plan(content: string, withRetry: boolean) {
+    return this.request<{ run: Run; findings: Finding[] }>("/plan", {
+      method: "POST",
+      body: JSON.stringify({ repo_name: this.config.repoName, content, with_retry: withRetry })
+    });
+  }
+
   suppress(id: string, reason: string) {
     return this.request<Finding>(`/findings/${id}/suppress`, {
       method: "PATCH",
@@ -91,6 +106,10 @@ export class SentinelApiClient {
 
   run(id: string) {
     return this.request<Run>(`/runs/${id}`);
+  }
+
+  cancelRun(id: string) {
+    return this.request<Run>(`/runs/${id}/cancel`, { method: "POST" });
   }
 
   trace(id: string) {

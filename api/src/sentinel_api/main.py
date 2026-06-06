@@ -10,12 +10,24 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Finding, Run, SuppressionAudit, User, now
+from sentinel_worker.models import Edge, Finding, Node, Run, SuppressionAudit, User, now
 from sentinel_worker.oracle import ConfirmationOracle
-from sentinel_worker.scan import bootstrap_repo, scan_diff, trace_event
+from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 
 from .deps import get_db, init_schema
-from .schemas import FindingResponse, InitRequest, PentestRequest, RunResponse, SourceRequest, SourceResponse, SuppressRequest
+from .schemas import (
+    EdgeResponse,
+    FindingResponse,
+    GraphResponse,
+    InitRequest,
+    NodeResponse,
+    PentestRequest,
+    PlanRequest,
+    RunResponse,
+    SourceRequest,
+    SourceResponse,
+    SuppressRequest,
+)
 
 app = FastAPI(title="Sentinel API", version="0.1.0")
 app.add_middleware(
@@ -101,10 +113,44 @@ async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_d
     return StreamingResponse(events(), media_type="text/event-stream")
 
 
+@app.post("/plan", response_model=SourceResponse)
+async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db)) -> SourceResponse:
+    run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry)
+    RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
+    for finding in findings:
+        FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
+    return SourceResponse(run=run_response(run), findings=[finding_response(finding) for finding in findings])
+
+
 @app.get("/findings", response_model=list[FindingResponse])
 async def findings(db: AsyncSession = Depends(get_db)) -> list[FindingResponse]:
     rows = await db.scalars(select(Finding).order_by(Finding.created_at.desc()))
     return [finding_response(row) for row in rows]
+
+
+@app.get("/findings/{finding_id}", response_model=FindingResponse)
+async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db)) -> FindingResponse:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    return finding_response(finding)
+
+
+@app.get("/findings/{finding_id}/pull")
+async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    node = await db.get(Node, finding.node_id) if finding.node_id else None
+    return {
+        "finding": finding_response(finding).model_dump(),
+        "node": node_response(node).model_dump() if node else None,
+        "remediation_plan": [
+            finding.remediation,
+            "Re-run `sentinel source` after the fix to verify the finding no longer appears.",
+            "If runtime confirmation exists, re-run `sentinel pentest <id>` with a patched build.",
+        ],
+    }
 
 
 @app.patch("/findings/{finding_id}/suppress", response_model=FindingResponse)
@@ -178,10 +224,59 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db)) -> PlainTex
     return PlainTextResponse(run.trace or "")
 
 
+@app.post("/runs/{run_id}/cancel", response_model=RunResponse)
+async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db)) -> RunResponse:
+    run = await db.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if run.status == "running":
+        run.status = "cancelled"
+        run.completed_at = now()
+        run.trace = "\n".join([run.trace or "", trace_event("run.cancelled")]).strip()
+    return run_response(run)
+
+
+@app.get("/graph", response_model=GraphResponse)
+async def graph(db: AsyncSession = Depends(get_db), limit: int = 250) -> GraphResponse:
+    nodes = list(await db.scalars(select(Node).limit(limit)))
+    edges = list(await db.scalars(select(Edge).limit(limit)))
+    return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
 @app.get("/analytics/token-spend")
 async def token_spend(db: AsyncSession = Depends(get_db)) -> list[dict[str, int | str]]:
     total = await db.scalar(select(func.sum(Run.token_spend))) or 0
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
+
+
+def node_response(node: Node) -> NodeResponse:
+    return NodeResponse(
+        id=node.id,
+        kind=node.kind,
+        name=node.name,
+        file=node.file,
+        line_start=node.line_start,
+        line_end=node.line_end,
+        language=node.language,
+        auth_required=node.auth_required,
+        is_entry_point=node.is_entry_point,
+        is_sink=node.is_sink,
+        label=node.label,
+        intent=node.intent,
+    )
+
+
+def edge_response(edge: Edge) -> EdgeResponse:
+    return EdgeResponse(
+        id=edge.id,
+        src=edge.src,
+        dst=edge.dst,
+        kind=edge.kind,
+        tainted=edge.tainted,
+        sanitized=edge.sanitized,
+        taint_uncertain=edge.taint_uncertain,
+        call_uncertainty=edge.call_uncertainty,
+    )
 
 
 async def _dev_actor(db: AsyncSession) -> User:
