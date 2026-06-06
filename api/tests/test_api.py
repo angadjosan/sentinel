@@ -132,3 +132,31 @@ def test_analytics_endpoints_return_operational_metrics():
     assert "rate" in fp.json()
     assert confirmation.status_code == 200
     assert "confirmed" in confirmation.json()
+
+
+def test_pentest_selects_open_target_and_writes_confirmed_edge():
+    repo = f"pentest-{uuid4().hex}"
+    with TestClient(app) as client:
+        source = client.post(
+            "/source",
+            json={
+                "repo_name": repo,
+                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
+                "run_context": "local",
+            },
+        )
+        assert source.status_code == 200
+        finding_id = source.json()["findings"][0]["id"]
+        confirmed = client.post(
+            "/pentest",
+            json={
+                "repo_name": repo,
+                "behavioral_proof": "data_exfiltrated",
+                "proof_detail": "dumped user row through SQLi payload",
+            },
+        )
+        assert confirmed.status_code == 200
+        assert confirmed.json()["id"] == finding_id
+        assert confirmed.json()["confirmed"] is True
+        graph = client.get("/graph")
+    assert any(edge["kind"] == "CONFIRMED_EXPLOIT" for edge in graph.json()["edges"])

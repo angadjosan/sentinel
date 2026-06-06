@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinel_worker.models import Account, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, User, now
 from sentinel_worker.oracle import ConfirmationOracle
+from sentinel_worker.graph_query import GraphQuery
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
@@ -303,19 +304,20 @@ async def reject_suppression(finding_id: str, payload: SuppressRequest, db: Asyn
 
 @app.post("/pentest", response_model=FindingResponse)
 async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    if not payload.finding_id:
-        raise HTTPException(status_code=422, detail="finding_id is required for deterministic local pentest")
-    finding = await db.get(Finding, payload.finding_id)
+    finding = await db.get(Finding, payload.finding_id) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     oracle_result = ConfirmationOracle().evaluate(payload.sanitizer_output, payload.behavioral_proof, payload.proof_detail)
     run = Run(graph_id=finding.graph_id, kind="pentest", status="completed", completed_at=now())
-    run.trace = trace_event("pentest.oracle.evaluated", confirmed=oracle_result.confirmed, kind=oracle_result.kind)
+    run.trace = trace_event("pentest.oracle.evaluated", confirmed=oracle_result.confirmed, oracle_kind=oracle_result.kind)
     db.add(run)
     if oracle_result.confirmed:
-        finding.confirmed = True
-        finding.status = "confirmed"
-        finding.evidence = oracle_result.evidence
+        if finding.node_id:
+            await GraphQuery(db, finding.graph_id).confirm_exploit(finding.node_id, finding.node_id, finding.id, oracle_result)
+        else:
+            finding.confirmed = True
+            finding.status = "confirmed"
+            finding.evidence = oracle_result.evidence
     else:
         finding.status = "not_reproducible"
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
@@ -476,6 +478,22 @@ async def _check_token_budget(db: AsyncSession, principal: Principal) -> None:
                 "budget": account.monthly_token_budget,
             },
         )
+
+
+async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Principal) -> Finding | None:
+    stmt = (
+        select(Finding)
+        .join(Graph, Finding.graph_id == Graph.id)
+        .join(Repo, Graph.repo_id == Repo.id)
+        .where(Repo.name == repo_name)
+        .where(Finding.status == "open")
+    )
+    if principal.account_id != "dev":
+        stmt = stmt.where(Graph.account_id == principal.account_id)
+    findings = list(await db.scalars(stmt))
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
+    return findings[0] if findings else None
 
 
 def node_response(node: Node) -> NodeResponse:
