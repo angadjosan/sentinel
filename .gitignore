@@ -1,0 +1,11 @@
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+sentinel.dev.db
+.env
+.env.*
+!.env.example
+sentinel.config.json

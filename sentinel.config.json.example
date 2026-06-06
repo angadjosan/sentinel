@@ -1,0 +1,17 @@
+{
+  "apiUrl": "http://localhost:8000",
+  "repoName": "sentinel-example",
+  "provider": "local",
+  "model": "ollama",
+  "boot": "docker compose up -d",
+  "healthcheck": "curl -sf http://localhost:3000/health",
+  "env": {
+    "from": ".env.sentinel"
+  },
+  "variants": {
+    "asan": {
+      "build": "cmake -DCMAKE_BUILD_TYPE=Asan .",
+      "requires": "clang"
+    }
+  }
+}
