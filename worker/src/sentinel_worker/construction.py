@@ -14,6 +14,7 @@ JS_FUNCTION_RE = re.compile(r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|(?
 PY_FUNCTION_RE = re.compile(r"^\s*def\s+([A-Za-z_]\w*)\s*\(", re.MULTILINE)
 CALL_RE = re.compile(r"(?<!function\s)\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(")
 IMPORT_REF_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|import\s+[^'\n]+from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\))")
+DYNAMIC_CALL_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\[\s*([A-Za-z_$][\w$]*)\s*\]\s*\(")
 EXPRESS_ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 DJANGO_ROUTE_RE = re.compile(r"\bpath\(\s*['\"]([^'\"]*)['\"]")
@@ -37,8 +38,9 @@ class SourceFile:
 async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) -> list[Node]:
     await db.execute(delete(Edge).where(Edge.graph_id == graph_id).where(Edge.src.like(f"%:{source.path}:%")))
     language = language_for(source.path)
-    imports = sorted({group.split("/")[0] if not group.startswith("@") else "/".join(group.split("/")[:2]) for match in IMPORT_REF_RE.finditer(source.content) for group in match.groups() if group and not group.startswith(".")})
+    imports = _imports(source.content)
     import_intent = f" Imports packages: {', '.join(imports)}." if imports else ""
+    parse_error = _has_obvious_parse_error(source.content)
     file_node = Node(
         id=f"file:{source.path}",
         graph_id=graph_id,
@@ -48,12 +50,16 @@ async def build_file_graph(db: AsyncSession, graph_id: str, source: SourceFile) 
         line_start=1,
         line_end=max(1, len(source.content.splitlines())),
         language=language,
+        parse_error=parse_error,
         is_new=source.is_new,
         label=f"{source.path} source file" if not source.is_new else f"Changed {source.path}",
-        intent=f"Repository source file indexed into the graph.{import_intent}",
+        intent=f"Repository source file indexed into the graph.{import_intent}" if not parse_error else "Parse error detected; graph construction skipped for this file.",
     )
     await db.merge(file_node)
     created = [file_node]
+    if parse_error:
+        return created
+    await _emit_imports(db, graph_id, source, imports)
     function_nodes = await _emit_functions(db, graph_id, source, language)
     route_nodes = await _emit_routes(db, graph_id, source, language)
     await _emit_calls(db, graph_id, source, function_nodes)
@@ -139,6 +145,26 @@ async def _emit_routes(db: AsyncSession, graph_id: str, source: SourceFile, lang
 async def _emit_calls(db: AsyncSession, graph_id: str, source: SourceFile, functions: list[Node]) -> None:
     by_name = {node.name: node for node in functions}
     file_node_id = f"file:{source.path}"
+    for match in DYNAMIC_CALL_RE.finditer(source.content):
+        target = f"{match.group(1)}[{match.group(2)}]"
+        dynamic_id = f"fn:{source.path}:{target}"
+        line = source.content[: match.start()].count("\n") + 1
+        await db.merge(
+            Node(
+                id=dynamic_id,
+                graph_id=graph_id,
+                kind="FUNCTION",
+                name=target,
+                file=source.path,
+                line_start=line,
+                line_end=line,
+                language=language_for(source.path),
+                is_new=source.is_new,
+                label=f"{target} dynamic call target",
+                intent="Dynamic dispatch call target; exact callee requires runtime resolution.",
+            )
+        )
+        await _add_edge(db, graph_id, file_node_id, dynamic_id, "CALLS", call_uncertainty="dynamic_dispatch")
     for match in CALL_RE.finditer(source.content):
         callee_name = match.group(1).split(".")[-1]
         dst = by_name.get(callee_name)
@@ -164,6 +190,26 @@ async def _emit_calls(db: AsyncSession, graph_id: str, source: SourceFile, funct
                 )
             )
             await _add_edge(db, graph_id, file_node_id, sink_id, "CALLS", call_uncertainty="unresolved_import")
+
+
+async def _emit_imports(db: AsyncSession, graph_id: str, source: SourceFile, imports: list[str]) -> None:
+    file_node_id = f"file:{source.path}"
+    for package in imports:
+        dep_id = f"dep:{package}"
+        await db.merge(
+            Node(
+                id=dep_id,
+                graph_id=graph_id,
+                kind="DEPENDENCY",
+                name=package,
+                file=None,
+                language=None,
+                is_new=source.is_new,
+                label=f"{package} dependency",
+                intent="Imported package or module referenced by repository source.",
+            )
+        )
+        await _add_edge(db, graph_id, file_node_id, dep_id, "IMPORTS", call_uncertainty="unresolved_import")
 
 
 async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, routes: list[Node], functions: list[Node]) -> None:
@@ -263,6 +309,29 @@ async def _add_edge(db: AsyncSession, graph_id: str, src: str, dst: str, kind: s
 
 def _nearby_auth(content: str, offset: int) -> bool:
     return bool(AUTH_RE.search(content[max(0, offset - 300) : offset + 300]))
+
+
+def _imports(content: str) -> list[str]:
+    return sorted(
+        {
+            group.split("/")[0] if not group.startswith("@") else "/".join(group.split("/")[:2])
+            for match in IMPORT_REF_RE.finditer(content)
+            for group in match.groups()
+            if group and not group.startswith(".")
+        }
+    )
+
+
+def _has_obvious_parse_error(content: str) -> bool:
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    stack: list[str] = []
+    for char in content:
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in pairs.values():
+            if not stack or stack.pop() != char:
+                return True
+    return bool(stack)
 
 
 def _middleware_names(args: str) -> list[str]:

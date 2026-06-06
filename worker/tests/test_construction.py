@@ -78,6 +78,57 @@ async def test_express_adapter_emits_ordered_guard_edges():
 
 
 @pytest.mark.asyncio
+async def test_build_file_graph_marks_parse_error_and_skips_children():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            nodes = await build_file_graph(session, graph.id, SourceFile(path="broken.js", content="function broken( {", is_new=True))
+        async with session.begin():
+            file_node = await session.get(Node, "file:broken.js")
+            functions = list(await session.scalars(select(Node).where(Node.file == "broken.js").where(Node.kind == "FUNCTION")))
+    assert [node.kind for node in nodes] == ["FILE"]
+    assert file_node is not None
+    assert file_node.parse_error is True
+    assert functions == []
+
+
+@pytest.mark.asyncio
+async def test_build_file_graph_emits_import_edges_and_dynamic_dispatch_uncertainty():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(path="dispatch.js", content="import lodash from 'lodash';\nhandlers[method](req);", is_new=True),
+            )
+        async with session.begin():
+            dep = await session.get(Node, "dep:lodash")
+            import_edge = await session.scalar(select(Edge).where(Edge.kind == "IMPORTS").where(Edge.dst == "dep:lodash"))
+            dynamic = await session.get(Node, "fn:dispatch.js:handlers[method]")
+            dynamic_edge = await session.scalar(select(Edge).where(Edge.kind == "CALLS").where(Edge.dst == "fn:dispatch.js:handlers[method]"))
+
+    assert dep is not None
+    assert dep.kind == "DEPENDENCY"
+    assert import_edge is not None
+    assert dynamic is not None
+    assert dynamic_edge is not None
+    assert dynamic_edge.call_uncertainty == "dynamic_dispatch"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "route_id", "auth_required"),
     [
