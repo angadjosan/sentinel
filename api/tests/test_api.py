@@ -161,7 +161,12 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
         assert confirmed.json()["id"] == finding_id
         assert confirmed.json()["confirmed"] is True
         graph = client.get("/graph")
+        runs = client.get("/runs")
     assert any(edge["kind"] == "CONFIRMED_EXPLOIT" for edge in graph.json()["edges"])
+    pentest_runs = [run for run in runs.json() if run["kind"] == "pentest"]
+    assert pentest_runs
+    assert "pentest.payloads.generated" in pentest_runs[0]["trace"]
+    assert "pentest.oracle.evaluated" in pentest_runs[0]["trace"]
 
 
 def test_run_events_streams_trace_and_completion():

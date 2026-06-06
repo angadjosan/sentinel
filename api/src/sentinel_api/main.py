@@ -13,13 +13,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
-from sentinel_worker.oracle import ConfirmationOracle
-from sentinel_worker.graph_query import GraphQuery
+from sentinel_worker.pentest import PentestRequestContext, run_pentest
 from sentinel_worker.graph_merge import merge_graph
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import offload_trace_if_large, read_run_trace
+from sentinel_worker.vm import PentestSandboxConfig
 
 from .auth import Principal, create_token, current_principal, require_admin
 from .deps import get_db, init_schema
@@ -430,22 +430,18 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
     finding = await db.get(Finding, payload.finding_id) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    oracle_result = ConfirmationOracle().evaluate(payload.sanitizer_output, payload.behavioral_proof, payload.proof_detail)
-    run = Run(graph_id=finding.graph_id, kind="pentest", status="completed", completed_at=now())
-    run.trace = trace_event("pentest.oracle.evaluated", confirmed=oracle_result.confirmed, oracle_kind=oracle_result.kind)
-    db.add(run)
-    await offload_trace_if_large(db, run)
-    if oracle_result.confirmed:
-        if finding.node_id:
-            await GraphQuery(db, finding.graph_id).confirm_exploit(finding.node_id, finding.node_id, finding.id, oracle_result)
-        else:
-            finding.confirmed = True
-            finding.status = "confirmed"
-            finding.evidence = oracle_result.evidence
-    else:
-        finding.status = "not_reproducible"
-    RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
-    return finding_response(finding)
+    result = await run_pentest(
+        db,
+        finding,
+        PentestRequestContext(
+            sanitizer_output=payload.sanitizer_output,
+            behavioral_proof=payload.behavioral_proof,
+            proof_detail=payload.proof_detail,
+            sandbox=PentestSandboxConfig(boot=payload.boot, healthcheck=payload.healthcheck, egress_allowlist=payload.egress_allowlist),
+        ),
+    )
+    RUNS_TOTAL.labels(kind=result.run.kind, status=result.run.status).inc()
+    return finding_response(result.finding)
 
 
 @app.get("/runs", response_model=list[RunResponse])

@@ -157,7 +157,10 @@ export class SentinelApiClient {
         finding_id: id,
         sanitizer_output: sanitizerOutput,
         behavioral_proof: behavioralProof,
-        proof_detail: proofDetail
+        proof_detail: proofDetail,
+        boot: this.config.boot,
+        healthcheck: this.config.healthcheck,
+        egress_allowlist: this.config.egress_allowlist
       })
     });
   }

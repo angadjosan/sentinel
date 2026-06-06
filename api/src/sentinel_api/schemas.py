@@ -27,6 +27,9 @@ class PentestRequest(BaseModel):
     sanitizer_output: str = ""
     behavioral_proof: str | None = None
     proof_detail: str = ""
+    boot: str | None = None
+    healthcheck: str | None = None
+    egress_allowlist: list[str] = Field(default_factory=list)
 
 
 class SuppressRequest(BaseModel):
