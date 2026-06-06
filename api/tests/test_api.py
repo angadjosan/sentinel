@@ -108,3 +108,27 @@ def test_source_enqueue_claim_complete_and_cancel():
         cancelled = client.post(f"/tasks/{second_task}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
+
+
+def test_analytics_endpoints_return_operational_metrics():
+    repo = f"analytics-{uuid4().hex}"
+    with TestClient(app) as client:
+        plan = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
+        )
+        assert plan.status_code == 200
+
+        trends = client.get("/analytics/finding-trends")
+        latency = client.get("/analytics/scan-latency")
+        fp = client.get("/analytics/false-positive-rate")
+        confirmation = client.get("/analytics/confirmation-rate")
+
+    assert trends.status_code == 200
+    assert any(row["severity"] == "high" for row in trends.json())
+    assert latency.status_code == 200
+    assert isinstance(latency.json(), list)
+    assert fp.status_code == 200
+    assert "rate" in fp.json()
+    assert confirmation.status_code == 200
+    assert "confirmed" in confirmation.json()

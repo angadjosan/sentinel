@@ -376,6 +376,61 @@ async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal =
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
 
 
+@app.get("/analytics/finding-trends")
+async def finding_trends(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, int | str]]:
+    rows = await db.execute(
+        select(
+            func.date(Finding.created_at),
+            Finding.severity,
+            func.count(Finding.id),
+        )
+        .group_by(func.date(Finding.created_at), Finding.severity)
+        .order_by(func.date(Finding.created_at))
+    )
+    return [{"date": str(day), "severity": severity, "count": int(count)} for day, severity, count in rows]
+
+
+@app.get("/analytics/scan-latency")
+async def scan_latency(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, float | str]]:
+    rows = await db.scalars(select(Run).where(Run.completed_at.is_not(None)))
+    buckets: dict[str, list[float]] = {}
+    for run in rows:
+        if run.completed_at is None:
+            continue
+        buckets.setdefault(run.kind, []).append(max(0.0, (run.completed_at - run.created_at).total_seconds()))
+    return [
+        {
+            "kind": kind,
+            "p50_seconds": _percentile(values, 0.50),
+            "p90_seconds": _percentile(values, 0.90),
+            "count": len(values),
+        }
+        for kind, values in sorted(buckets.items())
+    ]
+
+
+@app.get("/analytics/false-positive-rate")
+async def false_positive_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
+    total = await db.scalar(select(func.count(Finding.id))) or 0
+    suppressed = await db.scalar(select(func.count(Finding.id)).where(Finding.suppressed.is_(True))) or 0
+    return {"total": int(total), "suppressed": int(suppressed), "rate": (float(suppressed) / float(total)) if total else 0.0}
+
+
+@app.get("/analytics/confirmation-rate")
+async def confirmation_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
+    total = await db.scalar(select(func.count(Finding.id))) or 0
+    confirmed = await db.scalar(select(func.count(Finding.id)).where(Finding.confirmed.is_(True))) or 0
+    return {"total": int(total), "confirmed": int(confirmed), "rate": (float(confirmed) / float(total)) if total else 0.0}
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * percentile)))
+    return ordered[index]
+
+
 def node_response(node: Node) -> NodeResponse:
     return NodeResponse(
         id=node.id,
