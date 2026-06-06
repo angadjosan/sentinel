@@ -43,6 +43,9 @@ def test_member_suppression_requires_admin_approval(monkeypatch):
         )
         assert approved.status_code == 200
         assert approved.json()["status"] == "suppressed"
+        audit = client.get(f"/findings/{finding_id}/audit", headers={"Authorization": f"Bearer {admin}"})
+        assert audit.status_code == 200
+        assert [row["action"] for row in audit.json()] == ["approve", "suppress"]
 
 
 def test_readonly_cannot_suppress(monkeypatch):

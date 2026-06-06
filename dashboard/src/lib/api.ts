@@ -20,6 +20,34 @@ export type Run = {
   trace: string;
 };
 
+export type PullFinding = {
+  finding: Finding;
+  node: {
+    id: string;
+    kind: string;
+    name: string;
+    file: string | null;
+    line_start: number | null;
+    line_end: number | null;
+    language: string | null;
+    auth_required: boolean;
+    is_entry_point: boolean;
+    is_sink: boolean;
+    label: string | null;
+    intent: string | null;
+  } | null;
+  remediation_plan: string[];
+};
+
+export type SuppressionAudit = {
+  id: number;
+  finding_id: string;
+  action: string;
+  actor_id: string;
+  reason: string;
+  created_at: string;
+};
+
 const apiUrl = process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
 async function get<T>(path: string): Promise<T> {
@@ -32,6 +60,18 @@ async function get<T>(path: string): Promise<T> {
 
 export function listFindings(): Promise<Finding[]> {
   return get<Finding[]>("/findings");
+}
+
+export function getFinding(id: string): Promise<Finding> {
+  return get<Finding>(`/findings/${id}`);
+}
+
+export function pullFinding(id: string): Promise<PullFinding> {
+  return get<PullFinding>(`/findings/${id}/pull`);
+}
+
+export function findingAudit(id: string): Promise<SuppressionAudit[]> {
+  return get<SuppressionAudit[]>(`/findings/${id}/audit`);
 }
 
 export function listRuns(): Promise<Run[]> {

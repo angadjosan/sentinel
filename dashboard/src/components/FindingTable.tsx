@@ -1,6 +1,7 @@
 "use client";
 
 import { ShieldCheck, Ban, Check, X } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { SeverityBadge } from "./SeverityBadge";
 import type { Finding } from "../lib/api";
@@ -44,7 +45,9 @@ export function FindingTable({ findings }: { findings: Finding[] }) {
             </td>
             <td>{finding.vuln_type}</td>
             <td>
-              <strong>{finding.title}</strong>
+              <Link className="row-link" href={`/findings/${finding.id}`}>
+                <strong>{finding.title}</strong>
+              </Link>
               <div className="muted">{finding.description}</div>
               <div>{finding.remediation}</div>
             </td>

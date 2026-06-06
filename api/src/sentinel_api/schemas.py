@@ -60,6 +60,15 @@ class FindingResponse(BaseModel):
     fingerprint: str
 
 
+class SuppressionAuditResponse(BaseModel):
+    id: int
+    finding_id: str
+    action: str
+    actor_id: str
+    reason: str
+    created_at: str
+
+
 class SourceResponse(BaseModel):
     run: RunResponse
     findings: list[FindingResponse]

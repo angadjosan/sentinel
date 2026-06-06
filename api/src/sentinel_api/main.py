@@ -37,6 +37,7 @@ from .schemas import (
     SourceResponse,
     SourceReadResponse,
     SuppressRequest,
+    SuppressionAuditResponse,
     TaskCompleteRequest,
     TaskFailRequest,
     TaskResponse,
@@ -226,6 +227,25 @@ async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db), pr
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     return finding_response(finding)
+
+
+@app.get("/findings/{finding_id}/audit", response_model=list[SuppressionAuditResponse])
+async def finding_audit(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[SuppressionAuditResponse]:
+    finding = await db.get(Finding, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    rows = await db.scalars(select(SuppressionAudit).where(SuppressionAudit.finding_id == finding_id).order_by(SuppressionAudit.created_at.desc()))
+    return [
+        SuppressionAuditResponse(
+            id=row.id,
+            finding_id=row.finding_id,
+            action=row.action,
+            actor_id=row.actor_id,
+            reason=row.reason,
+            created_at=row.created_at.isoformat(),
+        )
+        for row in rows
+    ]
 
 
 @app.get("/findings/{finding_id}/pull")

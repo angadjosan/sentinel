@@ -60,6 +60,10 @@ a {
   text-decoration: none;
 }
 
+.row-link {
+  color: var(--accent-strong);
+}
+
 .shell {
   min-height: 100vh;
 }
@@ -169,6 +173,48 @@ a {
   margin-top: 4px;
 }
 
+.metric .value.compact {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.icon-value {
+  color: var(--accent);
+}
+
+.detail-grid {
+  margin-top: 16px;
+}
+
+.steps {
+  line-height: 1.55;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.kv {
+  display: grid;
+  gap: 8px 14px;
+  grid-template-columns: 120px minmax(0, 1fr);
+  margin: 0;
+}
+
+.kv dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.compact-table th,
+.compact-table td {
+  font-size: 12px;
+}
+
 .table {
   border-collapse: collapse;
   width: 100%;
@@ -240,6 +286,10 @@ a {
   overflow: auto;
   padding: 12px;
   white-space: pre-wrap;
+}
+
+.trace.evidence {
+  max-height: 260px;
 }
 
 @media (max-width: 900px) {
