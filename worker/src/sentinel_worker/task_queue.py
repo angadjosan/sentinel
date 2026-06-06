@@ -57,6 +57,9 @@ async def claim_next_task(db: AsyncSession, *, worker_id: str, kinds: list[str] 
 
 async def complete_task(db: AsyncSession, *, task_id: str, trace: str | None = None) -> Task:
     task = await _get_task(db, task_id)
+    await db.refresh(task)
+    if task.status == "cancelled":
+        return task
     task.status = "completed"
     task.completed_at = now()
     run = await db.get(Run, task.run_id)
@@ -76,6 +79,9 @@ async def complete_task(db: AsyncSession, *, task_id: str, trace: str | None = N
 
 async def fail_task(db: AsyncSession, *, task_id: str, error: str) -> Task:
     task = await _get_task(db, task_id)
+    await db.refresh(task)
+    if task.status == "cancelled":
+        return task
     task.status = "failed"
     task.error = error
     task.completed_at = now()
@@ -105,6 +111,26 @@ async def cancel_task(db: AsyncSession, *, task_id: str) -> Task:
         await offload_trace_if_large(db, run)
         await notify_run_event(db, run.id, event)
     return task
+
+
+async def cancel_run_tasks(db: AsyncSession, *, run_id: str) -> Run:
+    run = await db.get(Run, run_id)
+    if run is None:
+        raise ValueError("run not found")
+    if run.status in {"completed", "failed", "cancelled"}:
+        return run
+    tasks = list(await db.scalars(select(Task).where(Task.run_id == run_id).where(Task.status.not_in(["completed", "failed", "cancelled"]))))
+    completed_at = now()
+    for task in tasks:
+        task.status = "cancelled"
+        task.completed_at = completed_at
+    run.status = "cancelled"
+    run.completed_at = completed_at
+    event = trace_event("run.cancelled", cancelled_tasks=len(tasks))
+    run.trace = "\n".join([run.trace or "", event]).strip()
+    await offload_trace_if_large(db, run)
+    await notify_run_event(db, run.id, event)
+    return run
 
 
 async def _get_task(db: AsyncSession, task_id: str) -> Task:

@@ -111,6 +111,25 @@ def test_source_enqueue_claim_complete_and_cancel():
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
 
+        third = client.post(
+            "/source/enqueue",
+            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('z')", "run_context": "local"},
+        )
+        third_task = third.json()["task_id"]
+        third_run = third.json()["run"]["id"]
+        cancelled_run = client.post(f"/runs/{third_run}/cancel")
+        assert cancelled_run.status_code == 200
+        assert cancelled_run.json()["status"] == "cancelled"
+        claimed_after_cancel = client.post("/tasks/claim?worker_id=test-worker")
+        assert claimed_after_cancel.status_code == 200
+        assert claimed_after_cancel.json() is None
+        cancelled_task = client.post(f"/tasks/{third_task}/complete", json={"trace": "late completion"})
+        assert cancelled_task.status_code == 200
+        assert cancelled_task.json()["status"] == "cancelled"
+        cancelled_trace = client.get(f"/runs/{third_run}/trace")
+        assert "run.cancelled" in cancelled_trace.text
+        assert "late completion" not in cancelled_trace.text
+
 
 def test_analytics_endpoints_return_operational_metrics():
     repo = f"analytics-{uuid4().hex}"

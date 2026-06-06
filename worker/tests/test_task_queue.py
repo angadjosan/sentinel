@@ -3,7 +3,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sentinel_worker.models import Base, Run
-from sentinel_worker.task_queue import _claimable_task_stmt, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
+from sentinel_worker.task_queue import _claimable_task_stmt, cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
 
 @pytest.mark.asyncio
@@ -53,6 +53,39 @@ async def test_cancel_task_updates_run_status():
             run = await session.get(Run, task.run_id)
     assert run is not None
     assert run.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_tasks_cancels_queued_task_and_prevents_late_completion():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            task = await enqueue_task(session, repo_name="repo", kind="source", payload={"diff": "x"})
+            run = await cancel_run_tasks(session, run_id=task.run_id)
+        async with session.begin():
+            stored_task = await session.get(type(task), task.id)
+            stored_run = await session.get(Run, task.run_id)
+
+    assert run.status == "cancelled"
+    assert stored_task is not None
+    assert stored_task.status == "cancelled"
+    assert stored_run is not None
+    assert stored_run.status == "cancelled"
+    assert "run.cancelled" in stored_run.trace
+
+    async with sessionmaker() as session:
+        async with session.begin():
+            completed = await complete_task(session, task_id=task.id, trace="late worker output")
+        async with session.begin():
+            late_run = await session.get(Run, task.run_id)
+
+    assert completed.status == "cancelled"
+    assert late_run is not None
+    assert late_run.status == "cancelled"
+    assert "late worker output" not in late_run.trace
 
 
 def test_claimable_task_query_uses_postgres_skip_locked():

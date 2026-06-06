@@ -15,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.pentest import PentestRequestContext, run_pentest
 from sentinel_worker.graph_merge import merge_graph
-from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
+from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff
 from sentinel_worker.source_store import read_source_snapshot
-from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
-from sentinel_worker.trace_store import offload_trace_if_large, read_run_trace
+from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
+from sentinel_worker.trace_store import read_run_trace
 from sentinel_worker.vm import PentestSandboxConfig
 
 from .auth import Principal, create_token, current_principal, require_admin
@@ -481,11 +481,14 @@ async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal:
     run = await db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
-    if run.status == "running":
-        run.status = "cancelled"
-        run.completed_at = now()
-        run.trace = "\n".join([run.trace or "", trace_event("run.cancelled")]).strip()
-        await offload_trace_if_large(db, run)
+    if principal.account_id != "dev":
+        graph = await db.get(Graph, run.graph_id)
+        if graph is None or graph.account_id != principal.account_id:
+            raise HTTPException(status_code=403, detail="cannot cancel run from another account")
+    try:
+        run = await cancel_run_tasks(db, run_id=run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return run_response(run)
 
 
