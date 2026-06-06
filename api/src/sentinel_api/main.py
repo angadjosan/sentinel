@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -14,6 +15,7 @@ from sentinel_worker.models import Edge, Finding, Node, Run, SuppressionAudit, U
 from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
 
+from .auth import Principal, current_principal, require_admin
 from .deps import get_db, init_schema
 from .schemas import (
     EdgeResponse,
@@ -29,7 +31,14 @@ from .schemas import (
     SuppressRequest,
 )
 
-app = FastAPI(title="Sentinel API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_schema()
+    yield
+
+
+app = FastAPI(title="Sentinel API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -41,11 +50,6 @@ RUNS_TOTAL = Counter("sentinel_runs_total", "Runs by kind and status", ["kind", 
 FINDINGS_TOTAL = Counter("sentinel_findings_total", "Findings by type and severity", ["vuln_type", "severity"])
 SCAN_DURATION = Histogram("sentinel_scan_duration_seconds", "Scan duration by kind", ["kind"])
 ACTIVE_RUNS = Gauge("sentinel_active_runs", "Currently active runs")
-
-
-@app.on_event("startup")
-async def startup() -> None:
-    await init_schema()
 
 
 def run_response(run: Run) -> RunResponse:
@@ -78,14 +82,14 @@ async def metrics() -> PlainTextResponse:
 
 
 @app.post("/init", response_model=RunResponse)
-async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db)) -> RunResponse:
+async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
     run = await bootstrap_repo(db, payload.repo_name, payload.files)
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     return run_response(run)
 
 
 @app.post("/source", response_model=SourceResponse)
-async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db)) -> SourceResponse:
+async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
     ACTIVE_RUNS.inc()
     start = datetime.now(UTC)
     try:
@@ -102,7 +106,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db)) -> 
 
 
 @app.post("/source/stream")
-async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
     async def events():
         yield f"data: {json.dumps({'kind': 'graph_update', 'message': 'scan started'})}\n\n"
         result = await source(payload, db)
@@ -114,7 +118,7 @@ async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_d
 
 
 @app.post("/plan", response_model=SourceResponse)
-async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db)) -> SourceResponse:
+async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
     run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry)
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
@@ -123,13 +127,13 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db)) -> Sour
 
 
 @app.get("/findings", response_model=list[FindingResponse])
-async def findings(db: AsyncSession = Depends(get_db)) -> list[FindingResponse]:
+async def findings(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[FindingResponse]:
     rows = await db.scalars(select(Finding).order_by(Finding.created_at.desc()))
     return [finding_response(row) for row in rows]
 
 
 @app.get("/findings/{finding_id}", response_model=FindingResponse)
-async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db)) -> FindingResponse:
+async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
@@ -137,7 +141,7 @@ async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db)) ->
 
 
 @app.get("/findings/{finding_id}/pull")
-async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db)) -> dict[str, object]:
+async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, object]:
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
@@ -154,7 +158,7 @@ async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db)) -> d
 
 
 @app.patch("/findings/{finding_id}/suppress", response_model=FindingResponse)
-async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db)) -> FindingResponse:
+async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
@@ -169,7 +173,7 @@ async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession =
 
 
 @app.post("/findings/{finding_id}/unsuppress", response_model=FindingResponse)
-async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db)) -> FindingResponse:
+async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     finding = await db.get(Finding, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
@@ -182,7 +186,7 @@ async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession
 
 
 @app.post("/pentest", response_model=FindingResponse)
-async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db)) -> FindingResponse:
+async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     if not payload.finding_id:
         raise HTTPException(status_code=422, detail="finding_id is required for deterministic local pentest")
     finding = await db.get(Finding, payload.finding_id)
@@ -203,13 +207,13 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db)) -
 
 
 @app.get("/runs", response_model=list[RunResponse])
-async def runs(db: AsyncSession = Depends(get_db)) -> list[RunResponse]:
+async def runs(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[RunResponse]:
     rows = await db.scalars(select(Run).order_by(Run.created_at.desc()))
     return [run_response(row) for row in rows]
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
-async def run_detail(run_id: str, db: AsyncSession = Depends(get_db)) -> RunResponse:
+async def run_detail(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
     run = await db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -217,7 +221,7 @@ async def run_detail(run_id: str, db: AsyncSession = Depends(get_db)) -> RunResp
 
 
 @app.get("/runs/{run_id}/trace")
-async def run_trace(run_id: str, db: AsyncSession = Depends(get_db)) -> PlainTextResponse:
+async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> PlainTextResponse:
     run = await db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -225,7 +229,7 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db)) -> PlainTex
 
 
 @app.post("/runs/{run_id}/cancel", response_model=RunResponse)
-async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db)) -> RunResponse:
+async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
     run = await db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -237,14 +241,14 @@ async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db)) -> RunResp
 
 
 @app.get("/graph", response_model=GraphResponse)
-async def graph(db: AsyncSession = Depends(get_db), limit: int = 250) -> GraphResponse:
+async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal), limit: int = 250) -> GraphResponse:
     nodes = list(await db.scalars(select(Node).limit(limit)))
     edges = list(await db.scalars(select(Edge).limit(limit)))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
 
 
 @app.get("/analytics/token-spend")
-async def token_spend(db: AsyncSession = Depends(get_db)) -> list[dict[str, int | str]]:
+async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, int | str]]:
     total = await db.scalar(select(func.sum(Run.token_spend))) or 0
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
 
