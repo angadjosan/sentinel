@@ -24,6 +24,7 @@ JS_PARAM_RE = re.compile(r"\b(req\.(?:body|query|params)|request\.(?:body|query|
 SINK_RE = re.compile(r"\b(db\.query|query|execute|exec|spawn|system|popen|readFile|open|send_file|FileResponse)\s*\(", re.IGNORECASE)
 SANITIZER_RE = re.compile(r"\b(sanitize|escape|validate|parameterize|quote)\w*\s*\(", re.IGNORECASE)
 AUTH_RE = re.compile(r"\b(auth\w*|authenticate\w*|authorize\w*|login_required|Depends\(get_current_user|PreAuthorize)\b", re.IGNORECASE)
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?$")
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,7 @@ async def _emit_routes(db: AsyncSession, graph_id: str, source: SourceFile, lang
             line = source.content[: match.start()].count("\n") + 1
             node = _route_node(graph_id, source, language, method, path, line, _nearby_auth(source.content, match.start()))
             await db.merge(node)
+            await _emit_express_guards(db, graph_id, source, node, match.end())
             nodes.append(node)
     return nodes
 
@@ -209,6 +211,31 @@ async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, route
             await _add_edge(db, graph_id, route.id, sink_node.id, "CALLS")
 
 
+async def _emit_express_guards(db: AsyncSession, graph_id: str, source: SourceFile, route: Node, args_offset: int) -> None:
+    call_end = source.content.find(");", args_offset)
+    if call_end < 0:
+        return
+    args = source.content[args_offset:call_end]
+    for index, guard_name in enumerate(_middleware_names(args), start=1):
+        guard = Node(
+            id=f"middleware:{source.path}:{guard_name}",
+            graph_id=graph_id,
+            kind="MIDDLEWARE",
+            name=guard_name,
+            file=source.path,
+            line_start=route.line_start,
+            line_end=route.line_start,
+            language=language_for(source.path),
+            auth_required=True,
+            privilege="user",
+            is_new=source.is_new,
+            label=f"{guard_name} middleware",
+            intent="Route guard or middleware discovered by framework adapter.",
+        )
+        await db.merge(guard)
+        await _add_edge(db, graph_id, route.id, guard.id, "GUARDED_BY", order_index=index)
+
+
 def _route_node(graph_id: str, source: SourceFile, language: str | None, method: str, path: str, line: int, auth_required: bool) -> Node:
     return Node(
         id=f"route:{source.path}:{method} {path}",
@@ -236,6 +263,17 @@ async def _add_edge(db: AsyncSession, graph_id: str, src: str, dst: str, kind: s
 
 def _nearby_auth(content: str, offset: int) -> bool:
     return bool(AUTH_RE.search(content[max(0, offset - 300) : offset + 300]))
+
+
+def _middleware_names(args: str) -> list[str]:
+    names: list[str] = []
+    for raw in args.split(","):
+        candidate = raw.strip()
+        if not candidate or "=>" in candidate or candidate.startswith(("function", "async function", "(", "{")):
+            continue
+        if IDENTIFIER_RE.match(candidate) and AUTH_RE.search(candidate):
+            names.append(candidate)
+    return names
 
 
 def _line_at(content: str, line_number: int) -> str:

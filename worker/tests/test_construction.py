@@ -43,6 +43,41 @@ async def test_build_file_graph_extracts_route_sink_and_taint_edge():
 
 
 @pytest.mark.asyncio
+async def test_express_adapter_emits_ordered_guard_edges():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(
+                    path="app.js",
+                    content="app.get('/admin', auth, authorizeAdmin, (req, res) => res.json({ ok: true }));",
+                    is_new=True,
+                ),
+            )
+        async with session.begin():
+            route = await session.get(Node, "route:app.js:GET /admin")
+            guards = (
+                await session.execute(
+                    select(Edge).where(Edge.kind == "GUARDED_BY").where(Edge.src == "route:app.js:GET /admin").order_by(Edge.order_index)
+                )
+            ).scalars().all()
+            guard_nodes = [await session.get(Node, edge.dst) for edge in guards]
+
+    assert route is not None
+    assert route.auth_required is True
+    assert [edge.order_index for edge in guards] == [1, 2]
+    assert [node.name for node in guard_nodes if node is not None] == ["auth", "authorizeAdmin"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("path", "content", "route_id", "auth_required"),
     [
