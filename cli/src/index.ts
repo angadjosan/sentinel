@@ -104,13 +104,16 @@ program
   .command("scan")
   .description("Run source scan, then pentest each finding unless skipped")
   .option("--no-pentest", "Skip pentest")
+  .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
   .action(async (options) => {
     validateConfigForScan(loadConfig());
     const client = new SentinelApiClient();
     const result = await client.source(currentDiff(), process.env.CI ? "ci" : "local");
     if (options.pentest) {
-      for (const finding of result.findings) {
-        await client.pentest(finding.id);
+      const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
+      const pentestResults = await runLimited(result.findings, concurrency, async (finding) => client.pentest(finding.id));
+      for (const finding of pentestResults) {
+        console.log(`pentest ${finding.id}: ${finding.status} confirmed=${finding.confirmed}`);
       }
     }
     console.log(`scan ${result.run.id}: ${result.findings.length} finding(s)`);
@@ -331,6 +334,28 @@ function summarizeTokens(trace: string): { rows: Array<{ component: string; inpu
 
 function absoluteUrl(apiUrl: string, pathOrUrl: string): string {
   return new URL(pathOrUrl, apiUrl).toString();
+}
+
+async function runLimited<T, R>(items: T[], concurrency: number, task: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function parsePositiveInt(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {
