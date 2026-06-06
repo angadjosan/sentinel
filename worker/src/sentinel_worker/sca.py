@@ -85,6 +85,25 @@ class OSVAdvisorySource(AdvisorySource):
 
 
 def parse_dependencies(path: str, content: str) -> list[Dependency]:
+    if path.endswith("package-lock.json"):
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+        deps: list[Dependency] = []
+        packages = payload.get("packages")
+        if isinstance(packages, dict):
+            for package_path, package in packages.items():
+                if not package_path.startswith("node_modules/") or not isinstance(package, dict):
+                    continue
+                version = package.get("version")
+                if version:
+                    deps.append(Dependency(name=package_path.removeprefix("node_modules/"), version=str(version), ecosystem="npm", manifest_path=path))
+            return deps
+        for name, package in payload.get("dependencies", {}).items():
+            if isinstance(package, dict) and package.get("version"):
+                deps.append(Dependency(name=name, version=str(package["version"]), ecosystem="npm", manifest_path=path))
+        return deps
     if path.endswith("package.json"):
         try:
             payload = json.loads(content)

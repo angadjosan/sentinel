@@ -17,6 +17,16 @@ def test_parse_package_json_dependencies_from_full_or_partial_content():
     assert partial[0].version == "4.17.21"
 
 
+def test_parse_package_lock_dependencies():
+    deps = parse_dependencies(
+        "package-lock.json",
+        '{"packages":{"":{"dependencies":{"lodash":"^4.17.21"}},"node_modules/lodash":{"version":"4.17.21"}}}',
+    )
+    assert deps[0].name == "lodash"
+    assert deps[0].version == "4.17.21"
+    assert deps[0].ecosystem == "npm"
+
+
 def test_parse_pyproject_and_gemfile_lock_dependencies():
     pyproject = parse_dependencies("pyproject.toml", 'dependencies = ["django==3.2.0"]')
     gemfile = parse_dependencies("Gemfile.lock", "GEM\n  specs:\n    rails (6.1.0)\n")
