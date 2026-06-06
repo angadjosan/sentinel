@@ -40,3 +40,31 @@ async def test_build_file_graph_extracts_route_sink_and_taint_edge():
     assert sink.is_sink is True
     assert flow is not None
     assert flow.tainted is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "content", "route_id", "auth_required"),
+    [
+        ("src/app/api/users/route.ts", "export async function GET() { return Response.json({}); }", "route:src/app/api/users/route.ts:GET /api/users", False),
+        ("urls.py", "urlpatterns = [path('admin/users', login_required(view))]", "route:urls.py:ANY /admin/users", True),
+        ("config/routes.rb", "get '/admin/users', to: 'users#index'\nbefore_action :authenticate_user!", "route:config/routes.rb:GET /admin/users", True),
+        ("UserController.java", "@PreAuthorize(\"hasRole('ADMIN')\")\n@GetMapping(\"/admin/users\")\nList<User> users() { return List.of(); }", "route:UserController.java:GET /admin/users", True),
+    ],
+)
+async def test_framework_adapters_extract_routes(path: str, content: str, route_id: str, auth_required: bool):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(session, graph.id, SourceFile(path=path, content=content, is_new=True))
+        async with session.begin():
+            route = await session.get(Node, route_id)
+    assert route is not None
+    assert route.is_entry_point is True
+    assert route.auth_required is auth_required

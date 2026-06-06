@@ -16,11 +16,14 @@ CALL_RE = re.compile(r"(?<!function\s)\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?
 IMPORT_REF_RE = re.compile(r"(?:from\s+['\"]([^'\"]+)['\"]|import\s+[^'\n]+from\s+['\"]([^'\"]+)['\"]|require\(\s*['\"]([^'\"]+)['\"]\s*\))")
 EXPRESS_ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
 FASTAPI_ROUTE_RE = re.compile(r"@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
+DJANGO_ROUTE_RE = re.compile(r"\bpath\(\s*['\"]([^'\"]*)['\"]")
+RAILS_ROUTE_RE = re.compile(r"\b(get|post|put|patch|delete)\s+['\"]([^'\"]+)['\"]")
+SPRING_ROUTE_RE = re.compile(r"@(GetMapping|PostMapping|PutMapping|PatchMapping|DeleteMapping|RequestMapping)\s*(?:\(\s*(?:value\s*=\s*)?['\"]([^'\"]+)['\"])?")
 PY_PARAM_RE = re.compile(r"\b(request\.(?:GET|POST|query_params|path_params)|params|query)\b")
 JS_PARAM_RE = re.compile(r"\b(req\.(?:body|query|params)|request\.(?:body|query|params))\b")
 SINK_RE = re.compile(r"\b(db\.query|query|execute|exec|spawn|system|popen|readFile|open|send_file|FileResponse)\s*\(", re.IGNORECASE)
 SANITIZER_RE = re.compile(r"\b(sanitize|escape|validate|parameterize|quote)\w*\s*\(", re.IGNORECASE)
-AUTH_RE = re.compile(r"\b(auth|authenticate|authorize|login_required|Depends\(get_current_user|PreAuthorize)\b", re.IGNORECASE)
+AUTH_RE = re.compile(r"\b(auth\w*|authenticate\w*|authorize\w*|login_required|Depends\(get_current_user|PreAuthorize)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -84,10 +87,38 @@ async def _emit_functions(db: AsyncSession, graph_id: str, source: SourceFile, l
 
 async def _emit_routes(db: AsyncSession, graph_id: str, source: SourceFile, language: str | None) -> list[Node]:
     nodes: list[Node] = []
+    if _is_next_route(source.path):
+        method = _next_method(source.content)
+        route_path = _next_route_path(source.path)
+        node = _route_node(graph_id, source, language, method, route_path, 1, _nearby_auth(source.content, 0))
+        await db.merge(node)
+        nodes.append(node)
     if language == "python":
         for match in FASTAPI_ROUTE_RE.finditer(source.content):
             method = match.group(1).upper()
             path = match.group(2)
+            line = source.content[: match.start()].count("\n") + 1
+            node = _route_node(graph_id, source, language, method, path, line, _nearby_auth(source.content, match.start()))
+            await db.merge(node)
+            nodes.append(node)
+        for match in DJANGO_ROUTE_RE.finditer(source.content):
+            path = "/" + match.group(1).strip("/")
+            line = source.content[: match.start()].count("\n") + 1
+            node = _route_node(graph_id, source, language, "ANY", path if path != "/" else "/", line, _nearby_auth(source.content, match.start()))
+            await db.merge(node)
+            nodes.append(node)
+    elif language == "ruby":
+        for match in RAILS_ROUTE_RE.finditer(source.content):
+            method = match.group(1).upper()
+            path = match.group(2)
+            line = source.content[: match.start()].count("\n") + 1
+            node = _route_node(graph_id, source, language, method, path, line, _nearby_auth(source.content, match.start()))
+            await db.merge(node)
+            nodes.append(node)
+    elif language == "java":
+        for match in SPRING_ROUTE_RE.finditer(source.content):
+            method = _spring_method(match.group(1))
+            path = match.group(2) or "/"
             line = source.content[: match.start()].count("\n") + 1
             node = _route_node(graph_id, source, language, method, path, line, _nearby_auth(source.content, match.start()))
             await db.merge(node)
@@ -223,3 +254,34 @@ def _intent_for_name(name: str) -> str:
     if "handler" in lowered or "route" in lowered:
         return "Request handler function."
     return "Application function discovered during graph construction."
+
+
+def _is_next_route(path: str) -> bool:
+    return ("/app/api/" in f"/{path}" or "/pages/api/" in f"/{path}") and path.endswith((".ts", ".tsx", ".js", ".jsx"))
+
+
+def _next_route_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    marker = "/app/api/" if "/app/api/" in f"/{normalized}" else "/pages/api/"
+    tail = f"/{normalized}".split(marker, 1)[1]
+    for suffix in ("/route.ts", "/route.tsx", "/route.js", "/route.jsx", ".ts", ".tsx", ".js", ".jsx"):
+        if tail.endswith(suffix):
+            tail = tail[: -len(suffix)]
+            break
+    return "/api/" + tail.strip("/")
+
+
+def _next_method(content: str) -> str:
+    match = re.search(r"export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE)\b", content)
+    return match.group(1) if match else "ANY"
+
+
+def _spring_method(annotation: str) -> str:
+    return {
+        "GetMapping": "GET",
+        "PostMapping": "POST",
+        "PutMapping": "PUT",
+        "PatchMapping": "PATCH",
+        "DeleteMapping": "DELETE",
+        "RequestMapping": "ANY",
+    }[annotation]
