@@ -39,6 +39,13 @@ class Advisory:
     summary: str
 
 
+@dataclass(frozen=True)
+class Reachability:
+    reachable: bool
+    evidence: str
+    imported_by: list[str]
+
+
 class AdvisorySource:
     async def lookup(self, dependency: Dependency) -> list[Advisory]:
         raise NotImplementedError
@@ -198,9 +205,9 @@ async def scan_dependencies(
             intent=f"{dependency.ecosystem} dependency declared in {path}.",
         )
         await db.merge(dep_node)
-        reachable = await _has_import_reference(db, graph_id, dependency.name)
+        reachable = await _dependency_reachability(db, graph_id, dependency, dep_node.id)
         for advisory in await _lookup_with_cache(db, dependency, advisory_source):
-            vuln_type = "sca_reachable" if reachable else "sca_unreachable"
+            vuln_type = "sca_reachable" if reachable.reachable else "sca_unreachable"
             fingerprint = compute_fingerprint(repo_id, path, f"{vuln_type}:{dependency.name}:{advisory.vuln_id}")
             existing = await db.scalar(select(Finding).where(Finding.fingerprint == fingerprint))
             if existing is not None and existing.suppressed:
@@ -214,7 +221,7 @@ async def scan_dependencies(
                         vuln_type=vuln_type,
                         severity=advisory.severity,
                         title=f"{advisory.vuln_id} affects {dependency.name}@{dependency.version}",
-                        description=f"{advisory.summary}. Reachability: {'reachable' if reachable else 'not proven reachable'}.",
+                        description=f"{advisory.summary}. Reachability: {reachable.evidence}.",
                         remediation=f"Upgrade {dependency.name} to a non-vulnerable version.",
                         fingerprint=fingerprint,
                     )
@@ -258,9 +265,36 @@ async def _lookup_with_cache(db: AsyncSession, dependency: Dependency, source: A
     return advisories
 
 
-async def _has_import_reference(db: AsyncSession, graph_id: str, package_name: str) -> bool:
+async def _dependency_reachability(db: AsyncSession, graph_id: str, dependency: Dependency, version_node_id: str) -> Reachability:
+    package_node_id = f"dep:{dependency.name}"
+    package_node = await db.get(Node, package_node_id)
+    if package_node is None:
+        package_node = Node(
+            id=package_node_id,
+            graph_id=graph_id,
+            kind="DEPENDENCY",
+            name=dependency.name,
+            language=dependency.ecosystem,
+            label=f"{dependency.name} dependency",
+            intent="Imported package referenced by repository source.",
+        )
+        await db.merge(package_node)
+    await _add_edge(db, graph_id, package_node_id, version_node_id, "DEPENDS_ON", call_uncertainty="resolved_import")
+    import_edges = list(await db.scalars(select(Edge).where(Edge.graph_id == graph_id).where(Edge.kind == "IMPORTS").where(Edge.dst == package_node_id)))
+    imported_by = sorted(edge.src for edge in import_edges)
+    if imported_by:
+        return Reachability(True, f"reachable via IMPORTS edge(s) from {', '.join(imported_by[:5])}", imported_by)
     nodes = await db.scalars(select(Node).where(Node.graph_id == graph_id).where(Node.kind.in_(["FILE", "FUNCTION"])))
-    return any(node.intent and package_name in node.intent for node in nodes)
+    fallback = sorted(node.id for node in nodes if node.intent and dependency.name in node.intent)
+    if fallback:
+        return Reachability(True, f"reachable via unresolved textual import evidence in {', '.join(fallback[:5])}", fallback)
+    return Reachability(False, "not proven reachable from any source import edge", [])
+
+
+async def _add_edge(db: AsyncSession, graph_id: str, src: str, dst: str, kind: str, **kwargs: object) -> None:
+    existing = await db.scalar(select(Edge).where(Edge.graph_id == graph_id).where(Edge.src == src).where(Edge.dst == dst).where(Edge.kind == kind))
+    if existing is None:
+        db.add(Edge(graph_id=graph_id, src=src, dst=dst, kind=kind, **kwargs))
 
 
 def _severity_from_osv(vuln: dict) -> str:

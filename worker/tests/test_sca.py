@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from sentinel_worker.construction import SourceFile, build_file_graph
-from sentinel_worker.models import Base, Finding, Graph
+from sentinel_worker.models import Base, Edge, Finding, Graph
 from sentinel_worker.scan import get_or_create_graph, scan_diff
 from sentinel_worker.sca import Advisory, AdvisorySource, Dependency, parse_dependencies, parse_nvd_advisories, scan_dependencies
 
@@ -140,9 +140,39 @@ async def test_sca_emits_reachable_dependency_finding():
             count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}')
         async with session.begin():
             finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_reachable"))
+            depends_on = await session.scalar(
+                select(Edge)
+                .where(Edge.kind == "DEPENDS_ON")
+                .where(Edge.src == "dep:lodash")
+                .where(Edge.dst == "dep:package.json:lodash@4.17.21")
+            )
     assert count == 1
     assert finding is not None
     assert "lodash" in finding.title
+    assert "IMPORTS edge" in finding.description
+    assert depends_on is not None
+
+
+@pytest.mark.asyncio
+async def test_sca_marks_dependency_unreachable_without_import_edge():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}')
+        async with session.begin():
+            finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_unreachable"))
+            depends_on = await session.scalar(select(Edge).where(Edge.kind == "DEPENDS_ON").where(Edge.dst == "dep:package.json:lodash@4.17.21"))
+
+    assert count == 1
+    assert finding is not None
+    assert "not proven reachable" in finding.description
+    assert depends_on is not None
 
 
 @pytest.mark.asyncio
