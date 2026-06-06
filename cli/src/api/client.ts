@@ -160,7 +160,8 @@ export class SentinelApiClient {
         proof_detail: proofDetail,
         boot: this.config.boot,
         healthcheck: this.config.healthcheck,
-        egress_allowlist: this.config.egress_allowlist
+        egress_allowlist: this.config.egress_allowlist,
+        firecracker: this.config.firecracker
       })
     });
   }

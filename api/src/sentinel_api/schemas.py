@@ -20,6 +20,22 @@ class PlanRequest(BaseModel):
     with_retry: bool = False
 
 
+class FirecrackerRequest(BaseModel):
+    enabled: bool = False
+    kernel_image: str | None = None
+    rootfs_image: str | None = None
+    api_socket: str = "/tmp/sentinel-firecracker.sock"
+    firecracker_bin: str = "firecracker"
+    boot_args: str = "console=ttyS0 reboot=k panic=1 pci=off"
+    vcpu_count: int = Field(default=1, ge=1)
+    mem_size_mib: int = Field(default=512, ge=128)
+    smt: bool = False
+    network_interface_id: str = "eth0"
+    host_dev_name: str | None = None
+    guest_mac: str | None = None
+    guest_runner_argv: list[str] = Field(default_factory=list)
+
+
 class PentestRequest(BaseModel):
     repo_name: str = Field(min_length=1)
     finding_id: str | None = None
@@ -30,6 +46,7 @@ class PentestRequest(BaseModel):
     boot: str | None = None
     healthcheck: str | None = None
     egress_allowlist: list[str] = Field(default_factory=list)
+    firecracker: FirecrackerRequest | None = None
 
 
 class SuppressRequest(BaseModel):

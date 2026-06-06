@@ -9,6 +9,24 @@ const VariantSchema = z.object({
   requires: z.string().optional()
 });
 
+const FirecrackerSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    kernel_image: z.string().optional(),
+    rootfs_image: z.string().optional(),
+    api_socket: z.string().default("/tmp/sentinel-firecracker.sock"),
+    firecracker_bin: z.string().default("firecracker"),
+    boot_args: z.string().default("console=ttyS0 reboot=k panic=1 pci=off"),
+    vcpu_count: z.number().int().positive().default(1),
+    mem_size_mib: z.number().int().positive().default(512),
+    smt: z.boolean().default(false),
+    network_interface_id: z.string().default("eth0"),
+    host_dev_name: z.string().optional(),
+    guest_mac: z.string().optional(),
+    guest_runner_argv: z.array(z.string()).default([])
+  })
+  .default({});
+
 export const ConfigSchema = z.object({
   $schema: z.string().optional(),
   repo_id: z.string().optional(),
@@ -22,6 +40,7 @@ export const ConfigSchema = z.object({
   env: z.object({ from: z.string() }).optional(),
   variants: z.record(VariantSchema).default({}),
   egress_allowlist: z.array(z.string().min(1)).default([]),
+  firecracker: FirecrackerSchema,
   pentest: z
     .object({
       max_wall_clock_seconds: z.number().int().positive().default(1800),
@@ -73,6 +92,7 @@ export function writeConfig(config: SentinelConfig, root = findRepoRoot()): void
 export function validateConfigForScan(config: SentinelConfig): void {
   validateSafeCommand("boot", config.boot);
   validateSafeCommand("healthcheck", config.healthcheck);
+  validateSafeArgv("firecracker.guest_runner_argv", config.firecracker.guest_runner_argv);
   for (const [name, variant] of Object.entries(config.variants)) {
     validateSafeCommand(`variants.${name}.build`, variant.build);
   }
@@ -82,5 +102,13 @@ function validateSafeCommand(field: string, command: string | undefined): void {
   if (!command) return;
   if (!SAFE_COMMAND_RE.test(command)) {
     throw new Error(`${field} contains shell metacharacters; use a simple argv-style command without pipes, redirection, command substitution, or backgrounding.`);
+  }
+}
+
+function validateSafeArgv(field: string, argv: string[]): void {
+  for (const arg of argv) {
+    if (!arg || /[|&;<>()`]/.test(arg)) {
+      throw new Error(`${field} contains an unsafe argument; use literal argv entries without shell metacharacters.`);
+    }
   }
 }

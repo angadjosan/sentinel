@@ -5,6 +5,14 @@
   "model": "ollama",
   "boot": "docker compose up -d",
   "healthcheck": "curl -sf http://localhost:3000/health",
+  "egress_allowlist": ["localhost"],
+  "firecracker": {
+    "enabled": false,
+    "kernel_image": "/var/lib/sentinel/vmlinux",
+    "rootfs_image": "/var/lib/sentinel/rootfs.ext4",
+    "api_socket": "/tmp/sentinel-firecracker.sock",
+    "guest_runner_argv": ["sentinel-vsock-exec", "--socket", "/tmp/sentinel-vsock.sock", "--"]
+  },
   "env": {
     "from": ".env.sentinel"
   },

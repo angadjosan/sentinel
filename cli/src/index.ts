@@ -287,6 +287,12 @@ config
       return;
     }
     const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck", "api_endpoint", "repo_id"]);
+    if (key.startsWith("firecracker.")) {
+      setFirecrackerConfigValue(current, key.slice("firecracker.".length), value);
+      writeConfig(ConfigSchema.parse(current), root);
+      console.log(`set ${key}`);
+      return;
+    }
     if (!allowed.has(key)) {
       throw new Error(`Unsupported config key ${key}`);
     }
@@ -325,4 +331,31 @@ function summarizeTokens(trace: string): { rows: Array<{ component: string; inpu
 
 function absoluteUrl(apiUrl: string, pathOrUrl: string): string {
   return new URL(pathOrUrl, apiUrl).toString();
+}
+
+function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {
+  const current = (config.firecracker && typeof config.firecracker === "object" ? config.firecracker : {}) as Record<string, unknown>;
+  if (key === "enabled" || key === "smt") {
+    current[key] = value === "true";
+  } else if (key === "vcpu_count" || key === "mem_size_mib") {
+    current[key] = Number(value);
+  } else if (key === "guest_runner_argv") {
+    current[key] = value.split(/\s+/).filter(Boolean);
+  } else if (
+    [
+      "kernel_image",
+      "rootfs_image",
+      "api_socket",
+      "firecracker_bin",
+      "boot_args",
+      "network_interface_id",
+      "host_dev_name",
+      "guest_mac"
+    ].includes(key)
+  ) {
+    current[key] = value;
+  } else {
+    throw new Error(`Unsupported firecracker config key ${key}`);
+  }
+  config.firecracker = current;
 }

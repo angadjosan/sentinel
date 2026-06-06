@@ -19,7 +19,7 @@ from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff
 from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import read_run_trace
-from sentinel_worker.vm import PentestSandboxConfig
+from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, PentestSandboxConfig, SandboxExecutor
 
 from .auth import Principal, create_token, current_principal, require_admin
 from .deps import get_db, init_schema
@@ -438,6 +438,7 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
             behavioral_proof=payload.behavioral_proof,
             proof_detail=payload.proof_detail,
             sandbox=PentestSandboxConfig(boot=payload.boot, healthcheck=payload.healthcheck, egress_allowlist=payload.egress_allowlist),
+            executor=_pentest_executor(payload),
         ),
     )
     RUNS_TOTAL.labels(kind=result.run.kind, status=result.run.status).inc()
@@ -655,6 +656,30 @@ async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Pr
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
     return findings[0] if findings else None
+
+
+def _pentest_executor(payload: PentestRequest) -> SandboxExecutor | None:
+    config = payload.firecracker
+    if config is None or not (config.enabled or config.kernel_image or config.rootfs_image):
+        return None
+    if not config.kernel_image or not config.rootfs_image:
+        raise HTTPException(status_code=422, detail="firecracker.kernel_image and firecracker.rootfs_image are required when Firecracker is enabled")
+    return FirecrackerMicroVMExecutor(
+        FirecrackerConfig(
+            kernel_image=config.kernel_image,
+            rootfs_image=config.rootfs_image,
+            api_socket=config.api_socket,
+            firecracker_bin=config.firecracker_bin,
+            boot_args=config.boot_args,
+            vcpu_count=config.vcpu_count,
+            mem_size_mib=config.mem_size_mib,
+            smt=config.smt,
+            network_interface_id=config.network_interface_id,
+            host_dev_name=config.host_dev_name,
+            guest_mac=config.guest_mac,
+            guest_runner_argv=config.guest_runner_argv,
+        )
+    )
 
 
 def node_response(node: Node) -> NodeResponse:

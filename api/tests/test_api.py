@@ -188,6 +188,31 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
     assert "pentest.oracle.evaluated" in pentest_runs[0]["trace"]
 
 
+def test_pentest_rejects_incomplete_firecracker_config():
+    repo = f"pentest-firecracker-{uuid4().hex}"
+    with TestClient(app) as client:
+        source = client.post(
+            "/source",
+            json={
+                "repo_name": repo,
+                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
+                "run_context": "local",
+            },
+        )
+        assert source.status_code == 200
+        rejected = client.post(
+            "/pentest",
+            json={
+                "repo_name": repo,
+                "finding_id": source.json()["findings"][0]["id"],
+                "firecracker": {"enabled": True, "kernel_image": "/var/lib/sentinel/vmlinux"},
+            },
+        )
+
+    assert rejected.status_code == 422
+    assert "rootfs_image" in rejected.text
+
+
 def test_run_events_streams_trace_and_completion():
     repo = f"events-{uuid4().hex}"
     with TestClient(app) as client:
