@@ -169,3 +169,16 @@ class TokenSpendByComponent(Base):
     provider: Mapped[str] = mapped_column(String, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SourceFileSnapshot(Base):
+    __tablename__ = "source_files"
+
+    repo_id: Mapped[str] = mapped_column(String, ForeignKey("repos.id"), primary_key=True)
+    commit_hash: Mapped[str] = mapped_column(String, primary_key=True)
+    file_path: Mapped[str] = mapped_column(String, primary_key=True)
+    content_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha: Mapped[str] = mapped_column(String, nullable=False)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

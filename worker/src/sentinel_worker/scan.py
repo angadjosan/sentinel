@@ -13,6 +13,7 @@ from .languages import language_for
 from .models import Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
 from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
+from .source_store import store_source_snapshot
 
 
 SQLI_RE = re.compile(r"(query|execute)\s*\([^)]*(\+|\$\{|format\(|f['\"])", re.IGNORECASE)
@@ -77,7 +78,10 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     run = Run(graph_id=graph.id, kind="init", status="running")
     db.add(run)
     await db.flush()
+    repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
+    assert repo is not None
     for path, content in files.items():
+        await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
         await build_file_graph(db, graph.id, SourceFile(path=path, content=content, is_new=False))
     run.status = "completed"
     run.completed_at = now()
@@ -94,6 +98,7 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     assert repo is not None
     findings = 0
     for file in parse_unified_diff(diff):
+        await store_source_snapshot(db, repo_id=repo.id, commit_hash=run.id, file_path=file.path, content=file.content)
         await build_file_graph(db, graph.id, SourceFile(path=file.path, content=file.content, is_new=True))
         findings += await scan_dependencies(db, graph.id, repo.id, run.id, file.path, file.content)
         findings += await _emit_pattern_findings(db, graph.id, repo.id, run.id, file)
