@@ -25,3 +25,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    environment:
+      NEXT_PUBLIC_SENTINEL_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
