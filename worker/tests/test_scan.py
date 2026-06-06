@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy import select
 
 from sentinel_worker.models import Base, Edge, Finding, Node
-from sentinel_worker.scan import parse_unified_diff, review_plan, scan_diff
+from sentinel_worker.scan import parse_unified_diff, review_plan, scan_diff, trace_event
 
 
 @pytest.mark.asyncio
@@ -44,6 +44,15 @@ def test_parse_unified_diff_collects_added_lines():
     files = parse_unified_diff("diff --git a/a b/a\n+++ b/a.py\n+print('x')\n unchanged")
     assert files[0].path == "a.py"
     assert "print" in files[0].content
+
+
+def test_trace_event_scrubs_nested_secret_fields_without_scrubbing_uuid():
+    run_id = "123e4567-e89b-12d3-a456-426614174000"
+    secret = "sk-Test_1234567890abcdefghijklmnop/QRSTUV"
+    event = json.loads(trace_event("demo", run_id=run_id, nested={"token": secret}))
+
+    assert event["run_id"] == run_id
+    assert event["nested"]["token"] == "[REDACTED:high_entropy]"
 
 
 @pytest.mark.asyncio

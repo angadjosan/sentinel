@@ -59,8 +59,20 @@ def parse_unified_diff(diff: str) -> list[DiffFile]:
 
 
 def trace_event(kind: str, **fields: object) -> str:
-    payload = {"ts": datetime.now(UTC).isoformat(), "kind": kind, **fields}
+    payload = _scrub_trace_value({"ts": datetime.now(UTC).isoformat(), "kind": kind, **fields})
     return json.dumps(payload, sort_keys=True)
+
+
+def _scrub_trace_value(value: object) -> object:
+    if isinstance(value, str):
+        return scrub_secrets(value)
+    if isinstance(value, list):
+        return [_scrub_trace_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_trace_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _scrub_trace_value(item) for key, item in value.items()}
+    return value
 
 
 async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: str = "dev", account_id: str | None = None) -> Graph:

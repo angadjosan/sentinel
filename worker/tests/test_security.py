@@ -19,6 +19,12 @@ def test_high_entropy_scanner_ignores_plain_hex_ids():
     assert find_secret_candidates(text) == []
 
 
+def test_high_entropy_scanner_ignores_uuid_ids():
+    text = "run 123e4567-e89b-12d3-a456-426614174000"
+    assert find_secret_candidates(text) == []
+    assert scrub_secrets(text) == text
+
+
 def test_high_entropy_scanner_requires_character_variety():
     text = "token sk-Test_1234567890abcdefghijklmnop/QRSTUV"
     assert find_secret_candidates(text)

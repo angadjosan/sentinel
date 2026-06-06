@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .models import Run, Task, now
 from .notifications import notify_run_event, notify_task_available
 from .scan import get_or_create_graph, trace_event
+from .security import scrub_secrets
 from .trace_store import offload_trace_if_large
 
 
@@ -67,10 +68,11 @@ async def complete_task(db: AsyncSession, *, task_id: str, trace: str | None = N
         run.status = "completed"
         run.completed_at = now()
         event = trace_event("task.completed", task_id=task.id)
-        run.trace = "\n".join(part for part in [run.trace, trace, event] if part)
+        safe_trace = scrub_secrets(trace or "")
+        run.trace = "\n".join(part for part in [run.trace, safe_trace, event] if part)
         await offload_trace_if_large(db, run)
-        if trace:
-            for line in trace.splitlines():
+        if safe_trace:
+            for line in safe_trace.splitlines():
                 if line.strip():
                     await notify_run_event(db, run.id, line)
         await notify_run_event(db, run.id, event)
@@ -83,13 +85,13 @@ async def fail_task(db: AsyncSession, *, task_id: str, error: str) -> Task:
     if task.status == "cancelled":
         return task
     task.status = "failed"
-    task.error = error
+    task.error = scrub_secrets(error)
     task.completed_at = now()
     run = await db.get(Run, task.run_id)
     if run is not None:
         run.status = "failed"
         run.completed_at = now()
-        event = trace_event("task.failed", task_id=task.id, error=error)
+        event = trace_event("task.failed", task_id=task.id, error=task.error)
         run.trace = "\n".join([run.trace or "", event]).strip()
         await offload_trace_if_large(db, run)
         await notify_run_event(db, run.id, event)
