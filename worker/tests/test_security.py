@@ -1,4 +1,4 @@
-from sentinel_worker.security import compute_fingerprint, scrub_secrets
+from sentinel_worker.security import compute_fingerprint, find_secret_candidates, scrub_secrets
 
 
 def test_fingerprint_ignores_line_number_inputs_by_design():
@@ -12,3 +12,13 @@ def test_scrub_secrets_is_idempotent():
     scrubbed = scrub_secrets(text)
     assert scrub_secrets(scrubbed) == scrubbed
     assert "AKIA1234567890ABCDEF" not in scrubbed
+
+
+def test_high_entropy_scanner_ignores_plain_hex_ids():
+    text = "trace id 8f3a1b2c9d0e4f567890abcdefabcdef"
+    assert find_secret_candidates(text) == []
+
+
+def test_high_entropy_scanner_requires_character_variety():
+    text = "token sk-Test_1234567890abcdefghijklmnop/QRSTUV"
+    assert find_secret_candidates(text)

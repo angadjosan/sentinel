@@ -5,6 +5,7 @@ import re
 
 AWS_ACCESS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9_/\-+=]{32,}\b")
+HEX_RE = re.compile(r"^[a-fA-F0-9]+$")
 
 SAFE_SECRET_EXAMPLES = {"AKIAIOSFODNN7EXAMPLE"}
 
@@ -24,6 +25,18 @@ def find_secret_candidates(text: str) -> list[tuple[str, str]]:
         if value not in SAFE_SECRET_EXAMPLES:
             findings.append(("aws_access_key_id", value))
     for value in HIGH_ENTROPY_RE.findall(text):
-        if value not in SAFE_SECRET_EXAMPLES and not AWS_ACCESS_KEY_RE.fullmatch(value):
+        if value not in SAFE_SECRET_EXAMPLES and not AWS_ACCESS_KEY_RE.fullmatch(value) and _looks_like_secret(value):
             findings.append(("high_entropy", value))
     return findings
+
+
+def _looks_like_secret(value: str) -> bool:
+    if HEX_RE.fullmatch(value):
+        return False
+    classes = [
+        any(char.islower() for char in value),
+        any(char.isupper() for char in value),
+        any(char.isdigit() for char in value),
+        any(char in "_/-+=" for char in value),
+    ]
+    return sum(classes) >= 3

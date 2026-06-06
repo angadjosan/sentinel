@@ -20,6 +20,8 @@ SQLI_RE = re.compile(r"(query|execute)\s*\([^)]*(\+|\$\{|format\(|f['\"])", re.I
 CMDI_RE = re.compile(r"(exec|spawn|system|popen)\s*\([^)]*(\+|\$\{|format\(|f['\"])", re.IGNORECASE)
 PATH_TRAVERSAL_RE = re.compile(r"(readFile|open|send_file|FileResponse)\s*\([^)]*(req\.|request\.|params|query)", re.IGNORECASE)
 ROUTE_RE = re.compile(r"(app|router)\.(get|post|put|patch|delete)\s*\(\s*['\"]([^'\"]+)")
+LOG_SINK_RE = re.compile(r"\b(console\.log|logger\.|logging\.|print)\s*\(", re.IGNORECASE)
+HTTP_SINK_RE = re.compile(r"\b(fetch|axios\.|requests\.|httpx\.|http\.request)\s*\(", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,8 @@ async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, 
     if PATH_TRAVERSAL_RE.search(file.content):
         specs.append(("path_traversal", "high", "Possible path traversal", "Changed code appears to pass request-controlled data to a file access sink.", "Normalize paths and restrict access to an allowlisted base directory."))
     for secret_kind, secret in find_secret_candidates(file.content):
-        specs.append(("secret_leak", "critical", f"Hardcoded {secret_kind}", f"Changed code includes a credential-shaped value: {scrub_secrets(secret)}.", "Remove the secret, rotate it, and load credentials from a managed secret store."))
+        severity = _secret_severity(file.content)
+        specs.append(("secret_leak", severity, f"Hardcoded {secret_kind}", f"Changed code includes a credential-shaped value: {scrub_secrets(secret)}.", "Remove the secret, rotate it, and load credentials from a managed secret store."))
     count = 0
     for vuln_type, severity, title, description, remediation in specs:
         fingerprint = compute_fingerprint(repo_id, file.path, vuln_type)
@@ -161,3 +164,11 @@ async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, 
             existing.updated_at = now()
             count += 1
     return count
+
+
+def _secret_severity(content: str) -> str:
+    if HTTP_SINK_RE.search(content):
+        return "critical"
+    if LOG_SINK_RE.search(content):
+        return "high"
+    return "medium"
