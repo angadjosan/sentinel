@@ -32,6 +32,15 @@ class DiffFile:
     content: str
 
 
+@dataclass(frozen=True)
+class PatternFindingSpec:
+    vuln_type: str
+    severity: str
+    title: str
+    description: str
+    remediation: str
+
+
 def parse_unified_diff(diff: str) -> list[DiffFile]:
     files: list[DiffFile] = []
     current_path: str | None = None
@@ -165,29 +174,46 @@ async def review_plan(db: AsyncSession, repo_name: str, content: str, *, with_re
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
     assert repo is not None
     pseudo_file = DiffFile("plan.txt", content)
-    await _emit_pattern_findings(db, graph.id, repo.id, run.id, pseudo_file)
+    seen_issue_types: set[str] = set()
+    trace_lines = [run.trace]
+    max_passes = 3 if with_retry else 1
+    completed_passes = 0
+    for pass_index in range(1, max_passes + 1):
+        specs = _pattern_specs(pseudo_file.content)
+        issue_types = {spec.vuln_type for spec in specs}
+        new_issue_types = sorted(issue_types - seen_issue_types)
+        await _emit_pattern_findings(db, graph.id, repo.id, run.id, pseudo_file, specs=specs)
+        completed_passes = pass_index
+        trace_lines.append(
+            trace_event(
+                "plan.pass.completed",
+                pass_index=pass_index,
+                issue_count=len(specs),
+                new_issue_count=len(new_issue_types),
+                vuln_types=sorted(issue_types),
+            )
+        )
+        if not with_retry or not specs:
+            break
+        if pass_index > 1 and not new_issue_types:
+            trace_lines.append(trace_event("plan.retry.stabilized", pass_index=pass_index, issue_count=len(specs)))
+            break
+        seen_issue_types.update(issue_types)
+        pseudo_file = DiffFile("plan.txt", _annotated_retry_plan(pseudo_file.content, specs))
     findings = list(await db.scalars(select(Finding).where(Finding.run_id == run.id)))
     run.status = "completed"
     run.completed_at = now()
-    run.trace = "\n".join([run.trace, trace_event("plan.completed", finding_count=len(findings))])
+    trace_lines.append(trace_event("plan.completed", finding_count=len(findings), retry_passes=completed_passes))
+    run.trace = "\n".join(trace_lines)
     await offload_trace_if_large(db, run)
     return run, findings
 
 
-async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, run_id: str, file: DiffFile) -> int:
-    specs: list[tuple[str, str, str, str, str]] = []
-    if SQLI_RE.search(file.content):
-        specs.append(("sqli", "high", "Possible SQL injection", "Changed code appears to build a database query from interpolated input.", "Use parameterized queries and validate untrusted input."))
-    if CMDI_RE.search(file.content):
-        specs.append(("cmdi", "critical", "Possible command injection", "Changed code appears to pass interpolated input to process execution.", "Avoid shell execution; pass arguments as an array and validate allowlisted values."))
-    if PATH_TRAVERSAL_RE.search(file.content):
-        specs.append(("path_traversal", "high", "Possible path traversal", "Changed code appears to pass request-controlled data to a file access sink.", "Normalize paths and restrict access to an allowlisted base directory."))
-    for secret_kind, secret in find_secret_candidates(file.content):
-        severity = _secret_severity(file.content)
-        specs.append(("secret_leak", severity, f"Hardcoded {secret_kind}", f"Changed code includes a credential-shaped value: {scrub_secrets(secret)}.", "Remove the secret, rotate it, and load credentials from a managed secret store."))
+async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, run_id: str, file: DiffFile, *, specs: list[PatternFindingSpec] | None = None) -> int:
+    specs = _pattern_specs(file.content) if specs is None else specs
     count = 0
-    for vuln_type, severity, title, description, remediation in specs:
-        fingerprint = compute_fingerprint(repo_id, file.path, vuln_type)
+    for spec in specs:
+        fingerprint = compute_fingerprint(repo_id, file.path, spec.vuln_type)
         existing = await db.scalar(select(Finding).where(Finding.fingerprint == fingerprint))
         if existing is not None and existing.suppressed:
             continue
@@ -197,11 +223,11 @@ async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, 
                     graph_id=graph_id,
                     node_id=f"file:{file.path}",
                     run_id=run_id,
-                    vuln_type=vuln_type,
-                    severity=severity,
-                    title=title,
-                    description=description,
-                    remediation=remediation,
+                    vuln_type=spec.vuln_type,
+                    severity=spec.severity,
+                    title=spec.title,
+                    description=spec.description,
+                    remediation=spec.remediation,
                     fingerprint=fingerprint,
                 )
             )
@@ -212,6 +238,25 @@ async def _emit_pattern_findings(db: AsyncSession, graph_id: str, repo_id: str, 
             existing.updated_at = now()
             count += 1
     return count
+
+
+def _pattern_specs(content: str) -> list[PatternFindingSpec]:
+    specs: list[PatternFindingSpec] = []
+    if SQLI_RE.search(content):
+        specs.append(PatternFindingSpec("sqli", "high", "Possible SQL injection", "Changed code appears to build a database query from interpolated input.", "Use parameterized queries and validate untrusted input."))
+    if CMDI_RE.search(content):
+        specs.append(PatternFindingSpec("cmdi", "critical", "Possible command injection", "Changed code appears to pass interpolated input to process execution.", "Avoid shell execution; pass arguments as an array and validate allowlisted values."))
+    if PATH_TRAVERSAL_RE.search(content):
+        specs.append(PatternFindingSpec("path_traversal", "high", "Possible path traversal", "Changed code appears to pass request-controlled data to a file access sink.", "Normalize paths and restrict access to an allowlisted base directory."))
+    for secret_kind, secret in find_secret_candidates(content):
+        severity = _secret_severity(content)
+        specs.append(PatternFindingSpec("secret_leak", severity, f"Hardcoded {secret_kind}", f"Changed code includes a credential-shaped value: {scrub_secrets(secret)}.", "Remove the secret, rotate it, and load credentials from a managed secret store."))
+    return specs
+
+
+def _annotated_retry_plan(content: str, specs: list[PatternFindingSpec]) -> str:
+    comments = "\n".join(f"SECURITY_REVIEW[{spec.vuln_type}]: {spec.remediation}" for spec in specs)
+    return f"{content}\n\n{comments}"
 
 
 def _secret_severity(content: str) -> str:
