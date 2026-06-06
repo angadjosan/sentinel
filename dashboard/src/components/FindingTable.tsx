@@ -1,16 +1,26 @@
 "use client";
 
-import { ShieldCheck, Ban } from "lucide-react";
+import { ShieldCheck, Ban, Check, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { SeverityBadge } from "./SeverityBadge";
 import type { Finding } from "../lib/api";
-import { suppressFinding } from "../lib/api";
+import { approveSuppression, rejectSuppression, suppressFinding } from "../lib/api";
 
 export function FindingTable({ findings }: { findings: Finding[] }) {
   const router = useRouter();
 
   async function suppress(id: string) {
     await suppressFinding(id, "Reviewed in dashboard");
+    router.refresh();
+  }
+
+  async function approve(id: string) {
+    await approveSuppression(id, "Approved in dashboard");
+    router.refresh();
+  }
+
+  async function reject(id: string) {
+    await rejectSuppression(id, "Rejected in dashboard");
     router.refresh();
   }
 
@@ -45,6 +55,16 @@ export function FindingTable({ findings }: { findings: Finding[] }) {
                 <button title="Suppress finding" disabled={finding.status === "suppressed"} onClick={() => suppress(finding.id)}>
                   <Ban size={16} />
                 </button>
+                {finding.status === "suppression_pending" ? (
+                  <>
+                    <button title="Approve suppression" onClick={() => approve(finding.id)}>
+                      <Check size={16} />
+                    </button>
+                    <button title="Reject suppression" onClick={() => reject(finding.id)}>
+                      <X size={16} />
+                    </button>
+                  </>
+                ) : null}
               </div>
             </td>
           </tr>

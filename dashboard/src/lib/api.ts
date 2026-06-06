@@ -63,3 +63,23 @@ export async function suppressFinding(id: string, reason: string): Promise<Findi
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Finding>;
 }
+
+export async function approveSuppression(id: string, reason: string): Promise<Finding> {
+  const response = await fetch(`${apiUrl}/findings/${id}/suppress/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason })
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<Finding>;
+}
+
+export async function rejectSuppression(id: string, reason: string): Promise<Finding> {
+  const response = await fetch(`${apiUrl}/findings/${id}/suppress/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason })
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<Finding>;
+}
