@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Run, Task, now
+from .notifications import notify_run_event, notify_task_available
 from .scan import get_or_create_graph, trace_event
 from .trace_store import offload_trace_if_large
 
@@ -33,6 +34,7 @@ async def enqueue_task(db: AsyncSession, *, repo_name: str, kind: str, payload: 
     )
     db.add(task)
     await db.flush()
+    await notify_task_available(db, task.id)
     return task
 
 
@@ -50,7 +52,9 @@ async def claim_next_task(db: AsyncSession, *, worker_id: str, kinds: list[str] 
     run = await db.get(Run, task.run_id)
     if run is not None:
         run.status = "running"
-        run.trace = "\n".join([run.trace or "", trace_event("task.claimed", task_id=task.id, worker_id=worker_id)]).strip()
+        event = trace_event("task.claimed", task_id=task.id, worker_id=worker_id)
+        run.trace = "\n".join([run.trace or "", event]).strip()
+        await notify_run_event(db, run.id, event)
     return ClaimedTask(task=task, payload=json.loads(task.payload))
 
 
@@ -62,8 +66,14 @@ async def complete_task(db: AsyncSession, *, task_id: str, trace: str | None = N
     if run is not None:
         run.status = "completed"
         run.completed_at = now()
-        run.trace = "\n".join(part for part in [run.trace, trace, trace_event("task.completed", task_id=task.id)] if part)
+        event = trace_event("task.completed", task_id=task.id)
+        run.trace = "\n".join(part for part in [run.trace, trace, event] if part)
         await offload_trace_if_large(db, run)
+        if trace:
+            for line in trace.splitlines():
+                if line.strip():
+                    await notify_run_event(db, run.id, line)
+        await notify_run_event(db, run.id, event)
     return task
 
 
@@ -76,8 +86,10 @@ async def fail_task(db: AsyncSession, *, task_id: str, error: str) -> Task:
     if run is not None:
         run.status = "failed"
         run.completed_at = now()
-        run.trace = "\n".join([run.trace or "", trace_event("task.failed", task_id=task.id, error=error)]).strip()
+        event = trace_event("task.failed", task_id=task.id, error=error)
+        run.trace = "\n".join([run.trace or "", event]).strip()
         await offload_trace_if_large(db, run)
+        await notify_run_event(db, run.id, event)
     return task
 
 
@@ -91,8 +103,10 @@ async def cancel_task(db: AsyncSession, *, task_id: str) -> Task:
     if run is not None:
         run.status = "cancelled"
         run.completed_at = now()
-        run.trace = "\n".join([run.trace or "", trace_event("task.cancelled", task_id=task.id)]).strip()
+        event = trace_event("task.cancelled", task_id=task.id)
+        run.trace = "\n".join([run.trace or "", event]).strip()
         await offload_trace_if_large(db, run)
+        await notify_run_event(db, run.id, event)
     return task
 
 

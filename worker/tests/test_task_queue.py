@@ -23,7 +23,9 @@ async def test_task_queue_claim_complete_and_fail_flow():
             run = await session.get(Run, task.run_id)
     assert run is not None
     assert run.status == "completed"
+    assert "task.claimed" in run.trace
     assert "task.completed" in run.trace
+    assert "done" in run.trace
 
     async with sessionmaker() as session:
         async with session.begin():
@@ -33,6 +35,7 @@ async def test_task_queue_claim_complete_and_fail_flow():
             failed_run = await session.get(Run, failed.run_id)
     assert failed_run is not None
     assert failed_run.status == "failed"
+    assert "task.failed" in failed_run.trace
 
 
 @pytest.mark.asyncio
