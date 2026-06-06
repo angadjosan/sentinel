@@ -98,6 +98,13 @@ class GraphMergeRequest(BaseModel):
     main_graph_id: str = Field(min_length=1)
 
 
+class SourceReadResponse(BaseModel):
+    repo_name: str
+    commit_hash: str
+    file_path: str
+    content: str
+
+
 class NodeResponse(BaseModel):
     id: str
     kind: str

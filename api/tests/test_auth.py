@@ -69,3 +69,20 @@ def test_monthly_token_budget_blocks_new_runs(monkeypatch):
         )
     assert response.status_code == 429
     assert response.json()["detail"]["error"] == "monthly_token_budget_exceeded"
+
+
+def test_source_file_reads_are_account_scoped(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token_a = create_token("source-a", "source-account-a", "admin")
+    token_b = create_token("source-b", "source-account-b", "admin")
+    with TestClient(app) as client:
+        created = client.post(
+            "/init",
+            headers={"Authorization": f"Bearer {token_a}"},
+            json={"repo_name": "shared-source", "files": {"app.js": "const tenant = 'a';"}},
+        )
+        assert created.status_code == 200
+        allowed = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_a}"})
+        denied = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_b}"})
+    assert allowed.status_code == 200
+    assert denied.status_code == 404

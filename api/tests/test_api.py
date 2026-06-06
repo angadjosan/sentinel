@@ -200,3 +200,13 @@ def test_run_trace_access_is_audited():
             return len(list(all_rows))
 
     assert anyio.run(read_log_count) >= 1
+
+
+def test_source_file_endpoint_reads_encrypted_snapshot():
+    repo = f"source-read-{uuid4().hex}"
+    with TestClient(app) as client:
+        init = client.post("/init", json={"repo_name": repo, "files": {"app.js": "const x = 1;"}})
+        assert init.status_code == 200
+        response = client.get(f"/source-files/{repo}/bootstrap/app.js")
+    assert response.status_code == 200
+    assert response.json()["content"] == "const x = 1;"

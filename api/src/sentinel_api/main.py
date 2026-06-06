@@ -17,6 +17,7 @@ from sentinel_worker.oracle import ConfirmationOracle
 from sentinel_worker.graph_query import GraphQuery
 from sentinel_worker.graph_merge import merge_graph
 from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff, trace_event
+from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 
 from .auth import Principal, current_principal, require_admin
@@ -34,6 +35,7 @@ from .schemas import (
     RunResponse,
     SourceRequest,
     SourceResponse,
+    SourceReadResponse,
     SuppressRequest,
     TaskCompleteRequest,
     TaskFailRequest,
@@ -388,6 +390,21 @@ async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depen
     nodes = list(await db.scalars(select(Node).limit(limit)))
     edges = list(await db.scalars(select(Edge).limit(limit)))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.get("/source-files/{repo_name}/{commit_hash}/{file_path:path}", response_model=SourceReadResponse)
+async def read_source_file(repo_name: str, commit_hash: str, file_path: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceReadResponse:
+    stmt = select(Repo).where(Repo.name == repo_name)
+    if principal.account_id != "dev":
+        stmt = stmt.where(Repo.account_id == principal.account_id)
+    repo = await db.scalar(stmt)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="repo not found")
+    try:
+        content = await read_source_snapshot(db, repo_id=repo.id, commit_hash=commit_hash, file_path=file_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="source file not found") from exc
+    return SourceReadResponse(repo_name=repo.name, commit_hash=commit_hash, file_path=file_path, content=content)
 
 
 @app.post("/admin/graphs/merge")
