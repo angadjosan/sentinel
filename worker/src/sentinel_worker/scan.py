@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .construction import SourceFile, build_file_graph
+from .languages import language_for
 from .models import Finding, Graph, Node, Repo, Run, now
 from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
 
@@ -39,24 +41,6 @@ def parse_unified_diff(diff: str) -> list[DiffFile]:
     if current_path is not None:
         files.append(DiffFile(current_path, "\n".join(added)))
     return files
-
-
-def language_for(path: str) -> str | None:
-    suffix = path.rsplit(".", 1)[-1] if "." in path else ""
-    return {
-        "ts": "typescript",
-        "tsx": "typescript",
-        "js": "javascript",
-        "jsx": "javascript",
-        "py": "python",
-        "rb": "ruby",
-        "java": "java",
-        "go": "go",
-        "rs": "rust",
-        "c": "c",
-        "cpp": "cpp",
-        "h": "c",
-    }.get(suffix)
 
 
 def trace_event(kind: str, **fields: object) -> str:
@@ -93,20 +77,7 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     db.add(run)
     await db.flush()
     for path, content in files.items():
-        node = Node(
-            id=f"file:{path}",
-            graph_id=graph.id,
-            kind="FILE",
-            name=path,
-            file=path,
-            line_start=1,
-            line_end=max(1, len(content.splitlines())),
-            language=language_for(path),
-            is_new=False,
-            label=f"{path} source file",
-            intent="Repository source snapshot indexed during bootstrap.",
-        )
-        await db.merge(node)
+        await build_file_graph(db, graph.id, SourceFile(path=path, content=content, is_new=False))
     run.status = "completed"
     run.completed_at = now()
     run.trace = trace_event("init.completed", file_count=len(files))
@@ -122,36 +93,7 @@ async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context:
     assert repo is not None
     findings = 0
     for file in parse_unified_diff(diff):
-        file_node = Node(
-            id=f"file:{file.path}",
-            graph_id=graph.id,
-            kind="FILE",
-            name=file.path,
-            file=file.path,
-            line_start=1,
-            line_end=max(1, len(file.content.splitlines())),
-            language=language_for(file.path),
-            is_new=True,
-            label=f"Changed {file.path}",
-            intent="File changed in the submitted diff.",
-        )
-        await db.merge(file_node)
-        for match in ROUTE_RE.finditer(file.content):
-            route_node = Node(
-                id=f"route:{file.path}:{match.group(2).upper()} {match.group(3)}",
-                graph_id=graph.id,
-                kind="ROUTE",
-                name=f"{match.group(2).upper()} {match.group(3)}",
-                file=file.path,
-                line_start=file.content[: match.start()].count("\n") + 1,
-                line_end=file.content[: match.start()].count("\n") + 1,
-                language=language_for(file.path),
-                is_entry_point=True,
-                auth_required="auth" in file.content[max(0, match.start() - 250) : match.start()].lower(),
-                privilege="user",
-                is_new=True,
-            )
-            await db.merge(route_node)
+        await build_file_graph(db, graph.id, SourceFile(path=file.path, content=file.content, is_new=True))
         findings += await _emit_pattern_findings(db, graph.id, repo.id, run.id, file)
     run.status = "completed"
     run.completed_at = now()
