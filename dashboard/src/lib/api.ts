@@ -42,6 +42,18 @@ export function tokenSpend(): Promise<Array<{ component: string; input_tokens: n
   return get("/analytics/token-spend");
 }
 
+export function scanLatency(): Promise<Array<{ kind: string; p50_seconds: number; p90_seconds: number; count: number }>> {
+  return get("/analytics/scan-latency");
+}
+
+export function falsePositiveRate(): Promise<{ total: number; suppressed: number; rate: number }> {
+  return get("/analytics/false-positive-rate");
+}
+
+export function confirmationRate(): Promise<{ total: number; confirmed: number; rate: number }> {
+  return get("/analytics/confirmation-rate");
+}
+
 export async function suppressFinding(id: string, reason: string): Promise<Finding> {
   const response = await fetch(`${apiUrl}/findings/${id}/suppress`, {
     method: "PATCH",
