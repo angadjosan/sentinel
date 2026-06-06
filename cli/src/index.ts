@@ -6,7 +6,7 @@ import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
 import { writeApiKey } from "./auth/keychain.js";
-import { ConfigSchema, configPath, findRepoRoot, loadConfig, writeConfig } from "./config/sentinel.config.js";
+import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff, lsFiles } from "./diff/git.js";
 
 const program = new Command();
@@ -47,6 +47,7 @@ program
   .option("--base <ref>", "Diff against this base ref")
   .option("--queue", "Queue scan for cloud worker instead of running synchronously")
   .action(async (paths: string[], options) => {
+    validateConfigForScan(loadConfig());
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
     const runContext = process.env.CI ? "ci" : "local";
     const client = new SentinelApiClient();
@@ -71,6 +72,7 @@ program
   .description("Run source scan, then pentest each finding unless skipped")
   .option("--no-pentest", "Skip pentest")
   .action(async (options) => {
+    validateConfigForScan(loadConfig());
     const client = new SentinelApiClient();
     const result = await client.source(currentDiff(), process.env.CI ? "ci" : "local");
     if (options.pentest) {
@@ -251,7 +253,7 @@ config
       console.log("stored api-key in system keychain");
       return;
     }
-    const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck"]);
+    const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck", "api_endpoint", "repo_id"]);
     if (!allowed.has(key)) {
       throw new Error(`Unsupported config key ${key}`);
     }

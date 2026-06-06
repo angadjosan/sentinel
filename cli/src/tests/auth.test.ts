@@ -3,15 +3,14 @@ import { afterEach, test } from "node:test";
 
 import { SentinelApiClient } from "../api/client.js";
 import { readApiKey } from "../auth/keychain.js";
-import type { SentinelConfig } from "../config/sentinel.config.js";
+import { ConfigSchema } from "../config/sentinel.config.js";
 
-const config: SentinelConfig = {
+const config = ConfigSchema.parse({
   apiUrl: "http://sentinel.test",
   repoName: "repo",
   provider: "local",
-  model: "ollama",
-  variants: {}
-};
+  model: "ollama"
+});
 
 const originalFetch = globalThis.fetch;
 
