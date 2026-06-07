@@ -100,6 +100,11 @@ class FindingResponse(BaseModel):
     confirmed: bool
     evidence: str | None = None
     fingerprint: str
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    created_at: str
+    updated_at: str
 
 
 class SuppressionAuditResponse(BaseModel):

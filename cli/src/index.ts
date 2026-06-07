@@ -127,10 +127,14 @@ program
 program
   .command("list")
   .description("List findings")
-  .action(async () => {
-    const findings = await new SentinelApiClient().findings();
+  .option("--status <status>", "Filter by finding status")
+  .option("--severity <severity>", "Filter by severity")
+  .action(async (options) => {
+    const findings = await new SentinelApiClient().findings({ status: options.status, severity: options.severity });
+    console.log("ID\tSTATUS\tSEVERITY\tTYPE\tFILE\tUPDATED\tTITLE");
     for (const finding of findings) {
-      console.log(`${finding.id}\t${finding.status}\t${finding.severity}\t${finding.vuln_type}\t${finding.title}`);
+      const file = finding.file ? `${finding.file}${finding.line_start ? `:${finding.line_start}` : ""}` : "n/a";
+      console.log(`${finding.id}\t${finding.status}\t${finding.severity}\t${finding.vuln_type}\t${file}\t${finding.updated_at}\t${finding.title}`);
     }
   });
 

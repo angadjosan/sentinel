@@ -28,6 +28,9 @@ def test_source_endpoint_emits_finding(tmp_path, monkeypatch):
     body = response.json()
     assert body["run"]["status"] == "completed"
     assert body["findings"][0]["vuln_type"] == "sqli"
+    assert body["findings"][0]["file"] == "app.js"
+    assert body["findings"][0]["created_at"]
+    assert body["findings"][0]["updated_at"]
     assert body["run"]["finding_count"] == 1
     assert body["run"]["created_at"]
     assert body["run"]["completed_at"]
@@ -106,6 +109,30 @@ def test_findings_can_filter_by_repo_name():
     body = response.json()
     assert body
     assert all(finding["vuln_type"] == "sqli" for finding in body)
+
+
+def test_findings_can_filter_by_status_and_severity():
+    repo = f"finding-filters-{uuid4().hex}"
+    with TestClient(app) as client:
+        created = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
+        )
+        assert created.status_code == 200
+        finding_id = created.json()["findings"][0]["id"]
+        suppressed = client.patch(f"/findings/{finding_id}/suppress", json={"reason": "filter regression"})
+        assert suppressed.status_code == 200
+
+        suppressed_rows = client.get(f"/findings?repo_name={repo}&status=suppressed")
+        high_rows = client.get(f"/findings?repo_name={repo}&severity=high")
+        critical_rows = client.get(f"/findings?repo_name={repo}&severity=critical")
+
+    assert suppressed_rows.status_code == 200
+    assert [finding["id"] for finding in suppressed_rows.json()] == [finding_id]
+    assert high_rows.status_code == 200
+    assert [finding["id"] for finding in high_rows.json()] == [finding_id]
+    assert critical_rows.status_code == 200
+    assert critical_rows.json() == []
 
 
 def test_source_enqueue_claim_complete_and_cancel():

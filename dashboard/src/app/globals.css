@@ -263,6 +263,36 @@ a {
   padding-top: 4px;
 }
 
+.filter-panel {
+  margin-bottom: 16px;
+}
+
+.filter-form {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px;
+}
+
+.filter-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.filter-form label > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.filter-form select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  min-height: 36px;
+  padding: 0 10px;
+}
+
 .compact-table th,
 .compact-table td {
   font-size: 12px;

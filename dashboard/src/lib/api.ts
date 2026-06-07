@@ -9,6 +9,11 @@ export type Finding = {
   confirmed: boolean;
   evidence: string | null;
   fingerprint: string;
+  file: string | null;
+  line_start: number | null;
+  line_end: number | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type Run = {
@@ -118,8 +123,12 @@ async function get<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function listFindings(): Promise<Finding[]> {
-  return get<Finding[]>("/findings");
+export function listFindings(filters: { status?: string; severity?: string } = {}): Promise<Finding[]> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (filters.severity) params.set("severity", filters.severity);
+  const suffix = params.toString();
+  return get<Finding[]>(`/findings${suffix ? `?${suffix}` : ""}`);
 }
 
 export function getFinding(id: string): Promise<Finding> {

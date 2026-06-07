@@ -32,7 +32,9 @@ export function FindingTable({ findings }: { findings: Finding[] }) {
           <th>Severity</th>
           <th>Type</th>
           <th>Finding</th>
+          <th>File</th>
           <th>Status</th>
+          <th>Updated</th>
           <th>Confirmed</th>
           <th>Actions</th>
         </tr>
@@ -51,7 +53,9 @@ export function FindingTable({ findings }: { findings: Finding[] }) {
               <div className="muted">{finding.description}</div>
               <div>{finding.remediation}</div>
             </td>
+            <td>{finding.file ? `${finding.file}${finding.line_start ? `:${finding.line_start}` : ""}` : <span className="muted">n/a</span>}</td>
             <td>{finding.status}</td>
+            <td>{new Date(finding.updated_at).toLocaleString()}</td>
             <td>{finding.confirmed ? <ShieldCheck size={18} color="#0f766e" /> : <span className="muted">no</span>}</td>
             <td>
               <div className="actions">
@@ -74,7 +78,7 @@ export function FindingTable({ findings }: { findings: Finding[] }) {
         ))}
         {findings.length === 0 ? (
           <tr>
-            <td colSpan={6} className="muted">
+            <td colSpan={8} className="muted">
               No findings recorded.
             </td>
           </tr>

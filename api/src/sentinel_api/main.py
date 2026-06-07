@@ -101,7 +101,8 @@ def account_config_response(account: Account) -> AccountConfigResponse:
     )
 
 
-def finding_response(finding: Finding) -> FindingResponse:
+async def finding_response(db: AsyncSession, finding: Finding) -> FindingResponse:
+    node = await db.get(Node, finding.node_id) if finding.node_id else None
     return FindingResponse(
         id=finding.id,
         vuln_type=finding.vuln_type,
@@ -113,6 +114,11 @@ def finding_response(finding: Finding) -> FindingResponse:
         confirmed=finding.confirmed,
         evidence=finding.evidence,
         fingerprint=finding.fingerprint,
+        file=node.file if node else None,
+        line_start=node.line_start if node else None,
+        line_end=node.line_end if node else None,
+        created_at=finding.created_at.isoformat(),
+        updated_at=finding.updated_at.isoformat(),
     )
 
 
@@ -241,7 +247,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
             FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
         RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
         SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
-        return SourceResponse(run=await run_response(db, run), findings=[finding_response(finding) for finding in findings])
+        return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
     finally:
         ACTIVE_RUNS.dec()
 
@@ -313,11 +319,17 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
         FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
-    return SourceResponse(run=await run_response(db, run), findings=[finding_response(finding) for finding in findings])
+    return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
 
 
 @app.get("/findings", response_model=list[FindingResponse])
-async def findings(repo_name: str | None = None, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[FindingResponse]:
+async def findings(
+    repo_name: str | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> list[FindingResponse]:
     stmt = select(Finding).order_by(Finding.created_at.desc())
     joined_graph = False
     if repo_name:
@@ -331,8 +343,12 @@ async def findings(repo_name: str | None = None, db: AsyncSession = Depends(get_
         if not joined_graph:
             stmt = stmt.join(Graph, Finding.graph_id == Graph.id)
         stmt = stmt.where(Graph.account_id == principal.account_id)
+    if status:
+        stmt = stmt.where(Finding.status == status)
+    if severity:
+        stmt = stmt.where(Finding.severity == severity)
     rows = await db.scalars(stmt)
-    return [finding_response(row) for row in rows]
+    return [await finding_response(db, row) for row in rows]
 
 
 @app.get("/findings/{finding_id}", response_model=FindingResponse)
@@ -340,7 +356,7 @@ async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db), pr
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    return finding_response(finding)
+    return await finding_response(db, finding)
 
 
 @app.get("/findings/{finding_id}/audit", response_model=list[SuppressionAuditResponse])
@@ -369,7 +385,7 @@ async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), prin
         raise HTTPException(status_code=404, detail="finding not found")
     node = await db.get(Node, finding.node_id) if finding.node_id else None
     return {
-        "finding": finding_response(finding).model_dump(),
+        "finding": (await finding_response(db, finding)).model_dump(),
         "node": node_response(node).model_dump() if node else None,
         "remediation_plan": [
             finding.remediation,
@@ -400,7 +416,7 @@ async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession =
     finding.suppressed_at = now()
     finding.suppression_reason = payload.reason
     db.add(SuppressionAudit(finding_id=finding.id, action=action, actor_id=actor.id, reason=payload.reason))
-    return finding_response(finding)
+    return await finding_response(db, finding)
 
 
 @app.post("/findings/{finding_id}/unsuppress", response_model=FindingResponse)
@@ -413,7 +429,7 @@ async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession
     finding.suppressed = False
     finding.suppression_reason = None
     db.add(SuppressionAudit(finding_id=finding.id, action="unsuppress", actor_id=actor.id, reason=payload.reason))
-    return finding_response(finding)
+    return await finding_response(db, finding)
 
 
 @app.post("/findings/{finding_id}/suppress/approve", response_model=FindingResponse)
@@ -426,7 +442,7 @@ async def approve_suppression(finding_id: str, payload: SuppressRequest, db: Asy
     finding.suppressed = True
     finding.suppressed_at = now()
     db.add(SuppressionAudit(finding_id=finding.id, action="approve", actor_id=actor.id, reason=payload.reason))
-    return finding_response(finding)
+    return await finding_response(db, finding)
 
 
 @app.post("/findings/{finding_id}/suppress/reject", response_model=FindingResponse)
@@ -438,7 +454,7 @@ async def reject_suppression(finding_id: str, payload: SuppressRequest, db: Asyn
     finding.status = "open"
     finding.suppressed = False
     db.add(SuppressionAudit(finding_id=finding.id, action="reject", actor_id=actor.id, reason=payload.reason))
-    return finding_response(finding)
+    return await finding_response(db, finding)
 
 
 @app.post("/pentest", response_model=FindingResponse)
@@ -458,7 +474,7 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
         ),
     )
     RUNS_TOTAL.labels(kind=result.run.kind, status=result.run.status).inc()
-    return finding_response(result.finding)
+    return await finding_response(db, result.finding)
 
 
 @app.get("/runs", response_model=list[RunResponse])

@@ -12,6 +12,11 @@ export type Finding = {
   confirmed: boolean;
   evidence?: string | null;
   fingerprint: string;
+  file?: string | null;
+  line_start?: number | null;
+  line_end?: number | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type Run = {
@@ -105,8 +110,11 @@ export class SentinelApiClient {
     });
   }
 
-  findings() {
-    return this.request<Finding[]>(`/findings?repo_name=${encodeURIComponent(this.config.repoName)}`);
+  findings(filters: { status?: string; severity?: string } = {}) {
+    const params = new URLSearchParams({ repo_name: this.config.repoName });
+    if (filters.status) params.set("status", filters.status);
+    if (filters.severity) params.set("severity", filters.severity);
+    return this.request<Finding[]>(`/findings?${params.toString()}`);
   }
 
   finding(id: string) {
