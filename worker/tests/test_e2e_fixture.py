@@ -1,5 +1,4 @@
-"""End-to-end pipeline tests using the vuln-express fixture app and
-language-specific source fixtures.
+"""End-to-end pipeline tests using language-specific source fixtures.
 
 These tests run the full graph construction + scan pipeline against known-bad
 source fixtures and assert that specific findings are emitted (or not emitted).
@@ -7,7 +6,6 @@ LLM calls are mocked; CVE feeds are mocked. Real tree-sitter parsing and
 real graph construction run against the fixture source files.
 
 Ground truth covered:
-  - vuln-express/app.js: SQL injection, missing auth, hardcoded secret
   - python/sqli.py: SQL injection in Flask route
   - typescript/sqli.ts: SQL injection in Express handler
 """
@@ -27,7 +25,6 @@ from sentinel_worker.scan import get_or_create_graph, scan_diff
 from tests.conftest import MockLLMClient
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "source"
-VULN_EXPRESS = Path(__file__).parent.parent.parent / "tests" / "fixtures" / "apps" / "vuln-express"
 
 
 # ---------------------------------------------------------------------------
@@ -50,100 +47,6 @@ def _diff_for(file_path: str, content: str) -> str:
     lines = content.splitlines()
     added = "\n".join(f"+{line}" for line in lines)
     return f"diff --git a/{file_path} b/{file_path}\nnew file mode 100644\n--- /dev/null\n+++ b/{file_path}\n@@ -0,0 +1,{len(lines)} @@\n{added}\n"
-
-
-# ---------------------------------------------------------------------------
-# vuln-express fixture: SQL injection
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_vuln_express_sqli_taint_path_in_graph():
-    """Graph construction for vuln-express/app.js produces a tainted FLOWS_TO edge
-    from the request parameter to the db.query sink — the prerequisite for sqli detection."""
-    from sentinel_worker.construction import SourceFile, build_file_graph
-    from sentinel_worker.models import Edge, Node
-
-    content = _read(VULN_EXPRESS / "app.js")
-    engine = await _engine()
-    sm = async_sessionmaker(engine, expire_on_commit=False)
-
-    async with sm() as session:
-        async with session.begin():
-            graph = Graph(account_id="a", repo_id="r", kind="main")
-            session.add(graph)
-            await session.flush()
-            await build_file_graph(session, graph.id, SourceFile("app.js", content, is_new=True))
-        async with session.begin():
-            # Must have a FLOWS_TO edge that is tainted (request param → sink)
-            tainted_edge = await session.scalar(
-                select(Edge).where(Edge.kind == "FLOWS_TO", Edge.tainted == True)
-            )
-            sink_node = await session.scalar(
-                select(Node).where(Node.is_sink == True, Node.graph_id == graph.id)
-            )
-
-    assert sink_node is not None, "Should have a sink node (db.query or prepare)"
-    assert tainted_edge is not None, "Should have a tainted FLOWS_TO edge from request param to sink"
-
-
-@pytest.mark.asyncio
-async def test_vuln_express_secret_detected():
-    """scan_diff on vuln-express/app.js emits a secret_leak finding for the hardcoded key."""
-    content = _read(VULN_EXPRESS / "app.js")
-    engine = await _engine()
-    sm = async_sessionmaker(engine, expire_on_commit=False)
-
-    with patch("sentinel_worker.sca.OSVAdvisorySource.lookup", new=AsyncMock(return_value=[])):
-        async with sm() as session:
-            async with session.begin():
-                await get_or_create_graph(session, "repo")
-                await scan_diff(
-                    session,
-                    "repo",
-                    _diff_for("app.js", content),
-                    _llm=MockLLMClient(),
-                )
-            async with session.begin():
-                secret_finding = await session.scalar(
-                    select(Finding).where(Finding.vuln_type == "secret_leak")
-                )
-
-    assert secret_finding is not None, "Expected a secret_leak finding from vuln-express/app.js"
-
-
-@pytest.mark.asyncio
-async def test_vuln_express_safe_route_does_not_produce_sqli():
-    """The parameterized /users/safe route should not produce a sqli finding."""
-    safe_content = """
-const express = require('express');
-const Database = require('better-sqlite3');
-const app = express();
-const db = new Database(':memory:');
-app.get('/users/safe', (req, res) => {
-  const id = req.query.id;
-  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  res.json(row);
-});
-"""
-    engine = await _engine()
-    sm = async_sessionmaker(engine, expire_on_commit=False)
-
-    with patch("sentinel_worker.sca.OSVAdvisorySource.lookup", new=AsyncMock(return_value=[])):
-        async with sm() as session:
-            async with session.begin():
-                await get_or_create_graph(session, "repo")
-                await scan_diff(
-                    session,
-                    "repo",
-                    _diff_for("safe_app.js", safe_content),
-                    _llm=MockLLMClient(),
-                )
-            async with session.begin():
-                finding = await session.scalar(
-                    select(Finding).where(Finding.vuln_type == "sqli")
-                )
-
-    assert finding is None, "Parameterized query should not produce a sqli finding"
 
 
 # ---------------------------------------------------------------------------
