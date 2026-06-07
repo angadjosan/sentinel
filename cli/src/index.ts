@@ -84,12 +84,13 @@ program
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
     const runContext = process.env.CI ? "ci" : "local";
     const client = new SentinelApiClient();
+    const scope = { baseRef: options.base, paths };
     if (options.queue) {
-      const queued = await client.enqueueSource(diff, runContext);
+      const queued = await client.enqueueSource(diff, runContext, scope);
       console.log(`queued task ${queued.task_id}; run ${queued.run.id}`);
       return;
     }
-    const result = await client.source(diff, runContext);
+    const result = await client.source(diff, runContext, scope);
     for (const finding of result.findings) {
       console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type} ${finding.id}`);
       console.log(`  ${finding.title}`);
@@ -103,12 +104,15 @@ program
 program
   .command("scan")
   .description("Run source scan, then pentest each finding unless skipped")
+  .argument("[paths...]", "Optional paths to scope the diff")
+  .option("--staged", "Scan staged changes only")
+  .option("--base <ref>", "Diff against this base ref")
   .option("--no-pentest", "Skip pentest")
   .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
-  .action(async (options) => {
+  .action(async (paths: string[], options) => {
     validateConfigForScan(loadConfig());
     const client = new SentinelApiClient();
-    const result = await client.source(currentDiff(), process.env.CI ? "ci" : "local");
+    const result = await client.source(currentDiff({ staged: options.staged, base: options.base, paths }), process.env.CI ? "ci" : "local", { baseRef: options.base, paths });
     if (options.pentest) {
       const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
       const pentestResults = await runLimited(result.findings, concurrency, async (finding) => client.pentest(finding.id));

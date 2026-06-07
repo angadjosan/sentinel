@@ -122,22 +122,25 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     return run
 
 
-async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context: str = "local", account_id: str | None = None) -> Run:
+async def scan_diff(db: AsyncSession, repo_name: str, diff: str, *, run_context: str = "local", account_id: str | None = None, base_ref: str | None = None, paths: list[str] | None = None) -> Run:
     graph = await get_or_create_graph(db, repo_name, account_id=account_id)
-    run = Run(graph_id=graph.id, kind="source", status="running", trace=trace_event("scan.started", run_context=run_context))
+    run = Run(graph_id=graph.id, kind="source", status="running", trace=trace_event("scan.started", run_context=run_context, base_ref=base_ref, paths=paths or []))
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
     assert repo is not None
-    await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context)
+    await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context, base_ref=base_ref, paths=paths or [])
     return run
 
 
-async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run: Run, diff: str, run_context: str = "local") -> int:
+async def execute_source_scan(db: AsyncSession, *, graph: Graph, repo: Repo, run: Run, diff: str, run_context: str = "local", base_ref: str | None = None, paths: list[str] | None = None) -> int:
     if run.status != "running":
         run.status = "running"
+    started = trace_event("scan.started", run_context=run_context, base_ref=base_ref, paths=paths or [])
     if not run.trace:
-        run.trace = trace_event("scan.started", run_context=run_context)
+        run.trace = started
+    elif '"kind": "scan.started"' not in run.trace:
+        run.trace = "\n".join([run.trace, started])
     findings = 0
     files = parse_unified_diff(diff)
     changed_paths = [file.path for file in files]

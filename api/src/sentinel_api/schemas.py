@@ -12,6 +12,8 @@ class SourceRequest(BaseModel):
     repo_name: str = Field(min_length=1)
     diff: str
     run_context: str = "local"
+    base_ref: str | None = None
+    paths: list[str] = Field(default_factory=list)
 
 
 class PlanRequest(BaseModel):

@@ -35,6 +35,8 @@ async def execute_claimed_task(db: AsyncSession, claimed: ClaimedTask) -> None:
             run=run,
             diff=str(claimed.payload.get("diff", "")),
             run_context=str(claimed.payload.get("run_context", "worker")),
+            base_ref=claimed.payload.get("base_ref") if isinstance(claimed.payload.get("base_ref"), str) else None,
+            paths=[str(path) for path in claimed.payload.get("paths", [])] if isinstance(claimed.payload.get("paths"), list) else [],
         )
         return
     if task.kind == "plan":

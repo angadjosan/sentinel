@@ -88,17 +88,17 @@ export class SentinelApiClient {
     return { status: "approved", ...body };
   }
 
-  source(diff: string, runContext: string) {
+  source(diff: string, runContext: string, scope: { baseRef?: string; paths?: string[] } = {}) {
     return this.request<{ run: Run; findings: Finding[] }>("/source", {
       method: "POST",
-      body: JSON.stringify({ repo_name: this.config.repoName, diff, run_context: runContext })
+      body: JSON.stringify({ repo_name: this.config.repoName, diff, run_context: runContext, base_ref: scope.baseRef, paths: scope.paths ?? [] })
     });
   }
 
-  enqueueSource(diff: string, runContext: string) {
+  enqueueSource(diff: string, runContext: string, scope: { baseRef?: string; paths?: string[] } = {}) {
     return this.request<{ task_id: string; run: Run }>("/source/enqueue", {
       method: "POST",
-      body: JSON.stringify({ repo_name: this.config.repoName, diff, run_context: runContext })
+      body: JSON.stringify({ repo_name: this.config.repoName, diff, run_context: runContext, base_ref: scope.baseRef, paths: scope.paths ?? [] })
     });
   }
 

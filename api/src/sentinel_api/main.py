@@ -218,7 +218,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
     ACTIVE_RUNS.inc()
     start = datetime.now(UTC)
     try:
-        run = await scan_diff(db, payload.repo_name, payload.diff, run_context=payload.run_context, account_id=_graph_account_id(principal))
+        run = await scan_diff(db, payload.repo_name, payload.diff, run_context=payload.run_context, account_id=_graph_account_id(principal), base_ref=payload.base_ref, paths=payload.paths)
         rows = await db.scalars(select(Finding).where(Finding.run_id == run.id))
         findings = list(rows)
         for finding in findings:
@@ -237,7 +237,7 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
         db,
         repo_name=payload.repo_name,
         kind="source",
-        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context},
+        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)

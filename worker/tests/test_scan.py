@@ -89,6 +89,30 @@ async def test_scan_trace_reports_blast_radius_and_adapter_coverage():
 
 
 @pytest.mark.asyncio
+async def test_scan_trace_records_diff_scope_metadata():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+      async with session.begin():
+        run = await scan_diff(
+            session,
+            "repo",
+            "+++ b/app.js\n+console.log('x')",
+            run_context="ci",
+            base_ref="origin/main",
+            paths=["app.js"],
+        )
+
+    started = json.loads(run.trace.splitlines()[0])
+    assert started["kind"] == "scan.started"
+    assert started["run_context"] == "ci"
+    assert started["base_ref"] == "origin/main"
+    assert started["paths"] == ["app.js"]
+
+
+@pytest.mark.asyncio
 async def test_review_plan_with_retry_runs_until_issue_set_stabilizes():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:

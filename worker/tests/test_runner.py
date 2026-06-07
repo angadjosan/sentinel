@@ -1,4 +1,5 @@
 import pytest
+import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -23,6 +24,8 @@ async def test_runner_executes_source_task_into_queued_run():
                     "repo_name": "repo",
                     "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
                     "run_context": "worker",
+                    "base_ref": "origin/main",
+                    "paths": ["app.js"],
                 },
             )
             run_id = task.run_id
@@ -36,6 +39,9 @@ async def test_runner_executes_source_task_into_queued_run():
     assert stored_task.status == "completed"
     assert run is not None
     assert run.status == "completed"
+    started = next(event for event in (json.loads(line) for line in run.trace.splitlines()) if event["kind"] == "scan.started")
+    assert started["base_ref"] == "origin/main"
+    assert started["paths"] == ["app.js"]
     assert finding is not None
     assert finding.vuln_type == "sqli"
 
