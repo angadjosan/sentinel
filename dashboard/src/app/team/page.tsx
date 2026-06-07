@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { accountConfig, listFindings } from "../../lib/api";
 import { SeverityBadge } from "../../components/SeverityBadge";
-import { approveDeviceCodeAction, updateAccountConfigAction } from "./actions";
+import { approveDeviceCodeAction, approveSuppressionAction, rejectSuppressionAction, updateAccountConfigAction } from "./actions";
 
 export default async function TeamPage() {
   const [config, findings] = await Promise.all([accountConfig(), listFindings()]);
@@ -102,42 +102,58 @@ export default async function TeamPage() {
         </div>
       </section>
 
-      <section className="grid two detail-grid">
-        <div className="panel">
-          <div className="panel-header">
-            <h2>Suppression Queue</h2>
-            <span className="muted">{pending.length} pending</span>
-          </div>
-          <div className="panel-body">
-            {pending.length ? (
-              <table className="table compact-table">
-                <thead>
-                  <tr>
-                    <th>Severity</th>
-                    <th>Finding</th>
-                    <th>Type</th>
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>Pending Suppression Approvals ({pending.length})</h2>
+        </div>
+        <div className="panel-body">
+          {pending.length ? (
+            <table className="table compact-table">
+              <thead>
+                <tr>
+                  <th>Severity</th>
+                  <th>Finding</th>
+                  <th>Type</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pending.map((finding) => (
+                  <tr key={finding.id}>
+                    <td>
+                      <SeverityBadge severity={finding.severity} />
+                    </td>
+                    <td>
+                      <Link className="row-link" href={`/findings/${finding.id}`}>
+                        {finding.title}
+                      </Link>
+                    </td>
+                    <td>{finding.vuln_type}</td>
+                    <td>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <form action={approveSuppressionAction} style={{ display: "inline" }}>
+                          <input type="hidden" name="finding_id" value={finding.id} />
+                          <input type="hidden" name="reason" value="Approved by admin" />
+                          <button type="submit" className="primary" style={{ padding: "4px 12px", fontSize: 12 }}>
+                            Approve
+                          </button>
+                        </form>
+                        <form action={rejectSuppressionAction} style={{ display: "inline" }}>
+                          <input type="hidden" name="finding_id" value={finding.id} />
+                          <input type="hidden" name="reason" value="Rejected by admin" />
+                          <button type="submit" className="danger" style={{ padding: "4px 12px", fontSize: 12 }}>
+                            Reject
+                          </button>
+                        </form>
+                      </div>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {pending.map((finding) => (
-                    <tr key={finding.id}>
-                      <td>
-                        <SeverityBadge severity={finding.severity} />
-                      </td>
-                      <td>
-                        <Link className="row-link" href={`/findings/${finding.id}`}>
-                          {finding.title}
-                        </Link>
-                      </td>
-                      <td>{finding.vuln_type}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="muted">No suppression requests waiting for review.</div>
-            )}
-          </div>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="muted">No suppression requests waiting for review.</div>
+          )}
         </div>
       </section>
     </>

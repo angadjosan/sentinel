@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# NOTE: Alembic is the production migration path.
+# The create_all fallback below is kept for SQLite dev mode only.
+# Run `alembic upgrade head` (from the worker/ directory) for production.
+
 from datetime import UTC, datetime
 
 from sqlalchemy import text

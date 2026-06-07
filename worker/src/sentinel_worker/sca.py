@@ -6,11 +6,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import AdvisoryCache, Edge, Finding, Node
 from .security import compute_fingerprint
+
+log = structlog.get_logger(__name__)
 
 
 REQUIREMENT_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)==([^\s#]+)", re.MULTILINE)
@@ -50,21 +53,6 @@ class AdvisorySource:
     async def lookup(self, dependency: Dependency) -> list[Advisory]:
         raise NotImplementedError
 
-
-class BuiltinAdvisorySource(AdvisorySource):
-    advisories = [
-        Advisory("lodash", "npm", "4.17.21", "CVE-2021-23337", "high", "lodash command injection in template handling"),
-        Advisory("django", "pypi", "3.2.0", "CVE-2021-33203", "medium", "Django potential directory traversal issue"),
-        Advisory("express", "npm", "4.17.0", "GHSA-example-express", "medium", "Express vulnerable version example advisory"),
-        Advisory("rails", "rubygems", "6.1.0", "CVE-2021-22885", "high", "Rails vulnerable version example advisory"),
-    ]
-
-    async def lookup(self, dependency: Dependency) -> list[Advisory]:
-        return [
-            advisory
-            for advisory in self.advisories
-            if advisory.package == dependency.name and advisory.ecosystem == dependency.ecosystem and advisory.affected_version == dependency.version
-        ]
 
 
 class OSVAdvisorySource(AdvisorySource):
@@ -136,6 +124,77 @@ def parse_nvd_advisories(payload: dict, dependency: Dependency) -> list[Advisory
     return advisories
 
 
+def _parse_pipfile_lock(content: str) -> list[tuple[str, str, str]]:
+    data = json.loads(content)
+    deps: list[tuple[str, str, str]] = []
+    for section in ["default", "develop"]:
+        for name, info in data.get(section, {}).items():
+            version = info.get("version", "").lstrip("==")
+            deps.append((name, version, "PyPI"))
+    return deps
+
+
+def _parse_poetry_lock(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    current_name: str | None = None
+    current_version: str | None = None
+    for line in content.splitlines():
+        if line.startswith("name = "):
+            current_name = line.split('"')[1] if '"' in line else line.split("=")[1].strip().strip('"')
+        elif line.startswith("version = ") and current_name:
+            current_version = line.split('"')[1] if '"' in line else line.split("=")[1].strip().strip('"')
+            deps.append((current_name, current_version, "PyPI"))
+            current_name = current_version = None
+    return deps
+
+
+def _parse_go_mod(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    in_require = False
+    for line in content.splitlines():
+        line = line.strip()
+        if line == "require (":
+            in_require = True
+            continue
+        if in_require and line == ")":
+            in_require = False
+            continue
+        if in_require or line.startswith("require "):
+            line = line.removeprefix("require ").strip()
+            parts = line.split()
+            if len(parts) >= 2 and not parts[0].startswith("//"):
+                deps.append((parts[0], parts[1].lstrip("v"), "Go"))
+    return deps
+
+
+def _parse_cargo_lock(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    current: dict[str, str] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if line == "[[package]]":
+            if current.get("name") and current.get("version"):
+                deps.append((current["name"], current["version"], "crates.io"))
+            current = {}
+        elif " = " in line:
+            key, _, val = line.partition(" = ")
+            current[key.strip()] = val.strip().strip('"')
+    if current.get("name") and current.get("version"):
+        deps.append((current["name"], current["version"], "crates.io"))
+    return deps
+
+
+def _parse_pom_xml(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    dep_blocks = re.findall(r"<dependency>(.*?)</dependency>", content, re.DOTALL)
+    for block in dep_blocks:
+        artifact = re.search(r"<artifactId>(.*?)</artifactId>", block)
+        version = re.search(r"<version>(.*?)</version>", block)
+        if artifact and version:
+            deps.append((artifact.group(1), version.group(1), "Maven"))
+    return deps
+
+
 def parse_dependencies(path: str, content: str) -> list[Dependency]:
     if path.endswith("package-lock.json"):
         try:
@@ -175,8 +234,21 @@ def parse_dependencies(path: str, content: str) -> list[Dependency]:
         return deps
     if path.endswith("requirements.txt"):
         return [Dependency(name=match.group(1), version=match.group(2), ecosystem="pypi", manifest_path=path) for match in REQUIREMENT_RE.finditer(content)]
+    if path.endswith("Pipfile.lock"):
+        try:
+            return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_pipfile_lock(content)]
+        except (json.JSONDecodeError, KeyError):
+            return []
     if path.endswith("pyproject.toml"):
         return [Dependency(name=match.group(1), version=match.group(2), ecosystem="pypi", manifest_path=path) for match in PYPROJECT_DEP_RE.finditer(content)]
+    if path.endswith("poetry.lock"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_poetry_lock(content)]
+    if path.endswith("go.mod"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_go_mod(content)]
+    if path.endswith("Cargo.lock"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_cargo_lock(content)]
+    if path.endswith("pom.xml"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_pom_xml(content)]
     if path.endswith("Gemfile.lock"):
         return [Dependency(name=match.group(1), version=match.group(2), ecosystem="rubygems", manifest_path=path) for match in GEM_LOCK_RE.finditer(content)]
     return []
@@ -191,7 +263,7 @@ async def scan_dependencies(
     content: str,
     source: AdvisorySource | None = None,
 ) -> int:
-    advisory_source = source or BuiltinAdvisorySource()
+    advisory_source = source or OSVAdvisorySource()
     count = 0
     for dependency in parse_dependencies(path, content):
         dep_node = Node(

@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -130,6 +132,7 @@ async def test_sca_emits_reachable_dependency_finding():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    source = CountingAdvisorySource()
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:
         async with session.begin():
@@ -137,7 +140,7 @@ async def test_sca_emits_reachable_dependency_finding():
             session.add(graph)
             await session.flush()
             await build_file_graph(session, graph.id, SourceFile("app.js", "const _ = require('lodash');"))
-            count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}')
+            count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}', source=source)
         async with session.begin():
             finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_reachable"))
             depends_on = await session.scalar(
@@ -158,13 +161,14 @@ async def test_sca_marks_dependency_unreachable_without_import_edge():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    source = CountingAdvisorySource()
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:
         async with session.begin():
             graph = Graph(account_id="acct", repo_id="repo", kind="main")
             session.add(graph)
             await session.flush()
-            count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}')
+            count = await scan_dependencies(session, graph.id, "repo", "run", "package.json", '{"dependencies":{"lodash":"4.17.21"}}', source=source)
         async with session.begin():
             finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_unreachable"))
             depends_on = await session.scalar(select(Edge).where(Edge.kind == "DEPENDS_ON").where(Edge.dst == "dep:package.json:lodash@4.17.21"))
@@ -181,13 +185,16 @@ async def test_scan_diff_runs_sca_on_package_manifest():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    async with sessionmaker() as session:
-        async with session.begin():
-            graph = await get_or_create_graph(session, "repo")
-            await build_file_graph(session, graph.id, SourceFile("app.js", "const _ = require('lodash');"))
-            await scan_diff(session, "repo", '+++ b/package.json\n+"lodash": "4.17.21"')
-        async with session.begin():
-            finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_reachable"))
+    mock_advisory = Advisory("lodash", "npm", "4.17.21", "GHSA-scan-test", "high", "lodash scan test advisory")
+    with patch("sentinel_worker.sca.OSVAdvisorySource.lookup", new=AsyncMock(return_value=[mock_advisory])):
+        async with sessionmaker() as session:
+            async with session.begin():
+                graph = await get_or_create_graph(session, "repo")
+                await build_file_graph(session, graph.id, SourceFile("app.js", "const _ = require('lodash');"))
+                from tests.conftest import MockLLMClient
+                await scan_diff(session, "repo", '+++ b/package.json\n+"lodash": "4.17.21"', _llm=MockLLMClient())
+            async with session.begin():
+                finding = await session.scalar(select(Finding).where(Finding.vuln_type == "sca_reachable"))
     assert finding is not None
 
 
@@ -207,3 +214,119 @@ async def test_sca_caches_advisory_lookup_by_package_version():
             await scan_dependencies(session, graph.id, "repo", "run-2", "package.json", '{"dependencies":{"lodash":"4.17.21"}}', source=source)
     await engine.dispose()
     assert source.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# New manifest parser tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_pipfile_lock():
+    content = """{
+        "_meta": {},
+        "default": {
+            "requests": {"version": "==2.28.1"},
+            "flask": {"version": "==2.2.0"}
+        },
+        "develop": {
+            "pytest": {"version": "==7.0.0"}
+        }
+    }"""
+    deps = parse_dependencies("Pipfile.lock", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("requests", "2.28.1", "PyPI") in result
+    assert ("flask", "2.2.0", "PyPI") in result
+    assert ("pytest", "7.0.0", "PyPI") in result
+
+
+def test_parse_poetry_lock():
+    content = """\
+[[package]]
+name = "requests"
+version = "2.28.1"
+description = "Python HTTP for Humans."
+
+[[package]]
+name = "flask"
+version = "2.2.0"
+description = "A simple framework for building complex web applications."
+"""
+    deps = parse_dependencies("poetry.lock", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("requests", "2.28.1", "PyPI") in result
+    assert ("flask", "2.2.0", "PyPI") in result
+
+
+def test_parse_go_mod():
+    content = """\
+module github.com/example/myapp
+
+go 1.21
+
+require (
+\tgithub.com/gin-gonic/gin v1.9.1
+\tgithub.com/stretchr/testify v1.8.4
+)
+
+require github.com/some/direct v0.5.0
+"""
+    deps = parse_dependencies("go.mod", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("github.com/gin-gonic/gin", "1.9.1", "Go") in result
+    assert ("github.com/stretchr/testify", "1.8.4", "Go") in result
+    assert ("github.com/some/direct", "0.5.0", "Go") in result
+
+
+def test_parse_cargo_lock():
+    content = """\
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 3
+
+[[package]]
+name = "serde"
+version = "1.0.163"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "tokio"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+    deps = parse_dependencies("Cargo.lock", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("serde", "1.0.163", "crates.io") in result
+    assert ("tokio", "1.28.0", "crates.io") in result
+
+
+def test_parse_pom_xml():
+    content = """\
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-core</artifactId>
+      <version>5.3.27</version>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+"""
+    deps = parse_dependencies("pom.xml", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("spring-core", "5.3.27", "Maven") in result
+    assert ("junit", "4.13.2", "Maven") in result
+
+
+def test_builtin_advisory_source_removed():
+    """BuiltinAdvisorySource (test data with hardcoded CVEs) must not exist."""
+    import sentinel_worker.sca as sca_module
+
+    assert not hasattr(sca_module, "BuiltinAdvisorySource"), (
+        "BuiltinAdvisorySource is test data and must be removed from sca.py"
+    )

@@ -3,16 +3,59 @@ from __future__ import annotations
 import ast
 import importlib
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
+import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .adapters.django import DjangoAdapter
+from .adapters.express import ExpressAdapter
+from .adapters.fastapi import FastAPIAdapter
+from .adapters.nextjs import NextJSAdapter
+from .adapters.rails import RailsAdapter
+from .adapters.spring import SpringAdapter
 from .languages import language_for
 from .models import Edge, Node
+
+log = structlog.get_logger(__name__)
+
+ADAPTERS = [
+    ExpressAdapter(),
+    FastAPIAdapter(),
+    NextJSAdapter(),
+    DjangoAdapter(),
+    RailsAdapter(),
+    SpringAdapter(),
+]
+
+
+def _run_adapters(file_path: str, content: str, ast_node_ids: dict) -> tuple[list, list]:
+    t0 = time.monotonic()
+    matched_nodes: list = []
+    matched_edges: list = []
+    adapters_matched: list[str] = []
+    for adapter in ADAPTERS:
+        if adapter.detect(file_path, content):
+            adapter_name = type(adapter).__name__
+            nodes, edges = adapter.extract(file_path, content, ast_node_ids)
+            matched_nodes.extend(nodes)
+            matched_edges.extend(edges)
+            adapters_matched.append(adapter_name)
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    routes_found = sum(1 for n in matched_nodes if getattr(n, "kind", None) == "ROUTE")
+    log.info(
+        "pass.adapters.completed",
+        file=file_path,
+        routes_found=routes_found,
+        adapters_matched=adapters_matched,
+        duration_ms=duration_ms,
+    )
+    return matched_nodes, matched_edges
 
 
 JS_FUNCTION_RE = re.compile(r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>")
@@ -70,6 +113,14 @@ class IncrementalSyntaxIndex:
 
     def parse(self, source: SourceFile, language: str | None) -> ParsedSource:
         if language == "python":
+            ts_parser = self._parser_for("python")
+            if ts_parser is not None:
+                source_bytes = source.content.encode()
+                previous_tree = self._trees.get(source.path)
+                tree = ts_parser.parse(source_bytes, previous_tree)
+                self._trees[source.path] = tree
+                root = tree.root_node
+                return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))
             return _parse_python_ast(source.content)
         parser = self._parser_for(language)
         if parser is None:
@@ -82,18 +133,28 @@ class IncrementalSyntaxIndex:
         return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))
 
     def _parser_for(self, language: str | None) -> Any | None:
-        if language not in {"javascript", "typescript"}:
+        if language not in {"javascript", "typescript", "python"}:
             return None
         if language in self._parser_by_language:
             return self._parser_by_language[language]
         try:
             tree_sitter = importlib.import_module("tree_sitter")
-            grammar_module = importlib.import_module("tree_sitter_typescript" if language == "typescript" else "tree_sitter_javascript")
+            if language == "typescript":
+                grammar_module = importlib.import_module("tree_sitter_typescript")
+            elif language == "python":
+                grammar_module = importlib.import_module("tree_sitter_python")
+            else:
+                grammar_module = importlib.import_module("tree_sitter_javascript")
         except ModuleNotFoundError:
             self._parser_by_language[language] = None
             return None
         parser = tree_sitter.Parser()
-        language_factory = getattr(grammar_module, "language_typescript", None) if language == "typescript" else getattr(grammar_module, "language", None)
+        if language == "typescript":
+            language_factory = getattr(grammar_module, "language_typescript", None)
+        elif language == "python":
+            language_factory = getattr(grammar_module, "language", None)
+        else:
+            language_factory = getattr(grammar_module, "language", None)
         if language_factory is None:
             self._parser_by_language[language] = None
             return None

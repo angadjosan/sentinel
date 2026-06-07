@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.pentest import PentestRequestContext, run_pentest
@@ -23,6 +26,7 @@ from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, Pe
 
 from .auth import Principal, create_token, current_principal, require_admin
 from .deps import get_db, init_schema
+from .routers.repos import router as repos_router
 from .schemas import (
     AccountConfigPatch,
     AccountConfigResponse,
@@ -38,12 +42,16 @@ from .schemas import (
     NodeResponse,
     PentestRequest,
     PlanRequest,
+    RemediationResponse,
+    RepoCreateRequest,
+    RepoResponse,
     RunResponse,
     SourceRequest,
     SourceResponse,
     SourceReadResponse,
     SuppressRequest,
     SuppressionAuditResponse,
+    SuppressionReviewRequest,
     TaskCompleteRequest,
     TaskFailRequest,
     TaskResponse,
@@ -51,6 +59,8 @@ from .schemas import (
     TraceAccessLogResponse,
 )
 from .sse import stream_run_events
+
+log = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
@@ -60,12 +70,31 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sentinel API", version="0.1.0", lifespan=lifespan)
+# TODO: production needs proper origins from config (e.g. CORS_ORIGINS env var)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        log.debug(
+            "api.request",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=round((time.time() - start) * 1000, 2),
+        )
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
+app.include_router(repos_router)
 
 RUNS_TOTAL = Counter("sentinel_runs_total", "Runs by kind and status", ["kind", "status"])
 FINDINGS_TOTAL = Counter("sentinel_findings_total", "Findings by type and severity", ["vuln_type", "severity"])
@@ -483,6 +512,80 @@ async def reject_suppression(finding_id: str, payload: SuppressRequest, db: Asyn
     return await finding_response(db, finding)
 
 
+@app.patch("/findings/{finding_id}/suppression-review", response_model=FindingResponse)
+async def suppression_review(finding_id: str, payload: SuppressionReviewRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> FindingResponse:
+    """Admin-only: approve or reject a pending suppression request."""
+    finding = await _finding_for_principal(db, finding_id, principal)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    if finding.status != "suppression_pending":
+        raise HTTPException(status_code=409, detail="finding does not have a pending suppression")
+    actor = await _actor_from_principal(db, principal)
+    if payload.action == "approve":
+        finding.status = "suppressed"
+        finding.suppressed = True
+        finding.suppressed_at = now()
+    else:
+        finding.status = "open"
+        finding.suppressed = False
+    db.add(SuppressionAudit(finding_id=finding.id, action=payload.action, actor_id=actor.id, reason=payload.reason))
+    return await finding_response(db, finding)
+
+
+@app.delete("/findings/{finding_id}/suppress", response_model=FindingResponse)
+async def remove_suppression(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
+    """Remove (undo) a suppression on a finding."""
+    finding = await _finding_for_principal(db, finding_id, principal)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    actor = await _actor_from_principal(db, principal)
+    finding.status = "open"
+    finding.suppressed = False
+    finding.suppression_reason = None
+    db.add(SuppressionAudit(finding_id=finding.id, action="unsuppress", actor_id=actor.id, reason="suppression removed"))
+    return await finding_response(db, finding)
+
+
+@app.get("/findings/{finding_id}/remediation", response_model=RemediationResponse)
+async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RemediationResponse:
+    """Spec-compliant path: returns finding + graph context + remediation plan."""
+    finding = await _finding_for_principal(db, finding_id, principal)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    node = await db.get(Node, finding.node_id) if finding.node_id else None
+
+    # Build graph context summary
+    edge_kinds = ["CALLS", "FLOWS_TO", "GUARDED_BY", "CONFIRMED_EXPLOIT"]
+    edges = list(
+        await db.scalars(
+            select(Edge)
+            .where(Edge.graph_id == finding.graph_id)
+            .where(Edge.kind.in_(edge_kinds))
+            .where((Edge.src == finding.node_id) | (Edge.dst == finding.node_id))
+        )
+    ) if finding.node_id else []
+    node_ids = {finding.node_id} if finding.node_id else set()
+    for edge in edges:
+        node_ids.add(edge.src)
+        node_ids.add(edge.dst)
+    neighbor_nodes = list(await db.scalars(select(Node).where(Node.graph_id == finding.graph_id).where(Node.id.in_(node_ids)))) if node_ids else []
+    graph_context_lines = [f"Node: {n.kind} {n.name} ({n.file}:{n.line_start})" for n in neighbor_nodes]
+    for edge in edges:
+        graph_context_lines.append(f"Edge: {edge.kind} {edge.src} -> {edge.dst} tainted={edge.tainted}")
+    graph_context = "\n".join(graph_context_lines)
+
+    remediation_plan = [
+        finding.remediation,
+        "Re-run `sentinel source` after the fix to verify the finding no longer appears.",
+        "If runtime confirmation exists, re-run `sentinel pentest <id>` with a patched build.",
+    ]
+    return RemediationResponse(
+        finding=await finding_response(db, finding),
+        graph_context=graph_context,
+        remediation_plan=remediation_plan,
+    )
+
+
 @app.post("/pentest", response_model=FindingResponse)
 async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal, payload.description)
@@ -549,11 +652,6 @@ async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal:
             yield event
 
     return StreamingResponse(events(), media_type="text/event-stream")
-
-
-@app.post("/runs/{run_id}/cancel", response_model=RunResponse)
-async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    return await _cancel_run_for_principal(db, run_id, principal)
 
 
 @app.delete("/runs/{run_id}", response_model=RunResponse)

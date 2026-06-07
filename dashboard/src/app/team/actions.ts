@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { approveDeviceCode, updateAccountConfig } from "../../lib/api";
+import { approveDeviceCode, approveSuppression, rejectSuppression, updateAccountConfig } from "../../lib/api";
 
 export async function updateAccountConfigAction(formData: FormData) {
   const provider = stringValue(formData.get("provider")) ?? "local";
@@ -20,6 +20,22 @@ export async function updateAccountConfigAction(formData: FormData) {
   });
 
   revalidatePath("/");
+  revalidatePath("/team");
+}
+
+export async function approveSuppressionAction(formData: FormData) {
+  const findingId = stringValue(formData.get("finding_id"));
+  const reason = stringValue(formData.get("reason")) ?? "Approved by admin";
+  if (!findingId) throw new Error("finding_id is required");
+  await approveSuppression(findingId, reason);
+  revalidatePath("/team");
+}
+
+export async function rejectSuppressionAction(formData: FormData) {
+  const findingId = stringValue(formData.get("finding_id"));
+  const reason = stringValue(formData.get("reason")) ?? "Rejected by admin";
+  if (!findingId) throw new Error("finding_id is required");
+  await rejectSuppression(findingId, reason);
   revalidatePath("/team");
 }
 

@@ -1,6 +1,7 @@
-import { ShieldCheck, ShieldOff } from "lucide-react";
+import { ShieldCheck, ShieldOff, AlertTriangle } from "lucide-react";
 import { findingAudit, findingGraph, pullFinding, type GraphEdge, type GraphNode } from "../../../lib/api";
 import { SeverityBadge } from "../../../components/SeverityBadge";
+import { TaintPathGraph } from "../../../components/TaintPathGraph";
 
 export default async function FindingDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -87,9 +88,25 @@ export default async function FindingDetailPage({ params }: { params: Promise<{ 
           <span className="muted">{graph.nodes.length} nodes, {graph.edges.length} edges</span>
         </div>
         <div className="panel-body">
-          {graph.nodes.length ? <FindingGraph nodes={graph.nodes} edges={graph.edges} focusId={node?.id ?? null} /> : <div className="muted">No graph path recorded for this finding.</div>}
+          {graph.nodes.length ? (
+            <TaintPathGraph nodes={graph.nodes} edges={graph.edges} />
+          ) : (
+            <div className="muted">No graph path recorded for this finding.</div>
+          )}
         </div>
       </section>
+
+      {finding.confirmed && finding.evidence && (
+        <section className="panel" style={{ marginTop: 16, borderLeft: "4px solid #ef4444" }}>
+          <div className="panel-header" style={{ color: "#ef4444" }}>
+            <AlertTriangle size={18} style={{ marginRight: 8 }} />
+            <h2 style={{ color: "#ef4444" }}>Confirmed Exploit Evidence</h2>
+          </div>
+          <div className="panel-body">
+            <pre className="trace evidence" style={{ borderColor: "#ef4444" }}>{finding.evidence}</pre>
+          </div>
+        </section>
+      )}
 
       <section className="grid two detail-grid">
         <div className="panel">

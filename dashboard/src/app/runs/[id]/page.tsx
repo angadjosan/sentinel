@@ -1,5 +1,6 @@
 import { getRun, runTrace, traceAccessLog } from "../../../lib/api";
 import { cancelRunAction } from "../actions";
+import { LiveFindingCards } from "../../../components/LiveFindingCards";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -91,6 +92,13 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           </div>
         </div>
       </section>
+      {run.status === "running" && (
+        <LiveFindingCards
+          runId={run.id}
+          apiUrl={process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000"}
+        />
+      )}
+
       <section className="panel" style={{ marginTop: 16 }}>
         <div className="panel-header">
           <h2>Trace</h2>

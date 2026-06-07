@@ -3,8 +3,37 @@ import json
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from sentinel_worker.agent import ChannelViolationError, SentinelLLMClient
+from sentinel_worker.agent import (
+    ChannelViolationError,
+    SentinelLLMClient,
+    _assert_no_repo_content_in_system,
+)
 from sentinel_worker.models import Base, Run, TokenSpendByComponent
+
+
+# ---------------------------------------------------------------------------
+# G2: Channel separation / _assert_no_repo_content_in_system
+# ---------------------------------------------------------------------------
+
+
+def test_channel_separation_raises_on_diff_hunk():
+    with pytest.raises(ChannelViolationError):
+        _assert_no_repo_content_in_system("+++ b/app.py\nsome content")
+
+
+def test_channel_separation_raises_on_akia():
+    with pytest.raises(ChannelViolationError):
+        _assert_no_repo_content_in_system("use AKIAIOSFODNN7EXAMPLE for auth")
+
+
+def test_channel_separation_clean_prompt_passes():
+    # Should not raise
+    _assert_no_repo_content_in_system("You are a security analyst. Find vulnerabilities.")
+
+
+def test_channel_separation_raises_on_request_get():
+    with pytest.raises(ChannelViolationError):
+        _assert_no_repo_content_in_system("check request.GET for injection")
 
 
 @pytest.mark.asyncio

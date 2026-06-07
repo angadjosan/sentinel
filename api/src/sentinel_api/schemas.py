@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -216,3 +218,27 @@ class EdgeResponse(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[NodeResponse]
     edges: list[EdgeResponse]
+
+
+class RepoCreateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    remote_url: str | None = None
+
+
+class RepoResponse(BaseModel):
+    id: str
+    name: str
+    account_id: str
+    remote_url: str | None = None
+    created_at: str
+
+
+class SuppressionReviewRequest(BaseModel):
+    action: Literal["approve", "reject"]
+    reason: str = Field(min_length=10)
+
+
+class RemediationResponse(BaseModel):
+    finding: FindingResponse
+    graph_context: str
+    remediation_plan: list[str]
