@@ -441,6 +441,88 @@ a {
   padding: 8px 0;
 }
 
+.finding-graph {
+  display: grid;
+  gap: 12px;
+}
+
+.finding-graph-step {
+  display: grid;
+  gap: 8px;
+}
+
+.finding-graph-node {
+  border: 1px solid var(--border);
+  border-left: 5px solid var(--muted);
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+}
+
+.finding-graph-node.focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.finding-graph-node.route {
+  border-left-color: var(--low);
+}
+
+.finding-graph-node.middleware {
+  border-left-color: var(--accent);
+}
+
+.finding-graph-node.sink {
+  border-left-color: var(--critical);
+}
+
+.finding-graph-node.dependency {
+  border-left-color: var(--high);
+}
+
+.finding-graph-edges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 16px;
+}
+
+.finding-graph-edges::before {
+  color: var(--muted);
+  content: "↓";
+  font-size: 18px;
+}
+
+.finding-graph-edge {
+  align-items: center;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.finding-graph-edge span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.finding-graph-edge small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.finding-graph-edge.flows_to {
+  border-color: #fecaca;
+}
+
+.finding-graph-edge.guarded_by {
+  border-color: #99f6e4;
+}
+
 .trace {
   background: #0b1220;
   border-radius: 6px;

@@ -147,6 +147,10 @@ export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
   return get<GraphSnapshot>(`/graph?limit=${limit}`);
 }
 
+export function findingGraph(id: string): Promise<GraphSnapshot> {
+  return get<GraphSnapshot>(`/findings/${id}/graph`);
+}
+
 export function accountConfig(): Promise<AccountConfig> {
   return get<AccountConfig>("/config");
 }

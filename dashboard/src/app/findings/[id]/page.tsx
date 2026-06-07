@@ -1,10 +1,10 @@
 import { ShieldCheck, ShieldOff } from "lucide-react";
-import { findingAudit, pullFinding } from "../../../lib/api";
+import { findingAudit, findingGraph, pullFinding, type GraphEdge, type GraphNode } from "../../../lib/api";
 import { SeverityBadge } from "../../../components/SeverityBadge";
 
 export default async function FindingDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const [context, audit] = await Promise.all([pullFinding(id), findingAudit(id)]);
+  const [context, audit, graph] = await Promise.all([pullFinding(id), findingAudit(id), findingGraph(id)]);
   const finding = context.finding;
   const node = context.node;
 
@@ -81,6 +81,16 @@ export default async function FindingDetailPage({ params }: { params: Promise<{ 
         </div>
       </section>
 
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>Taint Path</h2>
+          <span className="muted">{graph.nodes.length} nodes, {graph.edges.length} edges</span>
+        </div>
+        <div className="panel-body">
+          {graph.nodes.length ? <FindingGraph nodes={graph.nodes} edges={graph.edges} focusId={node?.id ?? null} /> : <div className="muted">No graph path recorded for this finding.</div>}
+        </div>
+      </section>
+
       <section className="grid two detail-grid">
         <div className="panel">
           <div className="panel-header">
@@ -123,4 +133,76 @@ export default async function FindingDetailPage({ params }: { params: Promise<{ 
       </section>
     </>
   );
+}
+
+function FindingGraph({ nodes, edges, focusId }: { nodes: GraphNode[]; edges: GraphEdge[]; focusId: string | null }) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const ordered = orderNodes(nodes, edges, focusId);
+  return (
+    <div className="finding-graph">
+      {ordered.map((node, index) => {
+        const outgoing = edges.filter((edge) => edge.src === node.id && byId.has(edge.dst));
+        return (
+          <div className="finding-graph-step" key={node.id}>
+            <div className={`finding-graph-node ${nodeClass(node)}${node.id === focusId ? " focus" : ""}`}>
+              <div className="node-title">
+                <span>{node.kind}</span>
+                <strong>{node.name}</strong>
+              </div>
+              <div className="muted">{node.file ? `${node.file}${node.line_start ? `:${node.line_start}` : ""}` : node.id}</div>
+              <div>{node.intent ?? node.label ?? "No semantic label recorded."}</div>
+              <div className="node-flags">
+                {node.is_entry_point ? <span>entry</span> : null}
+                {node.auth_required ? <span>auth</span> : null}
+                {node.is_sink ? <span>sink</span> : null}
+              </div>
+            </div>
+            {index < ordered.length - 1 ? (
+              <div className="finding-graph-edges">
+                {outgoing.length ? outgoing.map((edge) => <EdgeLabel edge={edge} dst={byId.get(edge.dst)} key={edge.id} />) : <span className="muted">related</span>}
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function EdgeLabel({ edge, dst }: { edge: GraphEdge; dst: GraphNode | undefined }) {
+  const attrs = [edge.tainted ? "tainted" : null, edge.sanitized ? "sanitized" : null, edge.taint_uncertain ? "uncertain" : null, edge.call_uncertainty].filter(Boolean);
+  return (
+    <div className={`finding-graph-edge ${edge.kind.toLowerCase()}`}>
+      <span>{edge.kind}</span>
+      {attrs.length ? <small>{attrs.join(", ")}</small> : null}
+      {dst ? <small>{dst.name}</small> : null}
+    </div>
+  );
+}
+
+function orderNodes(nodes: GraphNode[], edges: GraphEdge[], focusId: string | null): GraphNode[] {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const incoming = new Set(edges.map((edge) => edge.dst));
+  const starts = nodes.filter((node) => !incoming.has(node.id));
+  const focusNode = focusId ? byId.get(focusId) : undefined;
+  const start = focusNode ?? starts[0] ?? nodes[0];
+  if (!start) return [];
+  const ordered: GraphNode[] = [];
+  const seen = new Set<string>();
+  const queue = [start.id, ...starts.map((node) => node.id), ...nodes.map((node) => node.id)];
+  while (queue.length) {
+    const id = queue.shift();
+    if (!id || seen.has(id)) continue;
+    const node = byId.get(id);
+    if (!node) continue;
+    seen.add(id);
+    ordered.push(node);
+    for (const edge of edges.filter((candidate) => candidate.src === id)) queue.push(edge.dst);
+  }
+  return ordered;
+}
+
+function nodeClass(node: GraphNode): string {
+  if (node.is_sink) return "sink";
+  return node.kind.toLowerCase();
 }

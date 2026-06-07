@@ -395,6 +395,32 @@ async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), prin
     }
 
 
+@app.get("/findings/{finding_id}/graph", response_model=GraphResponse)
+async def finding_graph(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> GraphResponse:
+    finding = await _finding_for_principal(db, finding_id, principal)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+    if finding.node_id is None:
+        return GraphResponse(nodes=[], edges=[])
+
+    edge_kinds = ["CALLS", "FLOWS_TO", "GUARDED_BY", "CONFIRMED_EXPLOIT"]
+    edges = list(
+        await db.scalars(
+            select(Edge)
+            .where(Edge.graph_id == finding.graph_id)
+            .where(Edge.kind.in_(edge_kinds))
+            .where((Edge.src == finding.node_id) | (Edge.dst == finding.node_id))
+            .order_by(Edge.kind.asc(), Edge.id.asc())
+        )
+    )
+    node_ids = {finding.node_id}
+    for edge in edges:
+        node_ids.add(edge.src)
+        node_ids.add(edge.dst)
+    nodes = list(await db.scalars(select(Node).where(Node.graph_id == finding.graph_id).where(Node.id.in_(node_ids)).order_by(Node.kind.asc(), Node.name.asc())))
+    return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
 @app.patch("/findings/{finding_id}/suppress", response_model=FindingResponse)
 async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
     finding = await _finding_for_principal(db, finding_id, principal)

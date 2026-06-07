@@ -84,6 +84,11 @@ def test_plan_pull_graph_and_cancel_flow():
         assert graph.status_code == 200
         assert "nodes" in graph.json()
 
+        finding_graph = client.get(f"/findings/{finding_id}/graph")
+        assert finding_graph.status_code == 200
+        assert "nodes" in finding_graph.json()
+        assert "edges" in finding_graph.json()
+
         cancel = client.post(f"/runs/{run_id}/cancel")
         assert cancel.status_code == 200
         assert cancel.json()["status"] == "completed"
