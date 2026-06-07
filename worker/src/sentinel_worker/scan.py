@@ -106,6 +106,8 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
         sources.append(SourceFile(path=path, content=content, is_new=False))
     await build_source_graph(db, graph.id, sources)
     await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False)
+    from .enrichment import validate_enrichment_labels
+    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -235,6 +237,8 @@ async def execute_source_scan(
     log.info("scan.sast.completed", run_id=run.id, sast_finding_count=len(sast_findings))
 
     await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True)
+    from .enrichment import validate_enrichment_labels
+    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -399,4 +403,9 @@ async def sast_bootstrap(changed_node_ids: list[str], graph_query: GraphQuery) -
 
 
 def _is_manifest(path: str) -> bool:
-    return path.endswith(("package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "requirements.txt", "pyproject.toml", "Gemfile.lock"))
+    return path.endswith((
+        "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+        "requirements.txt", "pyproject.toml", "Gemfile.lock", "Pipfile.lock",
+        "poetry.lock", "go.mod", "go.sum", "Cargo.toml", "Cargo.lock",
+        "pom.xml", "build.gradle", "build.gradle.kts",
+    ))

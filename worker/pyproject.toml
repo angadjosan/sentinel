@@ -20,6 +20,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+grammars = [
+  "tree-sitter-go>=0.21,<1",
+  "tree-sitter-rust>=0.21,<1",
+  "tree-sitter-java>=0.21,<1",
+  "tree-sitter-c>=0.21,<1",
+  "tree-sitter-cpp>=0.21,<1",
+  "tree-sitter-ruby>=0.21,<1",
+]
 test = [
   "pytest>=8,<9",
   "pytest-asyncio>=0.23,<1",

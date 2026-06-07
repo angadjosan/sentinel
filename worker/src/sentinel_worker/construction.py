@@ -132,37 +132,44 @@ class IncrementalSyntaxIndex:
         root = tree.root_node
         return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))
 
+    _GRAMMAR_MODULE_MAP: dict[str, tuple[str, str]] = {
+        "typescript": ("tree_sitter_typescript", "language_typescript"),
+        "python": ("tree_sitter_python", "language"),
+        "javascript": ("tree_sitter_javascript", "language"),
+        "go": ("tree_sitter_go", "language"),
+        "rust": ("tree_sitter_rust", "language"),
+        "java": ("tree_sitter_java", "language"),
+        "c": ("tree_sitter_c", "language"),
+        "cpp": ("tree_sitter_cpp", "language"),
+        "ruby": ("tree_sitter_ruby", "language"),
+    }
+
     def _parser_for(self, language: str | None) -> Any | None:
-        if language not in {"javascript", "typescript", "python"}:
+        if language not in self._GRAMMAR_MODULE_MAP:
             return None
         if language in self._parser_by_language:
             return self._parser_by_language[language]
+        module_name, factory_attr = self._GRAMMAR_MODULE_MAP[language]
         try:
             tree_sitter = importlib.import_module("tree_sitter")
-            if language == "typescript":
-                grammar_module = importlib.import_module("tree_sitter_typescript")
-            elif language == "python":
-                grammar_module = importlib.import_module("tree_sitter_python")
-            else:
-                grammar_module = importlib.import_module("tree_sitter_javascript")
+            grammar_module = importlib.import_module(module_name)
         except ModuleNotFoundError:
             self._parser_by_language[language] = None
             return None
-        parser = tree_sitter.Parser()
-        if language == "typescript":
-            language_factory = getattr(grammar_module, "language_typescript", None)
-        elif language == "python":
-            language_factory = getattr(grammar_module, "language", None)
-        else:
-            language_factory = getattr(grammar_module, "language", None)
+        language_factory = getattr(grammar_module, factory_attr, None)
         if language_factory is None:
             self._parser_by_language[language] = None
             return None
-        ts_language = tree_sitter.Language(language_factory())
-        if hasattr(parser, "set_language"):
-            parser.set_language(ts_language)
-        else:
-            parser.language = ts_language
+        try:
+            ts_language = tree_sitter.Language(language_factory())
+            parser = tree_sitter.Parser()
+            if hasattr(parser, "set_language"):
+                parser.set_language(ts_language)
+            else:
+                parser.language = ts_language
+        except Exception:
+            self._parser_by_language[language] = None
+            return None
         self._parser_by_language[language] = parser
         return parser
 
@@ -270,31 +277,67 @@ def _parse_python_ast(content: str) -> ParsedSource:
     return ParsedSource(parse_error=False, functions=functions)
 
 
+_FUNCTION_NODE_TYPES: dict[str | None, set[str]] = {
+    "javascript": {"function_declaration", "method_definition", "generator_function_declaration", "arrow_function"},
+    "typescript": {"function_declaration", "method_definition", "generator_function_declaration", "arrow_function", "method_signature"},
+    "python": {"function_definition", "async_function_definition"},
+    "go": {"function_declaration", "method_declaration"},
+    "rust": {"function_item"},
+    "java": {"method_declaration", "constructor_declaration"},
+    "c": {"function_definition"},
+    "cpp": {"function_definition"},
+    "ruby": {"method", "singleton_method"},
+}
+_DEFAULT_FUNCTION_NODE_TYPES = {"function_declaration", "method_definition", "function_definition"}
+
+
 def _tree_sitter_functions(content: str, root: Any, language: str | None) -> list[ParsedFunction]:
+    valid_types = _FUNCTION_NODE_TYPES.get(language, _DEFAULT_FUNCTION_NODE_TYPES)
     functions: list[ParsedFunction] = []
     stack = [root]
     while stack:
         node = stack.pop()
         stack.extend(reversed(getattr(node, "children", [])))
         node_type = getattr(node, "type", "")
-        if node_type not in {"function_declaration", "method_definition", "generator_function_declaration", "arrow_function"}:
+        if node_type not in valid_types:
             continue
-        name = _tree_sitter_function_name(content, node)
+        name = _tree_sitter_function_name(content, node, language)
         if name:
             functions.append(ParsedFunction(name=name, line_start=node.start_point[0] + 1, line_end=node.end_point[0] + 1))
     functions.sort(key=lambda function: (function.line_start, function.name))
     return functions
 
 
-def _tree_sitter_function_name(content: str, node: Any) -> str | None:
-    name_node = node.child_by_field_name("name") if hasattr(node, "child_by_field_name") else None
+def _tree_sitter_function_name(content: str, node: Any, language: str | None = None) -> str | None:
+    get = (lambda field: node.child_by_field_name(field)) if hasattr(node, "child_by_field_name") else (lambda _: None)
+
+    # C/C++: function_definition → declarator → direct_declarator → name
+    if language in {"c", "cpp"}:
+        declarator = get("declarator")
+        while declarator is not None:
+            inner = (declarator.child_by_field_name("declarator") if hasattr(declarator, "child_by_field_name") else None)
+            if getattr(declarator, "type", "") in {"pointer_declarator", "reference_declarator"} and inner is not None:
+                declarator = inner
+                continue
+            name_node = (declarator.child_by_field_name("name") if hasattr(declarator, "child_by_field_name") else None)
+            if name_node is not None:
+                return content[name_node.start_byte : name_node.end_byte]
+            # direct_declarator: first child is the identifier
+            for child in getattr(declarator, "children", []):
+                if getattr(child, "type", "") in {"identifier", "field_identifier"}:
+                    return content[child.start_byte : child.end_byte]
+            break
+
+    name_node = get("name")
     if name_node is not None:
         return content[name_node.start_byte : name_node.end_byte]
+
+    # JS/TS arrow functions assigned to const
     parent = getattr(node, "parent", None)
     if parent is None:
         return None
     if getattr(parent, "type", "") == "variable_declarator":
-        declarator_name = parent.child_by_field_name("name")
+        declarator_name = parent.child_by_field_name("name") if hasattr(parent, "child_by_field_name") else None
         if declarator_name is not None:
             return content[declarator_name.start_byte : declarator_name.end_byte]
     return None

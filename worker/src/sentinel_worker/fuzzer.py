@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass, field
 
+import structlog
+
 from .vm import CommandResult, SandboxExecutor
+
+log = structlog.get_logger(__name__)
+
+_FUZZER_AGENT_SYSTEM = """You are a security engineer directing a coverage-guided fuzzing campaign.
+After each fuzzing iteration, you receive coverage data and sanitizer output.
+Suggest how to mutate the fuzzer corpus or harness to reach uncovered code paths.
+Return only JSON: {"strategy": "brief directive", "corpus_additions": ["hex_encoded_input1", ...], "should_continue": true|false}.
+corpus_additions must be hex-encoded byte strings. Limit to 3 additions per round."""
 
 
 INTEGER_TYPES = {"int", "unsigned int", "uint32_t", "int32_t", "size_t", "uint64_t", "int64_t"}
@@ -62,6 +73,153 @@ class FuzzerExecutionResult:
 SANITIZER_RE = re.compile(r"(ERROR: AddressSanitizer|AddressSanitizer|ThreadSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-buffer-overflow|use-after-free|data race)", re.IGNORECASE)
 COVERAGE_RE = re.compile(r"(?:COVERED|coverage|cov:|#\d+)", re.IGNORECASE)
 COVERAGE_SCORE_RE = re.compile(r"(?:cov|coverage|edges|features|ft)\s*[:=]\s*(\d+)|#(\d+)", re.IGNORECASE)
+
+
+async def execute_fuzzer_harness_with_agent(
+    harness: FuzzerHarness,
+    executor: SandboxExecutor,
+    llm,  # SentinelLLMClient | None
+    *,
+    run_id: str | None = None,
+    db=None,
+    compile_timeout: int = 120,
+    run_timeout: int = 300,
+    max_iterations: int = 5,
+    stagnation_limit: int = 2,
+) -> FuzzerExecutionResult:
+    """Coverage-guided fuzzing with LLM-directed corpus mutation between iterations.
+
+    After each iteration, if coverage plateaus, the agent reads the coverage
+    output and suggests corpus mutations to target uncovered branches.
+    Falls back to plain execute_fuzzer_harness if llm is None.
+    """
+    if llm is None:
+        return await execute_fuzzer_harness(
+            harness, executor,
+            compile_timeout=compile_timeout,
+            run_timeout=run_timeout,
+            max_iterations=max_iterations,
+            stagnation_limit=stagnation_limit,
+        )
+
+    compile_result = await executor.run(harness.compile_command, timeout_seconds=compile_timeout)
+    if compile_result.exit_code != 0:
+        return FuzzerExecutionResult(
+            compile_result=compile_result,
+            run_result=None,
+            coverage_lines=[],
+            sanitizer_output=_sanitizer_text([compile_result]),
+        )
+
+    iterations: list[FuzzerIterationResult] = []
+    seen_coverage: set[str] = set()
+    best_score = 0
+    stale_iterations = 0
+    iteration_budget = max(1, math.ceil(run_timeout / max(1, max_iterations)))
+
+    for iteration in range(max(1, max_iterations)):
+        command = _iteration_run_command(harness.run_command, iteration_budget)
+        run_result = await executor.run(command, timeout_seconds=iteration_budget + 10)
+        lines = _coverage_lines(run_result)
+        score = _coverage_score(lines)
+        has_numeric_score = _has_numeric_coverage_score(lines)
+        new_lines = [line for line in lines if line not in seen_coverage]
+        seen_coverage.update(lines)
+        new_score = max(0, score - best_score)
+        if new_lines and new_score == 0 and not has_numeric_score:
+            new_score = len(new_lines)
+
+        feedback = CoverageFeedback(
+            iteration=iteration + 1,
+            coverage_score=score,
+            new_coverage_score=new_score,
+            coverage_lines=lines,
+        )
+        sanitizer_output = _sanitizer_text([run_result])
+        iterations.append(FuzzerIterationResult(result=run_result, feedback=feedback, sanitizer_output=sanitizer_output))
+
+        if sanitizer_output:
+            log.info("fuzzer.agent.sanitizer_crash", iteration=iteration + 1, run_id=run_id)
+            break
+
+        coverage_improved = score > best_score or (new_lines and not has_numeric_score)
+        if coverage_improved:
+            best_score = max(best_score, score)
+            stale_iterations = 0
+        else:
+            stale_iterations += 1
+
+        if run_result.exit_code != 0:
+            break
+
+        if stale_iterations >= stagnation_limit and iteration < max_iterations - 1:
+            # Coverage has plateaued — ask the agent for corpus mutation strategy
+            agent_guidance = await _agent_corpus_guidance(
+                llm=llm,
+                coverage_lines=lines,
+                sanitizer_output=sanitizer_output,
+                iteration=iteration + 1,
+                run_id=run_id,
+                db=db,
+            )
+            if not agent_guidance.get("should_continue", True):
+                log.info("fuzzer.agent.stop_directed", iteration=iteration + 1, run_id=run_id)
+                break
+            corpus_additions = agent_guidance.get("corpus_additions", [])
+            if corpus_additions:
+                await _write_corpus_additions(executor, corpus_additions)
+                stale_iterations = 0
+                log.info("fuzzer.agent.corpus_mutated", additions=len(corpus_additions), iteration=iteration + 1, run_id=run_id)
+
+    run_result_final = iterations[-1].result if iterations else None
+    return FuzzerExecutionResult(
+        compile_result=compile_result,
+        run_result=run_result_final,
+        coverage_lines=_merged_coverage_lines(iterations),
+        sanitizer_output=_sanitizer_text([compile_result]) or "\n".join(i.sanitizer_output for i in iterations if i.sanitizer_output),
+        iterations=iterations,
+        coverage_improved=any(i.feedback.new_coverage_score > 0 for i in iterations),
+    )
+
+
+async def _agent_corpus_guidance(
+    *,
+    llm,
+    coverage_lines: list[str],
+    sanitizer_output: str,
+    iteration: int,
+    run_id: str | None,
+    db,
+) -> dict:
+    user_content = json.dumps({
+        "iteration": iteration,
+        "coverage_lines": coverage_lines[:50],
+        "sanitizer_output": sanitizer_output[:500] if sanitizer_output else None,
+        "plateau_detected": True,
+    }, sort_keys=True)
+    try:
+        result = await llm.call(
+            system=_FUZZER_AGENT_SYSTEM,
+            user=user_content,
+            component="fuzzer_agent",
+            run_id=run_id,
+            db=db,
+        )
+        return json.loads(result.content)
+    except Exception as exc:
+        log.warning("fuzzer.agent.guidance_failed", error=str(exc), run_id=run_id)
+        return {"should_continue": True, "corpus_additions": []}
+
+
+async def _write_corpus_additions(executor: SandboxExecutor, hex_inputs: list[str]) -> None:
+    """Write agent-suggested corpus entries to the corpus/ directory in the sandbox."""
+    for i, hex_input in enumerate(hex_inputs[:3]):
+        try:
+            bytes.fromhex(hex_input)  # validate hex
+            argv = ["sh", "-c", f"printf '{hex_input}' | xxd -r -p > corpus/agent_{i:03d}.bin 2>/dev/null || true"]
+            await executor.run(argv, timeout_seconds=5)
+        except (ValueError, Exception):
+            continue
 
 
 async def execute_fuzzer_harness(

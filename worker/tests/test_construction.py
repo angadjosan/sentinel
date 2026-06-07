@@ -287,3 +287,59 @@ async def test_batch_graph_resolves_local_import_calls_across_files():
     assert target is not None
     assert edge is not None
     assert edge.call_uncertainty == "resolved_import"
+
+
+@pytest.mark.asyncio
+async def test_go_file_parsed_with_regex_fallback():
+    """Go source falls back to regex extraction when tree-sitter-go is unavailable."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(
+                    path="main.go",
+                    content="package main\n\nfunc HandleRequest(w http.ResponseWriter, r *http.Request) {\n\tdb.Query(r.URL.Query().Get(\"id\"))\n}\n",
+                    is_new=True,
+                ),
+            )
+        async with session.begin():
+            file_node = await session.get(Node, "file:main.go")
+
+    assert file_node is not None
+    assert file_node.language == "go"
+
+
+@pytest.mark.asyncio
+async def test_rust_file_creates_file_node():
+    """Rust source produces at minimum a FILE node."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(graph)
+            await session.flush()
+            await build_file_graph(
+                session,
+                graph.id,
+                SourceFile(
+                    path="src/lib.rs",
+                    content="pub fn process(input: &str) -> String {\n    input.to_uppercase()\n}\n",
+                    is_new=True,
+                ),
+            )
+        async with session.begin():
+            file_node = await session.get(Node, "file:src/lib.rs")
+
+    assert file_node is not None
+    assert file_node.language == "rust"

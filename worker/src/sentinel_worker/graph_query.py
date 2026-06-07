@@ -200,3 +200,58 @@ def _module_for(node: Node) -> str:
         return "external"
     parts = node.file.replace("\\", "/").split("/")
     return "/".join(parts[:-1]) or "."
+
+
+class LayeredGraphQuery:
+    """Query resolver implementing session → branch → main priority resolution.
+
+    Nodes and edges from higher-priority graphs shadow those in lower-priority graphs.
+    This matches the spec's UNION ALL DISTINCT ON (id) ORDER BY graph_priority semantics.
+    """
+
+    def __init__(self, db: AsyncSession, graph_ids: list[str]):
+        self.db = db
+        self.graph_ids = graph_ids  # ordered by priority: [session, branch, main]
+        self._queries = [GraphQuery(db=db, graph_id=gid) for gid in graph_ids]
+
+    async def neighbors(self, node_id: str, edge_kinds: list[str] | None = None, max_hops: int | None = None) -> list[Neighbor]:
+        seen_nodes: set[str] = set()
+        merged: list[Neighbor] = []
+        for q in self._queries:
+            for neighbor in await q.neighbors(node_id, edge_kinds=edge_kinds, max_hops=max_hops):
+                if neighbor.node.id not in seen_nodes:
+                    seen_nodes.add(neighbor.node.id)
+                    merged.append(neighbor)
+        return merged
+
+    async def taint_paths(self, include_uncertain: bool = True) -> list[list[Node]]:
+        seen_path_keys: set[tuple[str, ...]] = set()
+        merged: list[list[Node]] = []
+        for q in self._queries:
+            for path in await q.taint_paths(include_uncertain=include_uncertain):
+                key = tuple(n.id for n in path)
+                if key not in seen_path_keys:
+                    seen_path_keys.add(key)
+                    merged.append(path)
+        return merged
+
+    async def serialize_for_prompt(self, node_ids: list[str], max_hops: int = 1) -> str:
+        if self._queries:
+            return await self._queries[0].serialize_for_prompt(node_ids, max_hops=max_hops)
+        return ""
+
+    @classmethod
+    async def for_graph(cls, db: AsyncSession, graph_id: str) -> "LayeredGraphQuery":
+        """Build a layered query for a graph by walking its parent chain."""
+        from sqlalchemy import select as sa_select
+        from .models import Graph
+
+        chain: list[str] = []
+        current_id: str | None = graph_id
+        visited: set[str] = set()
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            chain.append(current_id)
+            graph = await db.get(Graph, current_id)
+            current_id = graph.parent_id if graph else None
+        return cls(db=db, graph_ids=chain)

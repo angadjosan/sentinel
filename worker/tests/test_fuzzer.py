@@ -106,3 +106,76 @@ async def test_execute_fuzzer_harness_stops_on_sanitizer_output():
     assert result.run_result.exit_code == 1
     assert len(executor.calls) == 2
     assert executor.calls[1][0][-1] == "-max_total_time=5"
+
+
+# ---------------------------------------------------------------------------
+# Agent-guided fuzzer tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_fuzzer_harness_with_agent_calls_llm_on_plateau():
+    """When coverage stagnates, agent should be consulted for corpus mutation."""
+    from sentinel_worker.agent import LLMCallResult, SentinelLLMClient
+    from sentinel_worker.fuzzer import execute_fuzzer_harness_with_agent
+    import json
+
+    llm_calls: list[str] = []
+
+    class GuidanceLLM:
+        provider = "fixture"
+
+        async def complete(self, *, system: str, data: str, model: str) -> LLMCallResult:
+            llm_calls.append(data)
+            guidance = {"strategy": "try boundary values", "corpus_additions": ["deadbeef"], "should_continue": True}
+            return LLMCallResult(content=json.dumps(guidance), input_tokens=10, output_tokens=10, model=model, provider=self.provider)
+
+    harness = FuzzerHarness(
+        source="",
+        compile_command=["clang", "harness.c", "-o", "fuzzer"],
+        run_command=["./fuzzer", "corpus/"],
+        afl_fallback_command=[],
+    )
+    executor = FakeFuzzerExecutor(
+        [
+            CommandResult(argv=harness.compile_command, exit_code=0),
+            # iter 0: coverage improves 0→3
+            CommandResult(argv=harness.run_command, exit_code=0, stderr="#1 INITED cov: 3"),
+            # iter 1: coverage stagnates → agent called, corpus written
+            CommandResult(argv=harness.run_command, exit_code=0, stderr="#2 INITED cov: 3"),
+            CommandResult(argv=[], exit_code=0),  # corpus write
+            # iter 2: final iteration
+            CommandResult(argv=harness.run_command, exit_code=0, stderr="#3 DONE cov: 3"),
+        ]
+    )
+    llm = SentinelLLMClient(provider=GuidanceLLM(), model="fixture-model")
+    result = await execute_fuzzer_harness_with_agent(
+        harness, executor, llm,
+        run_timeout=9, max_iterations=3, stagnation_limit=1,
+    )
+
+    assert len(llm_calls) == 1  # LLM called once after iter 1 stagnated
+    assert result.compile_result.exit_code == 0
+    assert len(result.iterations) == 3
+
+
+@pytest.mark.asyncio
+async def test_execute_fuzzer_harness_with_agent_none_falls_back():
+    """When llm=None, agent-guided function delegates to plain execute_fuzzer_harness."""
+    from sentinel_worker.fuzzer import execute_fuzzer_harness_with_agent
+
+    harness = FuzzerHarness(
+        source="",
+        compile_command=["clang", "harness.c", "-o", "fuzzer"],
+        run_command=["./fuzzer", "corpus/"],
+        afl_fallback_command=[],
+    )
+    executor = FakeFuzzerExecutor(
+        [
+            CommandResult(argv=harness.compile_command, exit_code=0),
+            CommandResult(argv=harness.run_command, exit_code=0, stderr="#1 DONE cov: 5"),
+        ]
+    )
+    result = await execute_fuzzer_harness_with_agent(harness, executor, None, max_iterations=1)
+    assert result.compile_result.exit_code == 0
+    assert len(result.iterations) == 1

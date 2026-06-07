@@ -230,3 +230,73 @@ async def test_neighbors_paths_taint_and_confirmation():
         assert "taint_uncertain=true" in serialized
         assert "[MODULE] lib -- 1 function" in serialized
         assert confirmed.confirmed is True
+
+
+# ---------------------------------------------------------------------------
+# LayeredGraphQuery tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_layered_graph_query_merges_session_over_main():
+    """LayeredGraphQuery aggregates neighbors across session and main graphs.
+
+    Node IDs are globally unique in the current schema. Layered resolution
+    merges neighbors from both graphs, with higher-priority graph results first
+    and deduplication by node ID.
+    """
+    from sentinel_worker.graph_query import LayeredGraphQuery
+
+    sessionmaker = await _make_session()
+    async with sessionmaker() as session:
+        async with session.begin():
+            main_graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(main_graph)
+            await session.flush()
+            session_graph = Graph(account_id="acct", repo_id="repo", kind="session", parent_id=main_graph.id)
+            session.add(session_graph)
+            await session.flush()
+
+            # Main graph: node A → B
+            session.add_all([
+                Node(id="n:A", graph_id=main_graph.id, kind="FUNCTION", name="A"),
+                Node(id="n:B", graph_id=main_graph.id, kind="FUNCTION", name="B"),
+            ])
+            session.add(Edge(graph_id=main_graph.id, src="n:A", dst="n:B", kind="CALLS"))
+
+            # Session graph: node C is a new node added in this session; A→C edge
+            session.add(Node(id="n:C", graph_id=session_graph.id, kind="FUNCTION", name="C"))
+            session.add(Edge(graph_id=session_graph.id, src="n:A", dst="n:C", kind="CALLS"))
+
+            await session.flush()
+
+        lq = LayeredGraphQuery(db=session, graph_ids=[session_graph.id, main_graph.id])
+        neighbors_a = await lq.neighbors("n:A", edge_kinds=["CALLS"])
+        neighbor_ids = [n.node.id for n in neighbors_a]
+        # Both B (main) and C (session) should appear
+        assert "n:C" in neighbor_ids
+        assert "n:B" in neighbor_ids
+        # C from session graph should appear first (session has higher priority)
+        assert neighbor_ids.index("n:C") < neighbor_ids.index("n:B")
+
+
+@pytest.mark.asyncio
+async def test_layered_graph_query_for_graph_walks_parent_chain():
+    """LayeredGraphQuery.for_graph() walks parent_id chain to build priority list."""
+    from sentinel_worker.graph_query import LayeredGraphQuery
+
+    sessionmaker = await _make_session()
+    async with sessionmaker() as session:
+        async with session.begin():
+            main_graph = Graph(account_id="acct", repo_id="repo", kind="main")
+            session.add(main_graph)
+            await session.flush()
+            branch_graph = Graph(account_id="acct", repo_id="repo", kind="branch", parent_id=main_graph.id)
+            session.add(branch_graph)
+            await session.flush()
+            session_graph = Graph(account_id="acct", repo_id="repo", kind="session", parent_id=branch_graph.id)
+            session.add(session_graph)
+            await session.flush()
+
+        lq = await LayeredGraphQuery.for_graph(session, session_graph.id)
+        assert lq.graph_ids == [session_graph.id, branch_graph.id, main_graph.id]

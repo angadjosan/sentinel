@@ -93,6 +93,36 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class TenantContextMiddleware(BaseHTTPMiddleware):
+    """Extract account_id from the JWT and set it as the per-request tenant context.
+
+    This enables automatic Postgres SEARCH_PATH routing to tenant_{account_id}
+    for every authenticated request without changing individual endpoint signatures.
+    """
+
+    async def dispatch(self, request, call_next):
+        from sentinel_worker.db import reset_account_context, set_account_context
+        from jose import JWTError, jwt as _jwt
+        from .auth import jwt_secret, ALGORITHM
+
+        account_id: str | None = None
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.removeprefix("Bearer ").strip()
+            try:
+                payload = _jwt.decode(token, jwt_secret(), algorithms=[ALGORITHM])
+                account_id = str(payload.get("account_id")) if payload.get("account_id") else None
+            except (JWTError, Exception):
+                pass
+
+        token = set_account_context(account_id)
+        try:
+            return await call_next(request)
+        finally:
+            reset_account_context(token)
+
+
+app.add_middleware(TenantContextMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.include_router(repos_router)
 
@@ -409,18 +439,16 @@ async def finding_audit(finding_id: str, db: AsyncSession = Depends(get_db), pri
 
 @app.get("/findings/{finding_id}/pull")
 async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, object]:
+    """Delegates to /findings/{id}/remediation for the full graph-aware remediation plan."""
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     node = await db.get(Node, finding.node_id) if finding.node_id else None
+    remediation = await finding_remediation(finding_id=finding_id, db=db, principal=principal)
     return {
         "finding": (await finding_response(db, finding)).model_dump(),
         "node": node_response(node).model_dump() if node else None,
-        "remediation_plan": [
-            finding.remediation,
-            "Re-run `sentinel source` after the fix to verify the finding no longer appears.",
-            "If runtime confirmation exists, re-run `sentinel pentest <id>` with a patched build.",
-        ],
+        "remediation_plan": remediation.remediation_plan,
     }
 
 
@@ -548,13 +576,16 @@ async def remove_suppression(finding_id: str, db: AsyncSession = Depends(get_db)
 
 @app.get("/findings/{finding_id}/remediation", response_model=RemediationResponse)
 async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RemediationResponse:
-    """Spec-compliant path: returns finding + graph context + remediation plan."""
+    """Returns finding + graph context + LLM-generated remediation plan."""
+    from pathlib import Path as _Path
+    from sentinel_worker.agent import SentinelLLMClient
+    from sentinel_worker.graph_query import GraphQuery
+    import json as _json
+
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    node = await db.get(Node, finding.node_id) if finding.node_id else None
 
-    # Build graph context summary
     edge_kinds = ["CALLS", "FLOWS_TO", "GUARDED_BY", "CONFIRMED_EXPLOIT"]
     edges = list(
         await db.scalars(
@@ -569,16 +600,57 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
         node_ids.add(edge.src)
         node_ids.add(edge.dst)
     neighbor_nodes = list(await db.scalars(select(Node).where(Node.graph_id == finding.graph_id).where(Node.id.in_(node_ids)))) if node_ids else []
-    graph_context_lines = [f"Node: {n.kind} {n.name} ({n.file}:{n.line_start})" for n in neighbor_nodes]
-    for edge in edges:
-        graph_context_lines.append(f"Edge: {edge.kind} {edge.src} -> {edge.dst} tainted={edge.tainted}")
-    graph_context = "\n".join(graph_context_lines)
+    graph_query = GraphQuery(db=db, graph_id=finding.graph_id)
+    graph_context = await graph_query.serialize_for_prompt(list(node_ids), max_hops=2)
 
     remediation_plan = [
         finding.remediation,
         "Re-run `sentinel source` after the fix to verify the finding no longer appears.",
         "If runtime confirmation exists, re-run `sentinel pentest <id>` with a patched build.",
     ]
+
+    # Attempt LLM-based remediation when a provider is configured
+    account = await db.get(Account, principal.account_id) if hasattr(principal, "account_id") else None
+    if account is None:
+        graph = await db.get(Graph, finding.graph_id)
+        account = await db.get(Account, graph.account_id) if graph else None
+
+    if account and getattr(account, "provider", None) and getattr(account, "api_key", None):
+        try:
+            llm = SentinelLLMClient(provider=account.provider, model=account.model, api_key=account.api_key)
+            remediation_prompt_path = _Path(__file__).parent.parent.parent.parent / "worker" / "src" / "sentinel_worker" / "prompts" / "remediation.txt"
+            system = remediation_prompt_path.read_text() if remediation_prompt_path.exists() else (
+                "You are a security engineer. Produce a concrete remediation plan as a JSON list of steps."
+            )
+            user_content = _json.dumps({
+                "finding": {
+                    "vuln_type": finding.vuln_type,
+                    "severity": finding.severity,
+                    "title": finding.title,
+                    "description": finding.description,
+                    "remediation": finding.remediation,
+                    "evidence": finding.evidence,
+                    "node_id": finding.node_id,
+                },
+                "graph_context": graph_context,
+                "neighbors": [{"id": n.id, "kind": n.kind, "name": n.name, "file": n.file, "intent": n.intent} for n in neighbor_nodes],
+            }, sort_keys=True)
+            result = await llm.call(system=system, user=user_content)
+            import json as _j
+            try:
+                parsed = _j.loads(result.content)
+                if isinstance(parsed, list):
+                    remediation_plan = [str(s) for s in parsed]
+                elif isinstance(parsed, dict):
+                    steps = parsed.get("fixes") or parsed.get("steps") or parsed.get("remediation_plan") or []
+                    if steps:
+                        remediation_plan = [str(s) for s in steps]
+            except Exception:
+                if result.content.strip():
+                    remediation_plan = [result.content.strip()]
+        except Exception:
+            pass  # fall back to static plan
+
     return RemediationResponse(
         finding=await finding_response(db, finding),
         graph_context=graph_context,
@@ -909,28 +981,39 @@ async def _run_for_principal(db: AsyncSession, run_id: str, principal: Principal
     return await db.scalar(stmt)
 
 
-def _pentest_executor(payload: PentestRequest) -> SandboxExecutor | None:
+def _pentest_executor(payload: PentestRequest) -> SandboxExecutor:
+    """Return the appropriate sandbox executor.
+
+    Priority order:
+    1. Firecracker microVM — when kernel_image + rootfs_image are configured (production).
+    2. LocalSubprocessSandboxExecutor — fallback for local/CI runs without Firecracker.
+
+    The executor is NEVER None; returning None would silently skip all sandbox execution.
+    """
+    from sentinel_worker.vm import LocalSubprocessSandboxExecutor
     config = payload.firecracker
-    if config is None or not (config.enabled or config.kernel_image or config.rootfs_image):
-        return None
-    if not config.kernel_image or not config.rootfs_image:
-        raise HTTPException(status_code=422, detail="firecracker.kernel_image and firecracker.rootfs_image are required when Firecracker is enabled")
-    return FirecrackerMicroVMExecutor(
-        FirecrackerConfig(
-            kernel_image=config.kernel_image,
-            rootfs_image=config.rootfs_image,
-            api_socket=config.api_socket,
-            firecracker_bin=config.firecracker_bin,
-            boot_args=config.boot_args,
-            vcpu_count=config.vcpu_count,
-            mem_size_mib=config.mem_size_mib,
-            smt=config.smt,
-            network_interface_id=config.network_interface_id,
-            host_dev_name=config.host_dev_name,
-            guest_mac=config.guest_mac,
-            guest_runner_argv=config.guest_runner_argv,
+    if config is not None and (config.enabled or config.kernel_image or config.rootfs_image):
+        if not config.kernel_image or not config.rootfs_image:
+            raise HTTPException(status_code=422, detail="firecracker.kernel_image and firecracker.rootfs_image are required when Firecracker is enabled")
+        return FirecrackerMicroVMExecutor(
+            FirecrackerConfig(
+                kernel_image=config.kernel_image,
+                rootfs_image=config.rootfs_image,
+                api_socket=config.api_socket,
+                firecracker_bin=config.firecracker_bin,
+                boot_args=config.boot_args,
+                vcpu_count=config.vcpu_count,
+                mem_size_mib=config.mem_size_mib,
+                smt=config.smt,
+                network_interface_id=config.network_interface_id,
+                host_dev_name=config.host_dev_name,
+                guest_mac=config.guest_mac,
+                guest_runner_argv=config.guest_runner_argv,
+            )
         )
-    )
+    # No Firecracker config — fall back to local subprocess execution.
+    # Commands run directly on the host; isolation depends on the deployment environment.
+    return LocalSubprocessSandboxExecutor()
 
 
 def node_response(node: Node) -> NodeResponse:

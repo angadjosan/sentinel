@@ -184,6 +184,59 @@ def _parse_cargo_lock(content: str) -> list[tuple[str, str, str]]:
     return deps
 
 
+def _parse_cargo_toml(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    in_deps = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped in ("[dependencies]", "[dev-dependencies]", "[build-dependencies]"):
+            in_deps = True
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_deps = False
+            continue
+        if not in_deps:
+            continue
+        if "=" not in stripped or stripped.startswith("#"):
+            continue
+        name, _, rest = stripped.partition("=")
+        name = name.strip()
+        rest = rest.strip().strip('"').strip("'")
+        # handle: name = "1.2.3" or name = { version = "1.2.3", ... }
+        if rest.startswith("{"):
+            m = re.search(r'version\s*=\s*["\']?([^"\'}\s,]+)', rest)
+            version = m.group(1).lstrip("^~>=") if m else ""
+        else:
+            version = rest.lstrip("^~>=").split()[0] if rest else ""
+        if name and version:
+            deps.append((name, version, "crates.io"))
+    return deps
+
+
+def _parse_build_gradle(content: str) -> list[tuple[str, str, str]]:
+    deps: list[tuple[str, str, str]] = []
+    # Groovy DSL: implementation 'group:artifact:version' or implementation "group:artifact:version"
+    # Kotlin DSL: implementation("group:artifact:version")
+    pattern1 = re.compile(
+        r"""(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\(?\s*['"]([^'"]+):([^'"]+):([^'"]+)['"]""",
+        re.IGNORECASE,
+    )
+    # Named args: implementation(group = "...", name = "...", version = "...")
+    pattern2 = re.compile(
+        r"""(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\s*\([^)]*name\s*=\s*['"]([^'"]+)['"][^)]*version\s*=\s*['"]([^'"]+)['"]""",
+        re.IGNORECASE,
+    )
+    for m in pattern1.finditer(content):
+        artifact = m.group(2)
+        version = m.group(3)
+        deps.append((artifact, version, "Maven"))
+    for m in pattern2.finditer(content):
+        artifact = m.group(1)
+        version = m.group(2)
+        deps.append((artifact, version, "Maven"))
+    return deps
+
+
 def _parse_pom_xml(content: str) -> list[tuple[str, str, str]]:
     deps: list[tuple[str, str, str]] = []
     dep_blocks = re.findall(r"<dependency>(.*?)</dependency>", content, re.DOTALL)
@@ -247,6 +300,10 @@ def parse_dependencies(path: str, content: str) -> list[Dependency]:
         return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_go_mod(content)]
     if path.endswith("Cargo.lock"):
         return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_cargo_lock(content)]
+    if path.endswith("Cargo.toml"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_cargo_toml(content)]
+    if path.endswith("build.gradle") or path.endswith("build.gradle.kts"):
+        return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_build_gradle(content)]
     if path.endswith("pom.xml"):
         return [Dependency(name=n, version=v, ecosystem=e, manifest_path=path) for n, v, e in _parse_pom_xml(content)]
     if path.endswith("Gemfile.lock"):

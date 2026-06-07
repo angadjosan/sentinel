@@ -330,3 +330,53 @@ def test_builtin_advisory_source_removed():
     assert not hasattr(sca_module, "BuiltinAdvisorySource"), (
         "BuiltinAdvisorySource is test data and must be removed from sca.py"
     )
+
+
+def test_parse_cargo_toml_simple_version():
+    content = """\
+[package]
+name = "myapp"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1.28", features = ["full"] }
+
+[dev-dependencies]
+mockito = "^1.2"
+"""
+    deps = parse_dependencies("Cargo.toml", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("serde", "1.0", "crates.io") in result
+    assert ("tokio", "1.28", "crates.io") in result
+    assert ("mockito", "1.2", "crates.io") in result
+
+
+def test_parse_build_gradle_implementation_strings():
+    content = """\
+dependencies {
+    implementation 'com.google.guava:guava:32.1.2-jre'
+    implementation "org.springframework.boot:spring-boot-starter:3.1.0"
+    testImplementation 'junit:junit:4.13.2'
+    api 'org.apache.commons:commons-lang3:3.13.0'
+}
+"""
+    deps = parse_dependencies("build.gradle", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("guava", "32.1.2-jre", "Maven") in result
+    assert ("spring-boot-starter", "3.1.0", "Maven") in result
+    assert ("junit", "4.13.2", "Maven") in result
+    assert ("commons-lang3", "3.13.0", "Maven") in result
+
+
+def test_parse_build_gradle_kts():
+    content = """\
+dependencies {
+    implementation("io.ktor:ktor-server-core:2.3.4")
+    testImplementation("io.kotest:kotest-runner-junit5:5.6.2")
+}
+"""
+    deps = parse_dependencies("build.gradle.kts", content)
+    result = {(d.name, d.version, d.ecosystem) for d in deps}
+    assert ("ktor-server-core", "2.3.4", "Maven") in result
+    assert ("kotest-runner-junit5", "5.6.2", "Maven") in result

@@ -4,11 +4,14 @@ import json
 from dataclasses import dataclass
 from typing import Iterable
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .agent import SentinelLLMClient
 from .models import Edge, Node
+
+log = structlog.get_logger(__name__)
 
 
 ENRICHMENT_SYSTEM_PROMPT = """You annotate a security context graph.
@@ -132,6 +135,80 @@ def _parse_annotations(content: str) -> list[Annotation]:
             )
         )
     return annotations
+
+
+async def validate_enrichment_labels(
+    db: AsyncSession,
+    *,
+    graph_id: str,
+    run_id: str,
+    llm: SentinelLLMClient | None = None,
+    source_by_file: dict[str, str] | None = None,
+) -> int:
+    """Re-enrich nodes labeled 'auth*' that have no GUARDED_BY edges — structural contradiction."""
+    guarded_srcs = set(
+        await db.scalars(
+            select(Edge.src).where(Edge.graph_id == graph_id, Edge.kind == "GUARDED_BY")
+        )
+    )
+    guarded_dsts = set(
+        await db.scalars(
+            select(Edge.dst).where(Edge.graph_id == graph_id, Edge.kind == "GUARDED_BY")
+        )
+    )
+    guarded_node_ids = guarded_srcs | guarded_dsts
+
+    auth_nodes = list(
+        await db.scalars(
+            select(Node)
+            .where(Node.graph_id == graph_id)
+            .where(Node.label.ilike("%auth%"))
+        )
+    )
+    to_reenrich = [n for n in auth_nodes if n.id not in guarded_node_ids]
+    if not to_reenrich:
+        return 0
+
+    log.info(
+        "enrichment.validation.reenrich",
+        graph_id=graph_id,
+        count=len(to_reenrich),
+        node_ids=[n.id for n in to_reenrich[:10]],
+    )
+
+    CLARIFYING_PROMPT = (
+        ENRICHMENT_SYSTEM_PROMPT
+        + "\n\nCRITICAL: Some nodes below are labeled as auth-related but have NO GUARDED_BY edges. "
+        "If this is correct (e.g. the node IS an auth guard, not something guarded by one), confirm with an appropriate label. "
+        "If the label is wrong, correct it to accurately reflect the node's role."
+    )
+
+    client = llm or SentinelLLMClient()
+    applied = 0
+    for cluster in _clusters(to_reenrich, 15):
+        payload = await _cluster_payload(db, graph_id, cluster, source_by_file or {})
+        result = await client.call(
+            system=CLARIFYING_PROMPT,
+            data=json.dumps(payload, sort_keys=True),
+            component="enrichment_validation",
+            db=db,
+            run_id=run_id,
+        )
+        annotations = _parse_annotations(result.content)
+        by_id = {a.node_id: a for a in annotations}
+        for node in cluster:
+            ann = by_id.get(node.id)
+            if ann is None:
+                continue
+            if ann.label:
+                node.label = ann.label[:255]
+            if ann.intent:
+                node.intent = ann.intent
+            if ann.trust_level and node.kind in {"ROUTE", "FUNCTION", "PARAMETER"}:
+                node.trust_level = ann.trust_level
+            applied += 1
+
+    return applied
 
 
 def _clusters(nodes: Iterable[Node], cluster_size: int) -> Iterable[list[Node]]:
