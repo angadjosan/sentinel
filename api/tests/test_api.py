@@ -158,6 +158,15 @@ def test_source_enqueue_claim_complete_and_cancel():
         assert "run.cancelled" in cancelled_trace.text
         assert "late completion" not in cancelled_trace.text
 
+        fourth = client.post(
+            "/source/enqueue",
+            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('delete-cancel')", "run_context": "local"},
+        )
+        fourth_run = fourth.json()["run"]["id"]
+        delete_cancelled = client.delete(f"/runs/{fourth_run}")
+        assert delete_cancelled.status_code == 200
+        assert delete_cancelled.json()["status"] == "cancelled"
+
 
 def test_analytics_endpoints_return_operational_metrics():
     repo = f"analytics-{uuid4().hex}"
@@ -299,6 +308,10 @@ def test_run_trace_access_is_audited():
         run_id = plan.json()["run"]["id"]
         trace = client.get(f"/runs/{run_id}/trace")
         assert trace.status_code == 200
+        assert trace.headers["content-type"].startswith("application/x-ndjson")
+        access_log = client.get(f"/runs/{run_id}/trace-access")
+        assert access_log.status_code == 200
+        assert any(row["run_id"] == run_id for row in access_log.json())
 
     async def read_log_count() -> int:
         async with SessionLocal() as session:

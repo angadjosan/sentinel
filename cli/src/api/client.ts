@@ -179,7 +179,7 @@ export class SentinelApiClient {
   }
 
   cancelRun(id: string) {
-    return this.request<Run>(`/runs/${id}/cancel`, { method: "POST" });
+    return this.request<Run>(`/runs/${id}`, { method: "DELETE" });
   }
 
   async trace(id: string) {

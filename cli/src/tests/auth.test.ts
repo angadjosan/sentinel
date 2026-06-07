@@ -135,3 +135,28 @@ test("api client sends pentest description and auto-select targets", async () =>
   assert.equal(bodies[1].description, undefined);
   assert.equal(bodies[1].finding_id, undefined);
 });
+
+test("api client cancels runs with DELETE", async () => {
+  let requestPath = "";
+  let method: string | undefined;
+  globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+    requestPath = String(input);
+    method = init?.method;
+    return Response.json({
+      id: "run-1",
+      kind: "source",
+      status: "cancelled",
+      finding_count: 0,
+      token_spend: 0,
+      model_used: null,
+      trace: "",
+      created_at: "2026-06-06T00:00:00Z",
+      completed_at: "2026-06-06T00:00:01Z"
+    });
+  };
+
+  await new SentinelApiClient(config).cancelRun("run-1");
+
+  assert.equal(requestPath, "http://sentinel.test/runs/run-1");
+  assert.equal(method, "DELETE");
+});

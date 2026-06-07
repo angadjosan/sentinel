@@ -48,6 +48,7 @@ from .schemas import (
     TaskFailRequest,
     TaskResponse,
     TokenBudgetRequest,
+    TraceAccessLogResponse,
 )
 from .sse import stream_run_events
 
@@ -126,6 +127,10 @@ def task_response(task: Task) -> TaskResponse:
         claimed_by=task.claimed_by,
         error=task.error,
     )
+
+
+def trace_access_response(row: TraceAccessLog) -> TraceAccessLogResponse:
+    return TraceAccessLogResponse(id=row.id, run_id=row.run_id, actor_id=row.actor_id, created_at=row.created_at.isoformat())
 
 
 @app.get("/health")
@@ -479,7 +484,16 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     db.add(TraceAccessLog(run_id=run.id, actor_id=principal.user_id))
-    return PlainTextResponse(await read_run_trace(db, run))
+    return PlainTextResponse(await read_run_trace(db, run), media_type="application/x-ndjson")
+
+
+@app.get("/runs/{run_id}/trace-access", response_model=list[TraceAccessLogResponse])
+async def run_trace_access_log(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> list[TraceAccessLogResponse]:
+    run = await _run_for_principal(db, run_id, principal)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    rows = await db.scalars(select(TraceAccessLog).where(TraceAccessLog.run_id == run.id).order_by(TraceAccessLog.created_at.desc()))
+    return [trace_access_response(row) for row in rows]
 
 
 @app.get("/runs/{run_id}/events")
@@ -497,6 +511,15 @@ async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal:
 
 @app.post("/runs/{run_id}/cancel", response_model=RunResponse)
 async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
+    return await _cancel_run_for_principal(db, run_id, principal)
+
+
+@app.delete("/runs/{run_id}", response_model=RunResponse)
+async def delete_run_cancel(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
+    return await _cancel_run_for_principal(db, run_id, principal)
+
+
+async def _cancel_run_for_principal(db: AsyncSession, run_id: str, principal: Principal) -> RunResponse:
     run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")

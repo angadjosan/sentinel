@@ -111,6 +111,13 @@ class SuppressionAuditResponse(BaseModel):
     created_at: str
 
 
+class TraceAccessLogResponse(BaseModel):
+    id: int
+    run_id: str
+    actor_id: str
+    created_at: str
+
+
 class SourceResponse(BaseModel):
     run: RunResponse
     findings: list[FindingResponse]

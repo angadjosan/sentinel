@@ -1,20 +1,12 @@
-import { listRuns } from "../../../lib/api";
+import { getRun, runTrace, traceAccessLog } from "../../../lib/api";
 import { cancelRunAction } from "../actions";
 
 export default async function RunDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const runs = await listRuns();
-  const run = runs.find((candidate) => candidate.id === id);
-  if (!run) {
-    return (
-      <>
-        <div className="toolbar">
-          <h1>Run Not Found</h1>
-        </div>
-      </>
-    );
-  }
-  const summary = traceSummary(run.trace);
+  const run = await getRun(id);
+  const trace = await runTrace(id);
+  const accessLog = await traceAccessLog(id);
+  const summary = traceSummary(trace);
   return (
     <>
       <div className="toolbar">
@@ -104,8 +96,37 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <h2>Trace</h2>
         </div>
         <div className="panel-body">
-          <pre className="trace">{run.trace || "No trace recorded."}</pre>
+          <pre className="trace">{trace || "No trace recorded."}</pre>
         </div>
+      </section>
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>Trace Access Audit</h2>
+          <span className="muted">{accessLog.length} access events</span>
+        </div>
+        <table className="table compact-table">
+          <thead>
+            <tr>
+              <th>Actor</th>
+              <th>Accessed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {accessLog.map((row) => (
+              <tr key={row.id}>
+                <td>{row.actor_id}</td>
+                <td>{formatDate(row.created_at)}</td>
+              </tr>
+            ))}
+            {accessLog.length === 0 ? (
+              <tr>
+                <td colSpan={2} className="muted">
+                  No trace access recorded.
+                </td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
       </section>
     </>
   );

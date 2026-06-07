@@ -23,6 +23,13 @@ export type Run = {
   completed_at: string | null;
 };
 
+export type TraceAccessLog = {
+  id: number;
+  run_id: string;
+  actor_id: string;
+  created_at: string;
+};
+
 export type PullFinding = {
   finding: Finding;
   node: {
@@ -150,13 +157,27 @@ export function listRuns(): Promise<Run[]> {
   return get<Run[]>("/runs");
 }
 
+export function getRun(id: string): Promise<Run> {
+  return get<Run>(`/runs/${id}`);
+}
+
 export async function cancelRun(id: string): Promise<Run> {
-  const response = await fetch(`${apiUrl}/runs/${id}/cancel`, {
-    method: "POST",
+  const response = await fetch(`${apiUrl}/runs/${id}`, {
+    method: "DELETE",
     cache: "no-store"
   });
   if (!response.ok) throw new Error(await response.text());
   return response.json() as Promise<Run>;
+}
+
+export async function runTrace(id: string): Promise<string> {
+  const response = await fetch(`${apiUrl}/runs/${id}/trace`, { cache: "no-store" });
+  if (!response.ok) throw new Error(await response.text());
+  return response.text();
+}
+
+export function traceAccessLog(id: string): Promise<TraceAccessLog[]> {
+  return get<TraceAccessLog[]>(`/runs/${id}/trace-access`);
 }
 
 export function tokenSpend(): Promise<Array<{ component: string; input_tokens: number; output_tokens: number; est_cost_usd: number }>> {
