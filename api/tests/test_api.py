@@ -188,6 +188,36 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
     assert "pentest.oracle.evaluated" in pentest_runs[0]["trace"]
 
 
+def test_pentest_description_selects_matching_open_target():
+    repo = f"pentest-description-{uuid4().hex}"
+    with TestClient(app) as client:
+        sqli = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        )
+        cmdi = client.post(
+            "/plan",
+            json={"repo_name": repo, "content": "exec(`convert ${req.query.file}`)", "with_retry": False},
+        )
+        assert sqli.status_code == 200
+        assert cmdi.status_code == 200
+
+        selected = client.post(
+            "/pentest",
+            json={
+                "repo_name": repo,
+                "description": "confirm the command injection convert endpoint",
+                "behavioral_proof": "command_executed",
+                "proof_detail": "wrote marker file through convert payload",
+            },
+        )
+
+    assert selected.status_code == 200
+    assert selected.json()["id"] == cmdi.json()["findings"][0]["id"]
+    assert selected.json()["id"] != sqli.json()["findings"][0]["id"]
+    assert selected.json()["confirmed"] is True
+
+
 def test_pentest_rejects_incomplete_firecracker_config():
     repo = f"pentest-firecracker-{uuid4().hex}"
     with TestClient(app) as client:

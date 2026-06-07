@@ -149,12 +149,13 @@ export class SentinelApiClient {
     });
   }
 
-  pentest(id: string, sanitizerOutput = "", behavioralProof?: string, proofDetail = "") {
+  pentest(target: { findingId?: string; description?: string } = {}, sanitizerOutput = "", behavioralProof?: string, proofDetail = "") {
     return this.request<Finding>("/pentest", {
       method: "POST",
       body: JSON.stringify({
         repo_name: this.config.repoName,
-        finding_id: id,
+        finding_id: target.findingId,
+        description: target.description,
         sanitizer_output: sanitizerOutput,
         behavioral_proof: behavioralProof,
         proof_detail: proofDetail,

@@ -54,6 +54,28 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     assert {finding["vuln_type"] for finding in findings_b.json()} == {"cmdi"}
 
 
+def test_authenticated_source_stream_uses_authenticated_account(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token = create_token("stream-user", f"stream-account-{uuid4().hex}", "admin")
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/source/stream",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "repo_name": "stream-repo",
+                "diff": "+++ b/app.js\n+db.query(`select ${req.query.id}`)",
+                "run_context": "local",
+            },
+        ) as response:
+            body = response.read().decode()
+
+    assert response.status_code == 200
+    assert "graph_update" in body
+    assert "sqli" in body
+    assert "complete" in body
+
+
 def test_authenticated_accounts_cannot_access_other_account_details(monkeypatch):
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
     token_a = create_token("owner-a", "detail-account-a", "admin")

@@ -249,7 +249,7 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
 async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
     async def events():
         yield f"data: {json.dumps({'kind': 'graph_update', 'message': 'scan started'})}\n\n"
-        result = await source(payload, db)
+        result = await source(payload, db, principal)
         for finding in result.findings:
             yield f"data: {finding.model_dump_json()}\n\n"
         yield f"data: {json.dumps({'kind': 'complete', 'run_id': result.run.id, 'finding_count': len(result.findings)})}\n\n"
@@ -427,7 +427,7 @@ async def reject_suppression(finding_id: str, payload: SuppressRequest, db: Asyn
 
 @app.post("/pentest", response_model=FindingResponse)
 async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal)
+    finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal, payload.description)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     result = await run_pentest(
@@ -677,7 +677,7 @@ async def _check_token_budget(db: AsyncSession, principal: Principal) -> None:
         )
 
 
-async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Principal) -> Finding | None:
+async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Principal, description: str | None = None) -> Finding | None:
     stmt = (
         select(Finding)
         .join(Graph, Finding.graph_id == Graph.id)
@@ -689,8 +689,34 @@ async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Pr
         stmt = stmt.where(Graph.account_id == principal.account_id)
     findings = list(await db.scalars(stmt))
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
+    target_terms = _pentest_target_terms(description)
+    if target_terms:
+        findings = [finding for finding in findings if _pentest_target_score(finding, target_terms) > 0]
+        findings.sort(key=lambda finding: (-_pentest_target_score(finding, target_terms), severity_rank.get(finding.severity, 5), finding.created_at))
+    else:
+        findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
     return findings[0] if findings else None
+
+
+def _pentest_target_terms(description: str | None) -> list[str]:
+    if not description:
+        return []
+    return [term for term in "".join(char.lower() if char.isalnum() else " " for char in description).split() if len(term) > 2]
+
+
+def _pentest_target_score(finding: Finding, terms: list[str]) -> int:
+    haystack = " ".join(
+        [
+            finding.id,
+            finding.vuln_type,
+            finding.severity,
+            finding.title,
+            finding.description,
+            finding.remediation,
+            finding.evidence or "",
+        ]
+    ).lower()
+    return sum(1 for term in terms if term in haystack)
 
 
 async def _finding_for_principal(db: AsyncSession, finding_id: str | None, principal: Principal) -> Finding | None:

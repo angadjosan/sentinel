@@ -86,3 +86,52 @@ test("api client returns approved device auth token", async () => {
     user_id: "user-1"
   });
 });
+
+test("api client sends pentest finding id target", async () => {
+  let body: Record<string, unknown> = {};
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({
+      id: "finding-1",
+      vuln_type: "sqli",
+      severity: "high",
+      title: "SQL injection",
+      description: "desc",
+      remediation: "fix",
+      status: "open",
+      confirmed: false,
+      fingerprint: "fp"
+    });
+  };
+
+  await new SentinelApiClient(config).pentest({ findingId: "123e4567-e89b-12d3-a456-426614174000" });
+
+  assert.equal(body.finding_id, "123e4567-e89b-12d3-a456-426614174000");
+  assert.equal(body.description, undefined);
+});
+
+test("api client sends pentest description and auto-select targets", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return Response.json({
+      id: "finding-1",
+      vuln_type: "cmdi",
+      severity: "high",
+      title: "Command injection",
+      description: "desc",
+      remediation: "fix",
+      status: "open",
+      confirmed: false,
+      fingerprint: "fp"
+    });
+  };
+
+  await new SentinelApiClient(config).pentest({ description: "command injection in image converter" });
+  await new SentinelApiClient(config).pentest();
+
+  assert.equal(bodies[0].description, "command injection in image converter");
+  assert.equal(bodies[0].finding_id, undefined);
+  assert.equal(bodies[1].description, undefined);
+  assert.equal(bodies[1].finding_id, undefined);
+});

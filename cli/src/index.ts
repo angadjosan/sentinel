@@ -115,7 +115,7 @@ program
     const result = await client.source(currentDiff({ staged: options.staged, base: options.base, paths }), process.env.CI ? "ci" : "local", { baseRef: options.base, paths });
     if (options.pentest) {
       const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
-      const pentestResults = await runLimited(result.findings, concurrency, async (finding) => client.pentest(finding.id));
+      const pentestResults = await runLimited(result.findings, concurrency, async (finding) => client.pentest({ findingId: finding.id }));
       for (const finding of pentestResults) {
         console.log(`pentest ${finding.id}: ${finding.status} confirmed=${finding.confirmed}`);
       }
@@ -187,12 +187,13 @@ program
 program
   .command("pentest")
   .description("Attempt to confirm a finding with oracle evidence")
-  .argument("<id>", "Finding ID")
+  .argument("[target...]", "Finding ID, natural-language target, or empty to auto-select")
   .option("--sanitizer-output <text>", "Sanitizer output")
   .option("--behavioral-proof <kind>", "Behavioral proof kind")
   .option("--proof-detail <text>", "Behavioral proof detail", "")
-  .action(async (id: string, options) => {
-    const finding = await new SentinelApiClient().pentest(id, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
+  .action(async (targetParts: string[], options) => {
+    const target = parsePentestTarget(targetParts);
+    const finding = await new SentinelApiClient().pentest(target, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
     console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
     if (finding.evidence) console.log(finding.evidence);
   });
@@ -360,6 +361,15 @@ function parsePositiveInt(value: string, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return parsed;
+}
+
+function parsePentestTarget(parts: string[]): { findingId?: string; description?: string } {
+  const target = parts.join(" ").trim();
+  if (!target) return {};
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target)) {
+    return { findingId: target };
+  }
+  return { description: target };
 }
 
 function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {
