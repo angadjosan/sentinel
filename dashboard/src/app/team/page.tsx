@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { accountConfig, listFindings } from "../../lib/api";
 import { SeverityBadge } from "../../components/SeverityBadge";
+import { updateAccountConfigAction } from "./actions";
 
 export default async function TeamPage() {
   const [config, findings] = await Promise.all([accountConfig(), listFindings()]);
@@ -40,16 +41,46 @@ export default async function TeamPage() {
             <h2>Account Settings</h2>
           </div>
           <div className="panel-body">
-            <dl className="kv">
-              <dt>API Endpoint</dt>
-              <dd>{config.api_endpoint ?? "default"}</dd>
-              <dt>Suppression Approval</dt>
-              <dd>{config.suppression_approval_required ? "required" : "not required"}</dd>
-              <dt>Token Budget</dt>
-              <dd>{config.monthly_token_budget?.toLocaleString() ?? "unlimited"}</dd>
-              <dt>Source Retention</dt>
-              <dd>{config.source_retention_days} days</dd>
-            </dl>
+            <form className="settings-form" action={updateAccountConfigAction}>
+              <label>
+                <span>Provider</span>
+                <select name="provider" defaultValue={config.provider}>
+                  <option value="local">Local</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="google">Google</option>
+                </select>
+              </label>
+              <label>
+                <span>Model</span>
+                <select name="model" defaultValue={config.model}>
+                  {modelOptions(config.provider, config.model).map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>API Endpoint</span>
+                <input name="api_endpoint" defaultValue={config.api_endpoint ?? ""} placeholder="default provider endpoint" />
+              </label>
+              <label>
+                <span>Monthly Token Budget</span>
+                <input name="monthly_token_budget" type="number" min="0" step="1" defaultValue={config.monthly_token_budget ?? ""} placeholder="unlimited" />
+              </label>
+              <label>
+                <span>Source Retention Days</span>
+                <input name="source_retention_days" type="number" min="1" step="1" defaultValue={config.source_retention_days} />
+              </label>
+              <label className="checkbox-row">
+                <input name="suppression_approval_required" type="checkbox" defaultChecked={config.suppression_approval_required} />
+                <span>Require admin approval for member suppressions</span>
+              </label>
+              <div className="form-actions">
+                <button type="submit" className="primary">Save Settings</button>
+              </div>
+            </form>
           </div>
         </div>
 
@@ -92,4 +123,15 @@ export default async function TeamPage() {
       </section>
     </>
   );
+}
+
+function modelOptions(provider: string, current: string): string[] {
+  const options: Record<string, string[]> = {
+    anthropic: ["claude-opus-4-8", "claude-sonnet-4-5", "claude-haiku-4-5"],
+    openai: ["gpt-5", "gpt-5-mini", "gpt-5-nano"],
+    google: ["gemini-2.5-pro", "gemini-2.5-flash"],
+    local: ["ollama", "qwen3-coder", "llama-3.3"]
+  };
+  const allModels = Object.values(options).flat();
+  return Array.from(new Set([...(options[provider] ?? options.local), current, ...allModels]));
 }

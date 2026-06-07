@@ -89,6 +89,15 @@ export type AccountConfig = {
   source_retention_days: number;
 };
 
+export type AccountConfigPatch = {
+  provider?: string;
+  model?: string;
+  api_endpoint?: string | null;
+  suppression_approval_required?: boolean;
+  monthly_token_budget?: number | null;
+  source_retention_days?: number;
+};
+
 const apiUrl = process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
 async function get<T>(path: string): Promise<T> {
@@ -121,6 +130,17 @@ export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
 
 export function accountConfig(): Promise<AccountConfig> {
   return get<AccountConfig>("/config");
+}
+
+export async function updateAccountConfig(patch: AccountConfigPatch): Promise<AccountConfig> {
+  const response = await fetch(`${apiUrl}/config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(patch)
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<AccountConfig>;
 }
 
 export function listRuns(): Promise<Run[]> {
