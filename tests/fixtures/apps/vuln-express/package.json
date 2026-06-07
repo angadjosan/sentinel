@@ -1,0 +1,13 @@
+{
+  "name": "vuln-express",
+  "version": "1.0.0",
+  "description": "Intentionally vulnerable Express app used as an end-to-end test fixture.",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "dependencies": {
+    "express": "4.18.2",
+    "sqlite3": "5.1.6"
+  }
+}
