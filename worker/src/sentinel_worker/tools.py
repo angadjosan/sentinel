@@ -14,6 +14,41 @@ from .models import Node, SourceFileSnapshot
 log = structlog.get_logger(__name__)
 
 
+_PENTEST_RESULT_TOOL: dict = {
+    "name": "emit_pentest_result",
+    "description": (
+        "Report pentest results. Call once when analysis is complete. "
+        "Include every payload attempted. Set confirmed=true only when behavioral proof was observed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "payloads": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Exact payloads targeted at this finding's sink.",
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "True only when behavioral proof was observed.",
+            },
+            "outcome": {
+                "type": "string",
+                "enum": ["data_exfiltrated", "auth_bypassed", "command_executed", "privilege_escalated", "no_evidence"],
+            },
+            "proof_artifact": {
+                "type": "string",
+                "description": "The specific data constituting proof (response excerpt, command output, etc.).",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "Brief explanation of why each payload was chosen and what was observed.",
+            },
+        },
+        "required": ["payloads", "confirmed", "outcome"],
+    },
+}
+
 TOOLS: list[dict] = [
     {
         "name": "graph_neighbors",
@@ -298,6 +333,10 @@ async def dispatch_tool(
     elif tool_name == "emit_finding":
         return {"type": "finding", "data": tool_input}
 
+    elif tool_name == "emit_pentest_result":
+        # Captured by the pentest agent loop's dispatcher closure; echo back for tracing.
+        return {"type": "pentest_result", "data": tool_input}
+
     elif tool_name == "graph_annotate":
         node_id = tool_input["node_id"]
         node = await db.get(Node, node_id)
@@ -313,3 +352,9 @@ async def dispatch_tool(
 
     else:
         return {"error": f"Unknown tool: {tool_name}"}
+
+
+# Pentest agent has access to graph + source reads but not SAST-specific emit_finding/graph_annotate.
+PENTEST_TOOLS: list[dict] = [
+    tool for tool in TOOLS if tool["name"] not in {"emit_finding", "graph_annotate"}
+] + [_PENTEST_RESULT_TOOL]
