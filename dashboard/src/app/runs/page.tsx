@@ -17,8 +17,10 @@ export default async function RunsPage() {
               <th>ID</th>
               <th>Kind</th>
               <th>Status</th>
+              <th>Findings</th>
               <th>Tokens</th>
               <th>Model</th>
+              <th>Created</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -30,8 +32,10 @@ export default async function RunsPage() {
                 </td>
                 <td>{run.kind}</td>
                 <td>{run.status}</td>
+                <td>{run.finding_count.toLocaleString()}</td>
                 <td>{run.token_spend.toLocaleString()}</td>
                 <td>{run.model_used ?? "not recorded"}</td>
+                <td>{formatDate(run.created_at)}</td>
                 <td>
                   {canCancel(run.status) ? (
                     <form action={cancelRunAction}>
@@ -46,7 +50,7 @@ export default async function RunsPage() {
             ))}
             {runs.length === 0 ? (
               <tr>
-                <td colSpan={6} className="muted">
+                <td colSpan={8} className="muted">
                   No runs recorded.
                 </td>
               </tr>
@@ -60,4 +64,8 @@ export default async function RunsPage() {
 
 function canCancel(status: string): boolean {
   return ["queued", "claimed", "running"].includes(status);
+}
+
+function formatDate(value: string): string {
+  return new Date(value).toLocaleString();
 }

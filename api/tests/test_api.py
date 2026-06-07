@@ -28,6 +28,34 @@ def test_source_endpoint_emits_finding(tmp_path, monkeypatch):
     body = response.json()
     assert body["run"]["status"] == "completed"
     assert body["findings"][0]["vuln_type"] == "sqli"
+    assert body["run"]["finding_count"] == 1
+    assert body["run"]["created_at"]
+    assert body["run"]["completed_at"]
+
+
+def test_runs_include_listing_metadata():
+    repo = f"run-metadata-{uuid4().hex}"
+    with TestClient(app) as client:
+        source = client.post(
+            "/source",
+            json={
+                "repo_name": repo,
+                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
+                "run_context": "local",
+            },
+        )
+        assert source.status_code == 200
+        run_id = source.json()["run"]["id"]
+        listed = client.get("/runs")
+        detail = client.get(f"/runs/{run_id}")
+
+    assert listed.status_code == 200
+    row = next(run for run in listed.json() if run["id"] == run_id)
+    assert row["finding_count"] == 1
+    assert row["created_at"]
+    assert row["completed_at"]
+    assert detail.status_code == 200
+    assert detail.json()["finding_count"] == 1
 
 
 def test_plan_pull_graph_and_cancel_flow():

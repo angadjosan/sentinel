@@ -18,9 +18,12 @@ export type Run = {
   id: string;
   kind: string;
   status: string;
+  finding_count: number;
   token_spend: number;
   model_used?: string | null;
   trace: string;
+  created_at: string;
+  completed_at?: string | null;
 };
 
 export type DeviceAuthStart = {

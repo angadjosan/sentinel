@@ -81,9 +81,12 @@ class RunResponse(BaseModel):
     id: str
     kind: str
     status: str
+    finding_count: int = 0
     token_spend: int
     model_used: str | None = None
     trace: str = ""
+    created_at: str
+    completed_at: str | None = None
 
 
 class FindingResponse(BaseModel):

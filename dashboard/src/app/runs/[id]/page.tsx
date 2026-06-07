@@ -43,8 +43,22 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
           <div className="value">{run.token_spend}</div>
         </div>
         <div className="panel metric">
+          <div className="label">Findings</div>
+          <div className="value">{run.finding_count}</div>
+        </div>
+      </section>
+      <section className="grid metrics" style={{ marginTop: 16 }}>
+        <div className="panel metric">
           <div className="label">Model</div>
           <div className="value">{run.model_used ?? "n/a"}</div>
+        </div>
+        <div className="panel metric">
+          <div className="label">Created</div>
+          <div className="value compact">{formatDate(run.created_at)}</div>
+        </div>
+        <div className="panel metric">
+          <div className="label">Completed</div>
+          <div className="value compact">{run.completed_at ? formatDate(run.completed_at) : "not completed"}</div>
         </div>
       </section>
       <section className="grid two detail-grid">
@@ -99,6 +113,10 @@ export default async function RunDetailPage({ params }: { params: Promise<{ id: 
 
 function canCancel(status: string): boolean {
   return ["queued", "claimed", "running"].includes(status);
+}
+
+function formatDate(value: string): string {
+  return new Date(value).toLocaleString();
 }
 
 type GraphUpdateEvent = {

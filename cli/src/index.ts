@@ -236,8 +236,9 @@ runs
   .command("list")
   .action(async () => {
     const rows = await new SentinelApiClient().runs();
+    console.log("ID\tKIND\tSTATUS\tFINDINGS\tTOKENS\tMODEL\tCREATED");
     for (const run of rows) {
-      console.log(`${run.id}\t${run.kind}\t${run.status}\t${run.token_spend}`);
+      console.log(`${run.id}\t${run.kind}\t${run.status}\t${run.finding_count}\t${run.token_spend}\t${run.model_used ?? "n/a"}\t${run.created_at}`);
     }
   });
 runs

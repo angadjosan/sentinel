@@ -73,8 +73,19 @@ ACTIVE_RUNS = Gauge("sentinel_active_runs", "Currently active runs")
 DEVICE_CODE_TTL_SECONDS = 600
 
 
-def run_response(run: Run) -> RunResponse:
-    return RunResponse(id=run.id, kind=run.kind, status=run.status, token_spend=run.token_spend, model_used=run.model_used, trace=run.trace or "")
+async def run_response(db: AsyncSession, run: Run) -> RunResponse:
+    finding_count = await db.scalar(select(func.count(Finding.id)).where(Finding.run_id == run.id)) or 0
+    return RunResponse(
+        id=run.id,
+        kind=run.kind,
+        status=run.status,
+        finding_count=int(finding_count),
+        token_spend=run.token_spend,
+        model_used=run.model_used,
+        trace=run.trace or "",
+        created_at=run.created_at.isoformat(),
+        completed_at=run.completed_at.isoformat() if run.completed_at else None,
+    )
 
 
 def account_config_response(account: Account) -> AccountConfigResponse:
@@ -209,7 +220,7 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
 async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
     run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
-    return run_response(run)
+    return await run_response(db, run)
 
 
 @app.post("/source", response_model=SourceResponse)
@@ -225,7 +236,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
             FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
         RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
         SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
-        return SourceResponse(run=run_response(run), findings=[finding_response(finding) for finding in findings])
+        return SourceResponse(run=await run_response(db, run), findings=[finding_response(finding) for finding in findings])
     finally:
         ACTIVE_RUNS.dec()
 
@@ -242,7 +253,7 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
     )
     run = await db.get(Run, task.run_id)
     assert run is not None
-    return EnqueueResponse(task_id=task.id, run=run_response(run))
+    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
 @app.post("/source/stream")
@@ -297,7 +308,7 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
         FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
-    return SourceResponse(run=run_response(run), findings=[finding_response(finding) for finding in findings])
+    return SourceResponse(run=await run_response(db, run), findings=[finding_response(finding) for finding in findings])
 
 
 @app.get("/findings", response_model=list[FindingResponse])
@@ -451,7 +462,7 @@ async def runs(db: AsyncSession = Depends(get_db), principal: Principal = Depend
     if principal.account_id != "dev":
         stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     rows = await db.scalars(stmt)
-    return [run_response(row) for row in rows]
+    return [await run_response(db, row) for row in rows]
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
@@ -459,7 +470,7 @@ async def run_detail(run_id: str, db: AsyncSession = Depends(get_db), principal:
     run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
-    return run_response(run)
+    return await run_response(db, run)
 
 
 @app.get("/runs/{run_id}/trace")
@@ -493,7 +504,7 @@ async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal:
         run = await cancel_run_tasks(db, run_id=run_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return run_response(run)
+    return await run_response(db, run)
 
 
 @app.get("/graph", response_model=GraphResponse)
