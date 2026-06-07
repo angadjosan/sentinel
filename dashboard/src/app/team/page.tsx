@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { accountConfig, listFindings } from "../../lib/api";
 import { SeverityBadge } from "../../components/SeverityBadge";
-import { updateAccountConfigAction } from "./actions";
+import { approveDeviceCodeAction, updateAccountConfigAction } from "./actions";
 
 export default async function TeamPage() {
   const [config, findings] = await Promise.all([accountConfig(), listFindings()]);
@@ -84,6 +84,25 @@ export default async function TeamPage() {
           </div>
         </div>
 
+        <div className="panel">
+          <div className="panel-header">
+            <h2>Device Login</h2>
+          </div>
+          <div className="panel-body">
+            <form className="settings-form compact-form" action={approveDeviceCodeAction}>
+              <label>
+                <span>User Code</span>
+                <input name="user_code" autoComplete="one-time-code" placeholder="ABCD-EFGH" />
+              </label>
+              <div className="form-actions">
+                <button type="submit" className="primary">Approve Device</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid two detail-grid">
         <div className="panel">
           <div className="panel-header">
             <h2>Suppression Queue</h2>

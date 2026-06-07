@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { updateAccountConfig } from "../../lib/api";
+import { approveDeviceCode, updateAccountConfig } from "../../lib/api";
 
 export async function updateAccountConfigAction(formData: FormData) {
   const provider = stringValue(formData.get("provider")) ?? "local";
@@ -20,6 +20,15 @@ export async function updateAccountConfigAction(formData: FormData) {
   });
 
   revalidatePath("/");
+  revalidatePath("/team");
+}
+
+export async function approveDeviceCodeAction(formData: FormData) {
+  const userCode = stringValue(formData.get("user_code"));
+  if (userCode === null) {
+    throw new Error("device code is required");
+  }
+  await approveDeviceCode(userCode.toUpperCase());
   revalidatePath("/team");
 }
 

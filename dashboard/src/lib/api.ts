@@ -153,6 +153,17 @@ export async function updateAccountConfig(patch: AccountConfigPatch): Promise<Ac
   return response.json() as Promise<AccountConfig>;
 }
 
+export async function approveDeviceCode(userCode: string): Promise<{ status: string }> {
+  const response = await fetch(`${apiUrl}/auth/device/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify({ user_code: userCode })
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<{ status: string }>;
+}
+
 export function listRuns(): Promise<Run[]> {
   return get<Run[]>("/runs");
 }
