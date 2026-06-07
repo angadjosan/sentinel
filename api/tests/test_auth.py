@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
@@ -50,6 +52,72 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     assert findings_b.status_code == 200
     assert {finding["vuln_type"] for finding in findings_a.json()} == {"sqli"}
     assert {finding["vuln_type"] for finding in findings_b.json()} == {"cmdi"}
+
+
+def test_authenticated_accounts_cannot_access_other_account_details(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token_a = create_token("owner-a", "detail-account-a", "admin")
+    token_b = create_token("owner-b", "detail-account-b", "admin")
+    with TestClient(app) as client:
+        created = client.post(
+            "/plan",
+            headers={"Authorization": f"Bearer {token_a}"},
+            json={"repo_name": "detail-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        )
+        assert created.status_code == 200
+        finding_id = created.json()["findings"][0]["id"]
+        run_id = created.json()["run"]["id"]
+
+        own_finding = client.get(f"/findings/{finding_id}", headers={"Authorization": f"Bearer {token_a}"})
+        other_finding = client.get(f"/findings/{finding_id}", headers={"Authorization": f"Bearer {token_b}"})
+        other_pull = client.get(f"/findings/{finding_id}/pull", headers={"Authorization": f"Bearer {token_b}"})
+        other_suppress = client.patch(f"/findings/{finding_id}/suppress", headers={"Authorization": f"Bearer {token_b}"}, json={"reason": "nope"})
+        own_run = client.get(f"/runs/{run_id}", headers={"Authorization": f"Bearer {token_a}"})
+        other_run = client.get(f"/runs/{run_id}", headers={"Authorization": f"Bearer {token_b}"})
+        other_trace = client.get(f"/runs/{run_id}/trace", headers={"Authorization": f"Bearer {token_b}"})
+        other_cancel = client.post(f"/runs/{run_id}/cancel", headers={"Authorization": f"Bearer {token_b}"})
+
+    assert own_finding.status_code == 200
+    assert own_run.status_code == 200
+    assert other_finding.status_code == 404
+    assert other_pull.status_code == 404
+    assert other_suppress.status_code == 404
+    assert other_run.status_code == 404
+    assert other_trace.status_code == 404
+    assert other_cancel.status_code == 404
+
+
+def test_authenticated_graph_runs_and_analytics_are_account_scoped(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    suffix = uuid4().hex
+    account_a = f"scope-account-a-{suffix}"
+    account_b = f"scope-account-b-{suffix}"
+    token_a = create_token("scope-a", account_a, "admin")
+    token_b = create_token("scope-b", account_b, "admin")
+    with TestClient(app) as client:
+        scan_a = client.post(
+            "/source",
+            headers={"Authorization": f"Bearer {token_a}"},
+            json={"repo_name": f"scope-repo-a-{suffix}", "diff": "+++ b/services/a/app.js\n+app.get('/a', (req,res)=> db.query(`select ${req.query.id}`))", "run_context": "local"},
+        )
+        scan_b = client.post(
+            "/source",
+            headers={"Authorization": f"Bearer {token_b}"},
+            json={"repo_name": f"scope-repo-b-{suffix}", "diff": "+++ b/services/b/app.js\n+app.get('/b', (req,res)=> exec(`run ${req.query.id}`))", "run_context": "local"},
+        )
+        assert scan_a.status_code == 200
+        assert scan_b.status_code == 200
+
+        runs_a = client.get("/runs", headers={"Authorization": f"Bearer {token_a}"})
+        graph_a = client.get("/graph", headers={"Authorization": f"Bearer {token_a}"})
+        trends_a = client.get("/analytics/finding-trends", headers={"Authorization": f"Bearer {token_a}"})
+        fp_a = client.get("/analytics/false-positive-rate", headers={"Authorization": f"Bearer {token_a}"})
+
+    assert {run["id"] for run in runs_a.json()} == {scan_a.json()["run"]["id"]}
+    assert any((node.get("file") or "") == "services/a/app.js" for node in graph_a.json()["nodes"])
+    assert all((node.get("file") or "") != "services/b/app.js" for node in graph_a.json()["nodes"])
+    assert {row["severity"] for row in trends_a.json()} == {"high"}
+    assert fp_a.json()["total"] == 1
 
 
 def test_monthly_token_budget_blocks_new_runs(monkeypatch):

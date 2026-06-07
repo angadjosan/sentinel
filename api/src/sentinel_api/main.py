@@ -321,7 +321,7 @@ async def findings(repo_name: str | None = None, db: AsyncSession = Depends(get_
 
 @app.get("/findings/{finding_id}", response_model=FindingResponse)
 async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     return finding_response(finding)
@@ -329,7 +329,7 @@ async def finding_detail(finding_id: str, db: AsyncSession = Depends(get_db), pr
 
 @app.get("/findings/{finding_id}/audit", response_model=list[SuppressionAuditResponse])
 async def finding_audit(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[SuppressionAuditResponse]:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     rows = await db.scalars(select(SuppressionAudit).where(SuppressionAudit.finding_id == finding_id).order_by(SuppressionAudit.created_at.desc()))
@@ -348,7 +348,7 @@ async def finding_audit(finding_id: str, db: AsyncSession = Depends(get_db), pri
 
 @app.get("/findings/{finding_id}/pull")
 async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, object]:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     node = await db.get(Node, finding.node_id) if finding.node_id else None
@@ -365,7 +365,7 @@ async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), prin
 
 @app.patch("/findings/{finding_id}/suppress", response_model=FindingResponse)
 async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     if principal.role == "readonly":
@@ -389,7 +389,7 @@ async def suppress(finding_id: str, payload: SuppressRequest, db: AsyncSession =
 
 @app.post("/findings/{finding_id}/unsuppress", response_model=FindingResponse)
 async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     actor = await _actor_from_principal(db, principal)
@@ -402,7 +402,7 @@ async def unsuppress(finding_id: str, payload: SuppressRequest, db: AsyncSession
 
 @app.post("/findings/{finding_id}/suppress/approve", response_model=FindingResponse)
 async def approve_suppression(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> FindingResponse:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     actor = await _actor_from_principal(db, principal)
@@ -415,7 +415,7 @@ async def approve_suppression(finding_id: str, payload: SuppressRequest, db: Asy
 
 @app.post("/findings/{finding_id}/suppress/reject", response_model=FindingResponse)
 async def reject_suppression(finding_id: str, payload: SuppressRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> FindingResponse:
-    finding = await db.get(Finding, finding_id)
+    finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     actor = await _actor_from_principal(db, principal)
@@ -427,7 +427,7 @@ async def reject_suppression(finding_id: str, payload: SuppressRequest, db: Asyn
 
 @app.post("/pentest", response_model=FindingResponse)
 async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    finding = await db.get(Finding, payload.finding_id) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal)
+    finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
     result = await run_pentest(
@@ -447,13 +447,16 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
 
 @app.get("/runs", response_model=list[RunResponse])
 async def runs(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[RunResponse]:
-    rows = await db.scalars(select(Run).order_by(Run.created_at.desc()))
+    stmt = select(Run).order_by(Run.created_at.desc())
+    if principal.account_id != "dev":
+        stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    rows = await db.scalars(stmt)
     return [run_response(row) for row in rows]
 
 
 @app.get("/runs/{run_id}", response_model=RunResponse)
 async def run_detail(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    run = await db.get(Run, run_id)
+    run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run_response(run)
@@ -461,7 +464,7 @@ async def run_detail(run_id: str, db: AsyncSession = Depends(get_db), principal:
 
 @app.get("/runs/{run_id}/trace")
 async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> PlainTextResponse:
-    run = await db.get(Run, run_id)
+    run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     db.add(TraceAccessLog(run_id=run.id, actor_id=principal.user_id))
@@ -470,6 +473,10 @@ async def run_trace(run_id: str, db: AsyncSession = Depends(get_db), principal: 
 
 @app.get("/runs/{run_id}/events")
 async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
+    run = await _run_for_principal(db, run_id, principal)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
     async def events():
         async for event in stream_run_events(db, run_id):
             yield event
@@ -479,13 +486,9 @@ async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal:
 
 @app.post("/runs/{run_id}/cancel", response_model=RunResponse)
 async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    run = await db.get(Run, run_id)
+    run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
-    if principal.account_id != "dev":
-        graph = await db.get(Graph, run.graph_id)
-        if graph is None or graph.account_id != principal.account_id:
-            raise HTTPException(status_code=403, detail="cannot cancel run from another account")
     try:
         run = await cancel_run_tasks(db, run_id=run_id)
     except ValueError as exc:
@@ -495,8 +498,14 @@ async def cancel_run(run_id: str, db: AsyncSession = Depends(get_db), principal:
 
 @app.get("/graph", response_model=GraphResponse)
 async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal), limit: int = 250) -> GraphResponse:
-    nodes = list(await db.scalars(select(Node).limit(limit)))
-    edges = list(await db.scalars(select(Edge).limit(limit)))
+    node_stmt = select(Node).limit(limit)
+    edge_stmt = select(Edge).limit(limit)
+    if principal.account_id != "dev":
+        graph_ids = select(Graph.id).where(Graph.account_id == principal.account_id)
+        node_stmt = node_stmt.where(Node.graph_id.in_(graph_ids))
+        edge_stmt = edge_stmt.where(Edge.graph_id.in_(graph_ids))
+    nodes = list(await db.scalars(node_stmt))
+    edges = list(await db.scalars(edge_stmt))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
 
 
@@ -529,13 +538,18 @@ async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = De
 
 @app.get("/analytics/token-spend")
 async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, int | str]]:
-    rows = await db.execute(
+    spend_stmt = (
         select(
             TokenSpendByComponent.component,
             func.sum(TokenSpendByComponent.input_tokens),
             func.sum(TokenSpendByComponent.output_tokens),
-        ).group_by(TokenSpendByComponent.component)
+        )
+        .join(Run, TokenSpendByComponent.run_id == Run.id)
+        .group_by(TokenSpendByComponent.component)
     )
+    if principal.account_id != "dev":
+        spend_stmt = spend_stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    rows = await db.execute(spend_stmt)
     result = [
         {
             "component": component,
@@ -547,13 +561,16 @@ async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal =
     ]
     if result:
         return result
-    total = await db.scalar(select(func.sum(Run.token_spend))) or 0
+    total_stmt = select(func.sum(Run.token_spend))
+    if principal.account_id != "dev":
+        total_stmt = total_stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    total = await db.scalar(total_stmt) or 0
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
 
 
 @app.get("/analytics/finding-trends")
 async def finding_trends(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, int | str]]:
-    rows = await db.execute(
+    stmt = (
         select(
             func.date(Finding.created_at),
             Finding.severity,
@@ -562,12 +579,18 @@ async def finding_trends(db: AsyncSession = Depends(get_db), principal: Principa
         .group_by(func.date(Finding.created_at), Finding.severity)
         .order_by(func.date(Finding.created_at))
     )
+    if principal.account_id != "dev":
+        stmt = stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    rows = await db.execute(stmt)
     return [{"date": str(day), "severity": severity, "count": int(count)} for day, severity, count in rows]
 
 
 @app.get("/analytics/scan-latency")
 async def scan_latency(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, float | str]]:
-    rows = await db.scalars(select(Run).where(Run.completed_at.is_not(None)))
+    stmt = select(Run).where(Run.completed_at.is_not(None))
+    if principal.account_id != "dev":
+        stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    rows = await db.scalars(stmt)
     buckets: dict[str, list[float]] = {}
     for run in rows:
         if run.completed_at is None:
@@ -586,20 +609,32 @@ async def scan_latency(db: AsyncSession = Depends(get_db), principal: Principal 
 
 @app.get("/analytics/false-positive-rate")
 async def false_positive_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
-    total = await db.scalar(select(func.count(Finding.id))) or 0
-    suppressed = await db.scalar(select(func.count(Finding.id)).where(Finding.suppressed.is_(True))) or 0
+    total_stmt = select(func.count(Finding.id))
+    suppressed_stmt = select(func.count(Finding.id)).where(Finding.suppressed.is_(True))
+    if principal.account_id != "dev":
+        total_stmt = total_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+        suppressed_stmt = suppressed_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    total = await db.scalar(total_stmt) or 0
+    suppressed = await db.scalar(suppressed_stmt) or 0
     return {"total": int(total), "suppressed": int(suppressed), "rate": (float(suppressed) / float(total)) if total else 0.0}
 
 
 @app.get("/analytics/confirmation-rate")
 async def confirmation_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
-    total = await db.scalar(select(func.count(Finding.id))) or 0
-    confirmed = await db.scalar(select(func.count(Finding.id)).where(Finding.confirmed.is_(True))) or 0
+    total_stmt = select(func.count(Finding.id))
+    confirmed_stmt = select(func.count(Finding.id)).where(Finding.confirmed.is_(True))
+    if principal.account_id != "dev":
+        total_stmt = total_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+        confirmed_stmt = confirmed_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    total = await db.scalar(total_stmt) or 0
+    confirmed = await db.scalar(confirmed_stmt) or 0
     return {"total": int(total), "confirmed": int(confirmed), "rate": (float(confirmed) / float(total)) if total else 0.0}
 
 
 @app.put("/admin/accounts/{account_id}/token-budget")
 async def set_token_budget(account_id: str, payload: TokenBudgetRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str | None]:
+    if principal.account_id != "dev" and account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot update another account")
     account = await db.get(Account, account_id)
     if account is None:
         account = Account(id=account_id, name=account_id)
@@ -656,6 +691,22 @@ async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Pr
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
     return findings[0] if findings else None
+
+
+async def _finding_for_principal(db: AsyncSession, finding_id: str | None, principal: Principal) -> Finding | None:
+    if finding_id is None:
+        return None
+    stmt = select(Finding).where(Finding.id == finding_id)
+    if principal.account_id != "dev":
+        stmt = stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    return await db.scalar(stmt)
+
+
+async def _run_for_principal(db: AsyncSession, run_id: str, principal: Principal) -> Run | None:
+    stmt = select(Run).where(Run.id == run_id)
+    if principal.account_id != "dev":
+        stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
+    return await db.scalar(stmt)
 
 
 def _pentest_executor(payload: PentestRequest) -> SandboxExecutor | None:
