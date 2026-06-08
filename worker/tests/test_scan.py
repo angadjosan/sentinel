@@ -47,11 +47,15 @@ def _finding_llm(vuln_type="sqli", severity="high", node_id="fn:app.js:query"):
 
 @pytest.mark.asyncio
 async def test_scan_diff_raises_when_no_llm_configured():
-    """scan_diff must raise LLMNotConfiguredError — no silent fallback."""
+    """Cloud provider without api_key → LLMNotConfiguredError, no silent fallback."""
+    from sentinel_worker.models import Account
     engine = _make_engine()
     sm = await _db_session(engine)
     async with sm() as session:
         async with session.begin():
+            # Pre-create the dev account with a cloud provider but no api_key.
+            session.add(Account(name="dev", provider="anthropic", model="claude-3-opus"))
+            await session.flush()
             with pytest.raises(LLMNotConfiguredError):
                 await scan_diff(session, "repo", "+++ b/app.js\n+db.query(`select * from t where id=${req.id}`)")
 
@@ -210,10 +214,14 @@ async def test_scan_trace_records_diff_scope_metadata():
 
 @pytest.mark.asyncio
 async def test_review_plan_raises_when_no_llm_configured():
+    """Cloud provider without api_key → LLMNotConfiguredError."""
+    from sentinel_worker.models import Account
     engine = _make_engine()
     sm = await _db_session(engine)
     async with sm() as session:
         async with session.begin():
+            session.add(Account(name="dev", provider="anthropic", model="claude-3-opus"))
+            await session.flush()
             with pytest.raises(LLMNotConfiguredError):
                 await review_plan(session, "repo", "Add endpoint that runs exec(req.query.cmd)")
 

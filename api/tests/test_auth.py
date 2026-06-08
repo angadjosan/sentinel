@@ -217,3 +217,25 @@ def test_device_auth_approval_requires_admin(monkeypatch):
             json={"user_code": started.json()["user_code"]},
         )
     assert response.status_code == 403
+
+
+def test_device_auth_token_auto_approves_in_dev_mode(monkeypatch):
+    """With SENTINEL_DEV_MODE=1, polling /auth/device/token immediately returns a token."""
+    monkeypatch.setenv("SENTINEL_DEV_MODE", "1")
+    with TestClient(app) as client:
+        started = client.post("/auth/device")
+        assert started.status_code == 200
+        token = client.get(f"/auth/device/token?device_code={started.json()['device_code']}")
+    assert token.status_code == 200
+    body = token.json()
+    assert body["access_token"]
+    assert body["account_id"]
+    assert body["user_id"]
+
+
+def test_device_auth_token_stays_pending_without_dev_mode():
+    """Without SENTINEL_DEV_MODE, polling before approval returns 202."""
+    with TestClient(app) as client:
+        started = client.post("/auth/device")
+        pending = client.get(f"/auth/device/token?device_code={started.json()['device_code']}")
+    assert pending.status_code == 202

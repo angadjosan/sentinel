@@ -29,9 +29,9 @@ auth
       throw new Error("poll interval must be a number of seconds");
     }
 
-    console.log(`Open ${verificationUrl}`);
-    console.log(`Enter code: ${started.user_code}`);
-    console.log(`Waiting for approval; code expires in ${Math.floor(started.expires_in / 60)} minute(s).`);
+    console.log(`Verification URL: ${verificationUrl}`);
+    console.log(`User code:        ${started.user_code}`);
+    console.log(`Polling for approval (dev mode auto-approves)...`);
 
     const deadline = Date.now() + started.expires_in * 1000;
     while (Date.now() < deadline) {

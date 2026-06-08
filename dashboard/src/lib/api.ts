@@ -76,6 +76,8 @@ export type GraphNode = {
   is_sink: boolean;
   label: string | null;
   intent: string | null;
+  trust_level: string | null;
+  is_new: boolean;
 };
 
 export type GraphEdge = {

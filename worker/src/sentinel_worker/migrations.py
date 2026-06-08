@@ -21,7 +21,7 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                   version TEXT PRIMARY KEY,
-                  applied_at TIMESTAMP NOT NULL
+                  applied_at TIMESTAMPTZ NOT NULL
                 )
                 """
             )
@@ -44,7 +44,7 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
             return []
         await conn.execute(
             text("INSERT INTO schema_migrations (version, applied_at) VALUES (:version, :applied_at)"),
-            {"version": CURRENT_SCHEMA_VERSION, "applied_at": datetime.now(UTC).isoformat()},
+            {"version": CURRENT_SCHEMA_VERSION, "applied_at": datetime.now(UTC)},
         )
         return [CURRENT_SCHEMA_VERSION]
 
@@ -56,7 +56,7 @@ async def applied_migrations(engine: AsyncEngine) -> list[str]:
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                   version TEXT PRIMARY KEY,
-                  applied_at TIMESTAMP NOT NULL
+                  applied_at TIMESTAMPTZ NOT NULL
                 )
                 """
             )

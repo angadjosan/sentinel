@@ -71,13 +71,17 @@ async def test_runner_executes_source_task_into_queued_run():
 
 @pytest.mark.asyncio
 async def test_runner_marks_task_failed_when_no_llm_configured():
-    """Without an LLM configured, the runner catches LLMNotConfiguredError and fails the task."""
+    """Cloud provider without api_key → runner catches LLMNotConfiguredError and fails the task."""
+    from sentinel_worker.models import Account
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:
         async with session.begin():
+            # Pre-create a dev account with a cloud provider but no api_key.
+            session.add(Account(name="dev", provider="anthropic", model="claude-3-opus"))
+            await session.flush()
             task = await enqueue_task(
                 session,
                 repo_name="repo",

@@ -117,7 +117,7 @@ class IncrementalSyntaxIndex:
             if ts_parser is not None:
                 source_bytes = source.content.encode()
                 previous_tree = self._trees.get(source.path)
-                tree = ts_parser.parse(source_bytes, previous_tree)
+                tree = ts_parser.parse(source_bytes, previous_tree) if previous_tree is not None else ts_parser.parse(source_bytes)
                 self._trees[source.path] = tree
                 root = tree.root_node
                 return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))
@@ -127,7 +127,7 @@ class IncrementalSyntaxIndex:
             return ParsedSource(parse_error=_has_obvious_parse_error(source.content), functions=[])
         source_bytes = source.content.encode()
         previous_tree = self._trees.get(source.path)
-        tree = parser.parse(source_bytes, previous_tree)
+        tree = parser.parse(source_bytes, previous_tree) if previous_tree is not None else parser.parse(source_bytes)
         self._trees[source.path] = tree
         root = tree.root_node
         return ParsedSource(parse_error=bool(root.has_error), functions=_tree_sitter_functions(source.content, root, language))

@@ -226,6 +226,22 @@ async def start_device_auth(db: AsyncSession = Depends(get_db)) -> DeviceStartRe
     )
 
 
+@app.get("/auth/device/verify")
+async def device_verify_page(db: AsyncSession = Depends(get_db)) -> PlainTextResponse:
+    import os as _os
+    if _os.getenv("SENTINEL_DEV_MODE") == "1":
+        return PlainTextResponse(
+            "Dev mode: device codes are auto-approved.\n"
+            "Return to your terminal — the CLI has already received its token.",
+            media_type="text/plain",
+        )
+    return PlainTextResponse(
+        "To approve a device: POST /auth/device/approve with {\"user_code\": \"XXXX-XXXX\"} "
+        "and a valid admin Bearer token.",
+        media_type="text/plain",
+    )
+
+
 @app.post("/auth/device/approve", response_model=dict[str, str])
 async def approve_device_auth(payload: DeviceApproveRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, str]:
     session = await db.scalar(select(DeviceAuthSession).where(DeviceAuthSession.user_code == payload.user_code))
@@ -245,12 +261,21 @@ async def approve_device_auth(payload: DeviceApproveRequest, db: AsyncSession = 
 
 @app.get("/auth/device/token", response_model=DeviceTokenResponse)
 async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)) -> DeviceTokenResponse:
+    import os as _os
     session = await db.get(DeviceAuthSession, device_code)
     if session is None:
         raise HTTPException(status_code=404, detail="device code not found")
     if _as_utc(session.expires_at) < datetime.now(UTC):
         session.status = "expired"
         raise HTTPException(status_code=410, detail="device code expired")
+    # Dev mode: auto-approve so `sentinel auth login` works without a browser step.
+    if session.status != "approved" and _os.getenv("SENTINEL_DEV_MODE") == "1":
+        dev_user = await _dev_actor(db)
+        session.status = "approved"
+        session.account_id = dev_user.account_id
+        session.user_id = dev_user.id
+        session.role = "admin"
+        session.approved_at = now()
     if session.status != "approved" or not session.account_id or not session.user_id:
         raise HTTPException(status_code=202, detail="authorization pending")
     token = create_token(session.user_id, session.account_id, session.role or "admin")
@@ -295,6 +320,7 @@ async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), pr
 
 @app.post("/source", response_model=SourceResponse)
 async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
+    from sentinel_worker.sast import LLMNotConfiguredError
     await _check_token_budget(db, principal)
     ACTIVE_RUNS.inc()
     start = datetime.now(UTC)
@@ -307,6 +333,8 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
         RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
         SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
         return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         ACTIVE_RUNS.dec()
 
@@ -373,8 +401,12 @@ async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db),
 
 @app.post("/plan", response_model=SourceResponse)
 async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
+    from sentinel_worker.sast import LLMNotConfiguredError
     await _check_token_budget(db, principal)
-    run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
+    try:
+        run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
         FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()

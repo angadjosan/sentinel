@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import type { SentinelConfig } from "../config/sentinel.config.js";
 
 const SERVICE = "sentinel";
@@ -11,25 +14,76 @@ function accountName(config: SentinelConfig): string {
   return `${config.apiUrl}:${config.repoName}`;
 }
 
-async function loadKeytar(): Promise<KeytarModule> {
+// ── File-based fallback ───────────────────────────────────────────────────────
+// Used when the system keychain (keytar) is unavailable or its native bindings
+// are not functional. Tokens are stored in ~/.sentinel/keychain.json (mode 600).
+
+function fallbackPath(): string {
+  return join(homedir(), ".sentinel", "keychain.json");
+}
+
+function readFallback(): Record<string, string> {
   try {
-    return await import("keytar");
-  } catch (error) {
-    throw new Error("keytar is not installed or the system keychain is unavailable.");
+    return JSON.parse(readFileSync(fallbackPath(), "utf8")) as Record<string, string>;
+  } catch {
+    return {};
   }
 }
+
+function writeFallback(data: Record<string, string>): void {
+  const dir = join(homedir(), ".sentinel");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(fallbackPath(), JSON.stringify(data), { mode: 0o600 });
+}
+
+function fallbackKey(service: string, account: string): string {
+  return `${service}:${account}`;
+}
+
+// ── Keytar loader ─────────────────────────────────────────────────────────────
+
+async function loadKeytar(): Promise<KeytarModule | null> {
+  try {
+    const mod = await import("keytar") as KeytarModule;
+    // Verify native bindings are actually functional before trusting the module.
+    if (typeof mod.setPassword !== "function" || typeof mod.getPassword !== "function") {
+      return null;
+    }
+    return mod;
+  } catch {
+    return null;
+  }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 export async function readApiKey(config: SentinelConfig): Promise<string | undefined> {
   if (process.env.SENTINEL_API_TOKEN) return process.env.SENTINEL_API_TOKEN;
+  const key = accountName(config);
   try {
     const keytar = await loadKeytar();
-    return (await keytar.getPassword(SERVICE, accountName(config))) ?? undefined;
+    if (keytar) {
+      const value = await keytar.getPassword(SERVICE, key);
+      if (value) return value;
+    }
   } catch {
-    return undefined;
+    // fall through to file fallback
   }
+  return readFallback()[fallbackKey(SERVICE, key)] ?? undefined;
 }
 
 export async function writeApiKey(config: SentinelConfig, apiKey: string): Promise<void> {
-  const keytar = await loadKeytar();
-  await keytar.setPassword(SERVICE, accountName(config), apiKey);
+  const key = accountName(config);
+  try {
+    const keytar = await loadKeytar();
+    if (keytar) {
+      await keytar.setPassword(SERVICE, key, apiKey);
+      return;
+    }
+  } catch {
+    // fall through to file fallback
+  }
+  const data = readFallback();
+  data[fallbackKey(SERVICE, key)] = apiKey;
+  writeFallback(data);
 }
