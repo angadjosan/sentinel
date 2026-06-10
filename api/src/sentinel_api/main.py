@@ -300,6 +300,8 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
         account.provider = payload.provider
     if "model" in fields and payload.model is not None:
         account.model = payload.model
+    if "api_key" in fields and payload.api_key is not None:
+        account.api_key = payload.api_key
     if "api_endpoint" in fields:
         account.api_endpoint = payload.api_endpoint
     if "suppression_approval_required" in fields and payload.suppression_approval_required is not None:
@@ -313,7 +315,11 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
 
 @app.post("/init", response_model=RunResponse)
 async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
+    from sentinel_worker.sast import LLMNotConfiguredError
+    try:
+        run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
+    except (LLMNotConfiguredError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     return await run_response(db, run)
 
@@ -333,7 +339,7 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
         RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
         SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
         return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
-    except LLMNotConfiguredError as exc:
+    except (LLMNotConfiguredError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         ACTIVE_RUNS.dec()
@@ -405,7 +411,7 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
     await _check_token_budget(db, principal)
     try:
         run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
-    except LLMNotConfiguredError as exc:
+    except (LLMNotConfiguredError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:

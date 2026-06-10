@@ -178,6 +178,13 @@ export class SentinelApiClient {
     });
   }
 
+  patchConfig(patch: { provider?: string; model?: string; api_key?: string; api_endpoint?: string | null }) {
+    return this.request<{ account_id: string; provider: string; model: string }>("/config", {
+      method: "PATCH",
+      body: JSON.stringify(patch)
+    });
+  }
+
   runs() {
     return this.request<Run[]>("/runs");
   }

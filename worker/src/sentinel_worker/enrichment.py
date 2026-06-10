@@ -45,7 +45,9 @@ async def enrich_graph_nodes(
     if not nodes:
         return 0
 
-    client = llm or SentinelLLMClient()
+    if llm is None:
+        raise ValueError("llm is required for graph enrichment; configure a provider via `sentinel config set provider`")
+    client = llm
     applied = 0
     for index, cluster in enumerate(_clusters(nodes, cluster_size), start=1):
         payload = await _cluster_payload(db, graph_id, cluster, source_by_file or {})
@@ -183,7 +185,9 @@ async def validate_enrichment_labels(
         "If the label is wrong, correct it to accurately reflect the node's role."
     )
 
-    client = llm or SentinelLLMClient()
+    if llm is None:
+        raise ValueError("llm is required for graph enrichment; configure a provider via `sentinel config set provider`")
+    client = llm
     applied = 0
     for cluster in _clusters(to_reenrich, 15):
         payload = await _cluster_payload(db, graph_id, cluster, source_by_file or {})

@@ -43,6 +43,7 @@ services:
       dockerfile: dashboard/Dockerfile
     environment:
       NEXT_PUBLIC_SENTINEL_API_URL: http://localhost:8000
+      SENTINEL_API_INTERNAL_URL: http://api:8000
     ports:
       - "3000:3000"
     depends_on:
