@@ -109,9 +109,9 @@ async def get_llm_for_graph(graph_id: str, db: AsyncSession) -> SentinelLLMClien
             "Run `sentinel config set provider <anthropic|openai|local>` and `sentinel config set model <name>`."
         )
     api_key = getattr(account, "api_key", None)
-    if not api_key:
+    if not api_key and account.provider != "local":
         raise LLMNotConfiguredError(
             f"Account for graph {graph_id!r} has no API key. "
             "Run `sentinel config set api-key <key>`."
         )
-    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key)
+    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key or "")

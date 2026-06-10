@@ -29,9 +29,9 @@ auth
       throw new Error("poll interval must be a number of seconds");
     }
 
-    console.log(`Open ${verificationUrl}`);
-    console.log(`Enter code: ${started.user_code}`);
-    console.log(`Waiting for approval; code expires in ${Math.floor(started.expires_in / 60)} minute(s).`);
+    console.log(`Verification URL: ${verificationUrl}`);
+    console.log(`User code:        ${started.user_code}`);
+    console.log(`Polling for approval (dev mode auto-approves)...`);
 
     const deadline = Date.now() + started.expires_in * 1000;
     while (Date.now() < deadline) {
@@ -294,12 +294,18 @@ config
   .action(async (key: string, value: string) => {
     const root = findRepoRoot();
     const current = loadConfig(root) as Record<string, unknown>;
+    const client = new SentinelApiClient();
+
     if (key === "api-key") {
-      await writeApiKey(ConfigSchema.parse(current), value);
-      console.log("stored api-key in system keychain");
+      // Push the LLM provider API key to the server so the worker can use it.
+      await client.patchConfig({ api_key: value });
+      console.log("api-key stored on server");
       return;
     }
+
+    const serverSyncKeys = new Set(["provider", "model", "api_endpoint"]);
     const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck", "api_endpoint", "repo_id"]);
+
     if (key.startsWith("firecracker.")) {
       setFirecrackerConfigValue(current, key.slice("firecracker.".length), value);
       writeConfig(ConfigSchema.parse(current), root);
@@ -311,7 +317,15 @@ config
     }
     current[key] = value;
     writeConfig(ConfigSchema.parse(current), root);
-    console.log(`set ${key}`);
+
+    if (serverSyncKeys.has(key)) {
+      const patch: Record<string, string | null> = {};
+      patch[key] = value;
+      await client.patchConfig(patch as { provider?: string; model?: string; api_endpoint?: string | null });
+      console.log(`set ${key} (local + server)`);
+    } else {
+      console.log(`set ${key}`);
+    }
   });
 
 program.parseAsync().catch((error) => {

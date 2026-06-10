@@ -1,19 +1,20 @@
 from fastapi.testclient import TestClient
 from uuid import uuid4
 
-from sentinel_api.deps import SessionLocal
+import sentinel_api.deps as deps
 from sentinel_api.main import app
 from sentinel_worker.models import Edge, Graph, Node
 
 
 def test_admin_graph_merge_endpoint():
-    import anyio
+    import asyncio
     suffix = uuid4().hex
     route_id = f"route:merge-api-{suffix}:GET /x"
     sink_id = f"fn:merge-api-{suffix}:sink"
 
     async def seed():
-        async with SessionLocal() as session:
+        # Use deps.SessionLocal at call time so the _isolated_db monkeypatch applies.
+        async with deps.SessionLocal() as session:
             async with session.begin():
                 main = Graph(account_id="dev", repo_id="repo-admin-merge", kind="main")
                 branch = Graph(account_id="dev", repo_id="repo-admin-merge", kind="branch", branch_name="feature")
@@ -29,7 +30,10 @@ def test_admin_graph_merge_endpoint():
                 session.add(Edge(graph_id=branch.id, src=route_id, dst=sink_id, kind="CALLS"))
                 return branch.id, main.id
 
-    branch_id, main_id = anyio.run(seed)
+    loop = asyncio.new_event_loop()
+    branch_id, main_id = loop.run_until_complete(seed())
+    loop.close()
+
     with TestClient(app) as client:
         response = client.post("/admin/graphs/merge", json={"branch_graph_id": branch_id, "main_graph_id": main_id})
     assert response.status_code == 200

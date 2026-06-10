@@ -50,7 +50,7 @@ This starts:
 
 | Service | Port | Description |
 |---|---|---|
-| `postgres` | 5432 | Graph and findings database |
+| `postgres` | 5433 | Graph and findings database |
 | `api` | 8000 | REST API + auth |
 | `worker` | — | Background scan/pentest job processor |
 | `dashboard` | 3000 | Web UI |

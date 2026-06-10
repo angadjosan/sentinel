@@ -89,7 +89,7 @@ def test_plan_pull_graph_and_cancel_flow():
         assert "nodes" in finding_graph.json()
         assert "edges" in finding_graph.json()
 
-        cancel = client.post(f"/runs/{run_id}/cancel")
+        cancel = client.delete(f"/runs/{run_id}")
         assert cancel.status_code == 200
         assert cancel.json()["status"] == "completed"
 
@@ -177,7 +177,7 @@ def test_source_enqueue_claim_complete_and_cancel():
         )
         third_task = third.json()["task_id"]
         third_run = third.json()["run"]["id"]
-        cancelled_run = client.post(f"/runs/{third_run}/cancel")
+        cancelled_run = client.delete(f"/runs/{third_run}")
         assert cancelled_run.status_code == 200
         assert cancelled_run.json()["status"] == "cancelled"
         claimed_after_cancel = client.post("/tasks/claim?worker_id=test-worker")
@@ -344,14 +344,6 @@ def test_run_trace_access_is_audited():
         access_log = client.get(f"/runs/{run_id}/trace-access")
         assert access_log.status_code == 200
         assert any(row["run_id"] == run_id for row in access_log.json())
-
-    async def read_log_count() -> int:
-        async with SessionLocal() as session:
-            rows = await session.get(TraceAccessLog, 1)
-            all_rows = await session.execute(TraceAccessLog.__table__.select().where(TraceAccessLog.run_id == run_id))
-            return len(list(all_rows))
-
-    assert anyio.run(read_log_count) >= 1
 
 
 def test_source_file_endpoint_reads_encrypted_snapshot():

@@ -64,7 +64,15 @@ async def create_repo(
     db: AsyncSession = Depends(get_db),
     principal: Principal = Depends(current_principal),
 ) -> RepoResponse:
-    account_id = _graph_account_id(principal) or "dev"
+    from sentinel_worker.models import Account
+    account_id = _graph_account_id(principal)
+    if account_id is None:
+        account = await db.scalar(select(Account).where(Account.name == "dev"))
+        if account is None:
+            account = Account(name="dev")
+            db.add(account)
+            await db.flush()
+        account_id = account.id
     repo = Repo(name=payload.name, account_id=account_id, remote_url=payload.remote_url)
     db.add(repo)
     await db.flush()

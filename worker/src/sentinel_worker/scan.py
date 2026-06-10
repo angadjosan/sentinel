@@ -93,7 +93,9 @@ async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: st
     return graph
 
 
-async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str], *, account_id: str | None = None) -> Run:
+async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str], *, account_id: str | None = None, _llm=None) -> Run:
+    from .sast import get_llm_for_graph, LLMNotConfiguredError
+    from .enrichment import validate_enrichment_labels
     graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="init", status="running")
     db.add(run)
@@ -105,9 +107,11 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
         sources.append(SourceFile(path=path, content=content, is_new=False))
     await build_source_graph(db, graph.id, sources)
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False)
-    from .enrichment import validate_enrichment_labels
-    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files)
+    llm = _llm
+    if llm is None:
+        llm = await get_llm_for_graph(graph.id, db)
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
+    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -236,7 +240,7 @@ async def execute_source_scan(
     findings += len(sast_findings)
     log.info("scan.sast.completed", run_id=run.id, sast_finding_count=len(sast_findings))
 
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True)
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
     from .enrichment import validate_enrichment_labels
     await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
     await enforce_source_retention_for_account(db, graph.account_id)

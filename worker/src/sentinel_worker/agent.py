@@ -138,13 +138,8 @@ class SentinelLLMClient:
         return None
 
     def _is_mock_mode(self) -> bool:
-        """Return True when no real provider is configured (default/test mode)."""
-        return (
-            self._legacy_provider is None
-            and self.provider_name == "local"
-            and not self.api_key
-            and self.api_endpoint is None
-        )
+        """Return True only when provider is explicitly 'mock' (test fixtures)."""
+        return self._legacy_provider is None and self.provider_name == "mock"
 
     async def call(
         self,
@@ -332,22 +327,30 @@ class SentinelLLMClient:
                     model=self.model,
                     provider="local",
                 )
-            except Exception:
-                # Fall back to JSON-mode if tool calling not supported
-                payload.pop("tools", None)
-                resp = await http.post(url, json=payload, timeout=120)
-                resp.raise_for_status()
-                data = resp.json()
-                msg = data.get("message", {})
-                content = msg.get("content", "")
-                usage = data.get("usage", {}) or {}
-                return LLMCallResult(
-                    content=content,
-                    input_tokens=usage.get("prompt_tokens", 0),
-                    output_tokens=usage.get("completion_tokens", 0),
-                    model=self.model,
-                    provider="local",
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                raise RuntimeError(
+                    f"Cannot connect to Ollama at {endpoint}. "
+                    "Either start Ollama or configure a cloud provider: "
+                    "`sentinel config set provider anthropic` then `sentinel config set api-key <key>`"
                 )
+            except httpx.HTTPStatusError as exc:
+                # Fall back to non-tool JSON-mode if the model doesn't support tool calling
+                if tools and exc.response.status_code in (400, 422):
+                    payload.pop("tools", None)
+                    resp = await http.post(url, json=payload, timeout=120)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    msg = data.get("message", {})
+                    content = msg.get("content", "")
+                    usage = data.get("usage", {}) or {}
+                    return LLMCallResult(
+                        content=content,
+                        input_tokens=usage.get("prompt_tokens", 0),
+                        output_tokens=usage.get("completion_tokens", 0),
+                        model=self.model,
+                        provider="local",
+                    )
+                raise
 
     async def call_with_tools(
         self,
@@ -590,6 +593,12 @@ class SentinelLLMClient:
                     resp = await http.post(url, json=payload, timeout=120)
                     resp.raise_for_status()
                     data = resp.json()
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    raise RuntimeError(
+                        f"Cannot connect to Ollama at {endpoint}. "
+                        "Either start Ollama or configure a cloud provider: "
+                        "`sentinel config set provider anthropic` then `sentinel config set api-key <key>`"
+                    )
                 except Exception:
                     break
 

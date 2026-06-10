@@ -171,6 +171,7 @@ class AccountConfigResponse(BaseModel):
 class AccountConfigPatch(BaseModel):
     provider: str | None = None
     model: str | None = None
+    api_key: str | None = None
     api_endpoint: str | None = None
     suppression_approval_required: bool | None = None
     monthly_token_budget: int | None = Field(default=None, ge=0)

@@ -65,7 +65,8 @@ async def test_sast_with_no_llm_configured_raises(db):
     from sentinel_worker.sast import run_sast, LLMNotConfiguredError
     from sentinel_worker.models import Graph, Repo, Account
 
-    account = Account(name="test2")
+    # provider="anthropic" requires an api_key; none set → must raise
+    account = Account(name="test2", provider="anthropic", model="claude-3-opus")
     db.add(account)
     await db.flush()
     repo = Repo(account_id=account.id, name="test2")
@@ -75,7 +76,6 @@ async def test_sast_with_no_llm_configured_raises(db):
     db.add(graph_obj)
     await db.flush()
 
-    # No LLM configured + llm=None → get_llm_for_graph raises
     with pytest.raises(LLMNotConfiguredError):
         await run_sast(
             diff="+++ b/app.py\n+print('hello')",

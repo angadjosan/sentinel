@@ -38,7 +38,7 @@ def test_channel_separation_raises_on_request_get():
 
 @pytest.mark.asyncio
 async def test_llm_client_rejects_repo_content_in_system_prompt():
-    client = SentinelLLMClient()
+    client = SentinelLLMClient(provider="mock")
     with pytest.raises(ChannelViolationError):
         await client.call(system="Scan this db.query(req.query.id)", data="", component="sast")
 

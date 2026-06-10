@@ -76,6 +76,8 @@ export type GraphNode = {
   is_sink: boolean;
   label: string | null;
   intent: string | null;
+  trust_level: string | null;
+  is_new: boolean;
 };
 
 export type GraphEdge = {
@@ -107,13 +109,14 @@ export type AccountConfig = {
 export type AccountConfigPatch = {
   provider?: string;
   model?: string;
+  api_key?: string;
   api_endpoint?: string | null;
   suppression_approval_required?: boolean;
   monthly_token_budget?: number | null;
   source_retention_days?: number;
 };
 
-const apiUrl = process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
+const apiUrl = process.env.SENTINEL_API_INTERNAL_URL ?? process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(`${apiUrl}${path}`, { cache: "no-store" });

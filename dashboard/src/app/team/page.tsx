@@ -62,6 +62,10 @@ export default async function TeamPage() {
                 </select>
               </label>
               <label>
+                <span>LLM API Key</span>
+                <input name="api_key" type="password" placeholder="leave blank to keep current" autoComplete="new-password" />
+              </label>
+              <label>
                 <span>API Endpoint</span>
                 <input name="api_endpoint" defaultValue={config.api_endpoint ?? ""} placeholder="default provider endpoint" />
               </label>
