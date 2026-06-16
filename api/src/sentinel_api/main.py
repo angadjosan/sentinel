@@ -320,6 +320,10 @@ async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), pr
         run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
     except (LLMNotConfiguredError, ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        if "authentication" in str(exc).lower() or "401" in str(exc):
+            raise HTTPException(status_code=422, detail=f"LLM authentication failed: {exc}") from exc
+        raise
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     return await run_response(db, run)
 
@@ -341,6 +345,10 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
         return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
     except (LLMNotConfiguredError, RuntimeError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        if "authentication" in str(exc).lower() or "401" in str(exc):
+            raise HTTPException(status_code=422, detail=f"LLM authentication failed: {exc}") from exc
+        raise
     finally:
         ACTIVE_RUNS.dec()
 

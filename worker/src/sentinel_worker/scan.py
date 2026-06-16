@@ -107,12 +107,21 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
         sources.append(SourceFile(path=path, content=content, is_new=False))
     await build_source_graph(db, graph.id, sources)
-    llm = _llm
-    if llm is None:
-        llm = await get_llm_for_graph(graph.id, db)
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
-    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
     await enforce_source_retention_for_account(db, graph.account_id)
+
+    # Run enrichment in background — don't block init on LLM calls
+    async def _bg_enrich():
+        try:
+            llm = _llm
+            if llm is None:
+                llm = await get_llm_for_graph(graph.id, db)
+            await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
+            await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
+        except Exception as exc:
+            log.warning("init.enrichment_failed", error=str(exc))
+
+    asyncio.ensure_future(_bg_enrich())
+
     run.status = "completed"
     run.completed_at = now()
     run.trace = "\n".join(part for part in [run.trace, trace_event("init.completed", file_count=len(files))] if part)
@@ -206,43 +215,42 @@ async def execute_source_scan(
         )
     ))
 
-    findings = 0
-
-    # ── SCA (feed-based, not LLM) ──────────────────────────────────────────
-    sca_count = 0
-    for f in files:
-        sca_count += await scan_dependencies(db, graph.id, repo.id, run.id, f.path, f.content)
-    findings += sca_count
-    log.info("scan.sca.completed", run_id=run.id, sca_finding_count=sca_count)
-
-    # ── Secret scan (entropy + regex, not LLM) ────────────────────────────
-    secret_count = 0
-    for f in files:
-        secret_count += await _run_secret_scan(db, graph.id, repo.id, run.id, f, suppressed_fps)
-    findings += secret_count
-    log.info("scan.secrets.completed", run_id=run.id, secret_finding_count=secret_count)
-
-    # ── SAST (LLM-only) ───────────────────────────────────────────────────
+    # ── Resolve LLM early so SAST can start ──────────────────────────────
     llm = _llm
     if llm is None:
-        llm = await get_llm_for_graph(graph.id, db)  # raises LLMNotConfiguredError if unconfigured
+        llm = await get_llm_for_graph(graph.id, db)
 
-    sast_findings = await run_sast(
-        diff=diff,
-        bootstrap_context=bootstrap_context,
-        run_id=run.id,
-        suppressed_fps=suppressed_fps,
-        graph=graph,
-        repo_id=str(repo.id),
-        db=db,
-        llm=llm,
+    # ── Run SCA + secrets in parallel with SAST ───────────────────────────
+    async def _sca_batch() -> int:
+        count = 0
+        for f in files:
+            count += await scan_dependencies(db, graph.id, repo.id, run.id, f.path, f.content)
+        return count
+
+    async def _secrets_batch() -> int:
+        count = 0
+        for f in files:
+            count += await _run_secret_scan(db, graph.id, repo.id, run.id, f, suppressed_fps)
+        return count
+
+    async def _sast() -> list:
+        return await run_sast(
+            diff=diff,
+            bootstrap_context=bootstrap_context,
+            run_id=run.id,
+            suppressed_fps=suppressed_fps,
+            graph=graph,
+            repo_id=str(repo.id),
+            db=db,
+            llm=llm,
+        )
+
+    sca_count, secret_count, sast_findings = await asyncio.gather(
+        _sca_batch(), _secrets_batch(), _sast()
     )
-    findings += len(sast_findings)
-    log.info("scan.sast.completed", run_id=run.id, sast_finding_count=len(sast_findings))
+    findings = sca_count + secret_count + len(sast_findings)
+    log.info("scan.parallel.completed", run_id=run.id, sca=sca_count, secrets=secret_count, sast=len(sast_findings))
 
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
-    from .enrichment import validate_enrichment_labels
-    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()

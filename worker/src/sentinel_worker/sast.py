@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import structlog
 from pathlib import Path
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .agent import SentinelLLMClient
 from .tools import TOOLS, dispatch_tool
@@ -43,6 +44,7 @@ async def run_sast(
 
     findings = []
     graph_query = GraphQuery(db=db, graph_id=graph.id)
+    _empty_rounds = 0
 
     async def tool_dispatcher(tool_name: str, tool_input: dict) -> dict:
         return await dispatch_tool(
@@ -60,7 +62,7 @@ async def run_sast(
         system=system,
         user=user_content,
         tools=TOOLS,
-        max_iterations=50,
+        max_iterations=12,
         tool_dispatcher=tool_dispatcher,
         run_id=run_id,
         component="sast",
@@ -70,32 +72,77 @@ async def run_sast(
             log.debug("scan.sast.tool_call", tool=event.tool_name, run_id=run_id)
             if event.tool_name == "emit_finding" and isinstance(event.result, dict):
                 finding_data = event.result.get("data", event.result)
-                fp = compute_fingerprint(
-                    repo_id,
-                    finding_data.get("node_id", "unknown"),
-                    finding_data.get("vuln_type", "unknown"),
-                )
+                vuln_type = finding_data.get("vuln_type") or finding_data.get("type") or finding_data.get("vulnerability_type") or finding_data.get("category") or _infer_vuln_type(finding_data.get("description", "") + " " + finding_data.get("title", ""))
+                node_id = finding_data.get("node_id") or finding_data.get("file_path") or finding_data.get("file") or "unknown"
+                if not node_id.startswith("file:") and "/" in str(node_id):
+                    node_id = f"file:{node_id}"
+                finding_data["vuln_type"] = vuln_type
+                finding_data["node_id"] = node_id
+                fp = compute_fingerprint(repo_id, node_id, vuln_type)
                 if fp not in suppressed_fps:
-                    f = Finding(
-                        graph_id=graph.id,
-                        node_id=finding_data.get("node_id"),
-                        run_id=run_id,
-                        vuln_type=finding_data.get("vuln_type", "unknown"),
-                        severity=finding_data.get("severity", "medium"),
-                        title=finding_data.get("title", "Security Issue"),
-                        description=finding_data.get("description", ""),
-                        remediation=finding_data.get("remediation", ""),
-                        fingerprint=fp,
-                    )
-                    db.add(f)
-                    await db.flush()
-                    findings.append(f)
+                    existing = await db.scalar(select(Finding).where(Finding.fingerprint == fp))
+                    if existing is not None:
+                        existing.run_id = run_id
+                        existing.severity = finding_data.get("severity", existing.severity)
+                        existing.title = finding_data.get("title", existing.title)
+                        existing.description = finding_data.get("description", existing.description)
+                        existing.remediation = finding_data.get("remediation", existing.remediation)
+                        findings.append(existing)
+                    else:
+                        f = Finding(
+                            graph_id=graph.id,
+                            node_id=node_id,
+                            run_id=run_id,
+                            vuln_type=vuln_type,
+                            severity=finding_data.get("severity", "medium"),
+                            title=finding_data.get("title") or _VULN_TYPE_TITLES.get(vuln_type, "Security Issue"),
+                            description=finding_data.get("description", ""),
+                            remediation=finding_data.get("remediation", ""),
+                            fingerprint=fp,
+                        )
+                        db.add(f)
+                        await db.flush()
+                        findings.append(f)
                     log.info("scan.sast.finding_emitted", vuln_type=f.vuln_type, severity=f.severity, run_id=run_id)
                 else:
                     log.debug("scan.sast.finding_suppressed", fingerprint=fp, run_id=run_id)
 
     log.info("scan.sast.completed", finding_count=len(findings), run_id=run_id)
     return findings
+
+
+_VULN_TYPE_KEYWORDS = {
+    "sqli": ["sql injection", "sql query", "db.query", "sql statement"],
+    "cmdi": ["command injection", "shell command", "child_process", "exec(", "os.system", "subprocess"],
+    "xss": ["cross-site scripting", "xss", "innerHTML", "document.write"],
+    "ssrf": ["ssrf", "server-side request", "fetch(", "url injection"],
+    "path_traversal": ["path traversal", "directory traversal", "../", "file path"],
+    "auth_bypass": ["auth bypass", "authentication bypass", "authorization"],
+    "secret_leak": ["secret", "api key", "password", "credential", "token leak"],
+    "idor": ["idor", "insecure direct object"],
+    "open_redirect": ["open redirect", "redirect"],
+}
+
+
+def _infer_vuln_type(text: str) -> str:
+    lower = text.lower()
+    for vuln_type, keywords in _VULN_TYPE_KEYWORDS.items():
+        if any(kw in lower for kw in keywords):
+            return vuln_type
+    return "unknown"
+
+
+_VULN_TYPE_TITLES = {
+    "sqli": "SQL Injection",
+    "cmdi": "Command Injection",
+    "xss": "Cross-Site Scripting",
+    "ssrf": "Server-Side Request Forgery",
+    "path_traversal": "Path Traversal",
+    "auth_bypass": "Authentication Bypass",
+    "secret_leak": "Secret Leak",
+    "idor": "Insecure Direct Object Reference",
+    "open_redirect": "Open Redirect",
+}
 
 
 async def get_llm_for_graph(graph_id: str, db: AsyncSession) -> SentinelLLMClient:
