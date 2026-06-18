@@ -141,26 +141,32 @@ TOOLS: list[dict] = [
     },
     {
         "name": "emit_finding",
-        "description": "Emit a security finding. Do not call this unless you have read the source and confirmed the taint path.",
+        "description": "Emit a security vulnerability finding. Call this for every vulnerability you identify in the diff.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "vuln_type": {"type": "string"},
+                "vuln_type": {
+                    "type": "string",
+                    "description": "Vulnerability type: sqli, cmdi, xss, ssrf, path_traversal, auth_bypass, secret_leak, insecure_deserialization, open_redirect, idor, or other.",
+                },
                 "severity": {
                     "type": "string",
                     "enum": ["critical", "high", "medium", "low", "info"],
                 },
-                "title": {"type": "string"},
+                "title": {"type": "string", "description": "Short title, e.g. 'SQL Injection in user query'"},
                 "description": {
                     "type": "string",
-                    "description": "Must include: the specific taint path from source to sink. Must cite file and line numbers.",
+                    "description": "Describe the vulnerability: what untrusted input reaches what dangerous sink, and why it is exploitable.",
                 },
-                "remediation": {"type": "string"},
-                "node_id": {"type": "string", "description": "The sink node id."},
+                "remediation": {"type": "string", "description": "How to fix the vulnerability."},
+                "node_id": {
+                    "type": "string",
+                    "description": "Graph node ID of the vulnerable sink, or 'file:<path>' if no graph node exists.",
+                },
                 "taint_path": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of node IDs from source to sink.",
+                    "description": "Node IDs from source to sink. Use 'param:<file>:<name>' for inputs and 'file:<path>' for files if graph nodes don't exist.",
                 },
             },
             "required": [
@@ -170,7 +176,6 @@ TOOLS: list[dict] = [
                 "description",
                 "remediation",
                 "node_id",
-                "taint_path",
             ],
         },
     },
@@ -238,9 +243,25 @@ async def dispatch_tool(
     repo_id: str,
 ) -> dict:
     log.debug("tool.dispatch", tool=tool_name, run_id=run_id)
+    try:
+        return await _dispatch_tool_inner(tool_name, tool_input, graph, run_id, db, repo_id)
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"error": f"Invalid arguments for tool {tool_name}: {exc}"}
+
+
+async def _dispatch_tool_inner(
+    tool_name: str,
+    tool_input: dict,
+    graph: gq.GraphQuery,
+    run_id: str | None,
+    db: AsyncSession,
+    repo_id: str,
+) -> dict:
 
     if tool_name == "graph_neighbors":
-        node_id = tool_input["node_id"]
+        node_id = tool_input.get("node_id") or tool_input.get("id") or tool_input.get("node")
+        if not node_id:
+            return {"error": "node_id is required"}
         edge_kinds = tool_input.get("edge_kinds") or None
         max_hops = tool_input.get("max_hops", 50)
         neighbors = await graph.neighbors(node_id, edge_kinds=edge_kinds, max_hops=max_hops)
@@ -256,8 +277,10 @@ async def dispatch_tool(
         }
 
     elif tool_name == "graph_paths":
-        src_id = tool_input["src_id"]
-        dst_id = tool_input["dst_id"]
+        src_id = tool_input.get("src_id") or tool_input.get("source") or tool_input.get("from")
+        dst_id = tool_input.get("dst_id") or tool_input.get("destination") or tool_input.get("to")
+        if not src_id or not dst_id:
+            return {"error": "src_id and dst_id are required"}
         edge_kinds = tool_input.get("edge_kinds") or None
         paths = await graph.paths(src_id, dst_id, edge_kinds=edge_kinds)
         return {
@@ -278,9 +301,11 @@ async def dispatch_tool(
         }
 
     elif tool_name == "read_file":
-        file_path = tool_input["file_path"]
-        start_line = tool_input.get("start_line")
-        end_line = tool_input.get("end_line")
+        file_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("file")
+        if not file_path:
+            return {"error": "file_path is required"}
+        start_line = tool_input.get("start_line") or tool_input.get("line_start")
+        end_line = tool_input.get("end_line") or tool_input.get("line_end")
         try:
             content = await source_store.read_source_snapshot(
                 db,

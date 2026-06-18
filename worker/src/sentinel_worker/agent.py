@@ -314,7 +314,7 @@ class SentinelLLMClient:
             payload["tools"] = tools
         async with httpx.AsyncClient() as http:
             try:
-                resp = await http.post(url, json=payload, timeout=120)
+                resp = await http.post(url, json=payload, timeout=45)
                 resp.raise_for_status()
                 data = resp.json()
                 msg = data.get("message", {})
@@ -334,10 +334,9 @@ class SentinelLLMClient:
                     "`sentinel config set provider anthropic` then `sentinel config set api-key <key>`"
                 )
             except httpx.HTTPStatusError as exc:
-                # Fall back to non-tool JSON-mode if the model doesn't support tool calling
                 if tools and exc.response.status_code in (400, 422):
                     payload.pop("tools", None)
-                    resp = await http.post(url, json=payload, timeout=120)
+                    resp = await http.post(url, json=payload, timeout=45)
                     resp.raise_for_status()
                     data = resp.json()
                     msg = data.get("message", {})
@@ -581,6 +580,8 @@ class SentinelLLMClient:
             {"role": "user", "content": user},
         ]
 
+        total_input = 0
+        total_output = 0
         async with httpx.AsyncClient() as http:
             for _ in range(max_iterations):
                 payload = {
@@ -590,7 +591,7 @@ class SentinelLLMClient:
                     "stream": False,
                 }
                 try:
-                    resp = await http.post(url, json=payload, timeout=120)
+                    resp = await http.post(url, json=payload, timeout=45)
                     resp.raise_for_status()
                     data = resp.json()
                 except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -601,6 +602,9 @@ class SentinelLLMClient:
                     )
                 except Exception:
                     break
+
+                total_input += data.get("prompt_eval_count", 0)
+                total_output += data.get("eval_count", 0)
 
                 msg = data.get("message", {})
                 tool_calls = msg.get("tool_calls") or []
@@ -632,8 +636,8 @@ class SentinelLLMClient:
         if db is not None and run_id is not None:
             result_obj = LLMCallResult(
                 content="",
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=total_input,
+                output_tokens=total_output,
                 model=self.model,
                 provider="local",
             )

@@ -14,6 +14,191 @@ const program = new Command();
 
 program.name("sentinel").description("Cloud-backed application security scanner").version("0.1.0");
 
+// Default action: greeting + animated eye + docs when no subcommand given
+program.action(async () => {
+  await showGreeting();
+});
+
+async function showGreeting(): Promise<void> {
+  const eyeFrames = [
+    // looking left
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██              ██    ",
+      "   ██  ████          ██   ",
+      "  ██  ██████          ██  ",
+      "  ██  ████            ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking down-left
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██              ██    ",
+      "   ██                ██   ",
+      "  ██                  ██  ",
+      "  ██  ████            ██  ",
+      "   ██ ██████         ██   ",
+      "    ██████          ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking center
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██              ██    ",
+      "   ██      ████    ██   ",
+      "  ██      ██████    ██  ",
+      "  ██      ████      ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking right
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██              ██    ",
+      "   ██          ████  ██   ",
+      "  ██          ██████  ██  ",
+      "  ██            ████  ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking up-right
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██        ████  ██    ",
+      "   ██        ██████  ██   ",
+      "  ██          ████    ██  ",
+      "  ██                  ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking up
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██    ████      ██    ",
+      "   ██    ██████      ██   ",
+      "  ██      ████      ██  ",
+      "  ██                  ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+    // looking center (settle)
+    [
+      "        ██████████        ",
+      "      ██          ██      ",
+      "    ██              ██    ",
+      "   ██      ████    ██   ",
+      "  ██      ██████    ██  ",
+      "  ██      ████      ██  ",
+      "   ██                ██   ",
+      "    ██              ██    ",
+      "      ██          ██      ",
+      "        ██████████        ",
+    ],
+  ];
+
+  const sequence = [0, 1, 2, 3, 4, 5, 2, 0, 3, 5, 4, 2, 6];
+  const frameHeight = eyeFrames[0].length;
+
+  process.stdout.write("\n");
+
+  for (let i = 0; i < sequence.length; i++) {
+    const frame = eyeFrames[sequence[i]];
+    const isLast = i === sequence.length - 1;
+    const delay = isLast ? 0 : (i >= sequence.length - 3 ? 180 : 120);
+
+    // Move cursor up to overwrite previous frame (except first)
+    if (i > 0) {
+      process.stdout.write(`\x1b[${frameHeight}A`);
+    }
+
+    for (const line of frame) {
+      process.stdout.write(`    ${chalk.cyan(line)}\n`);
+    }
+
+    if (!isLast) {
+      await sleep(delay);
+    }
+  }
+
+  process.stdout.write("\n");
+
+  console.log(chalk.bold.white("  ╔══════════════════════════════════════════════════════╗"));
+  console.log(chalk.bold.white("  ║") + chalk.bold.cyan("          S E N T I N E L   v0.1.0                   ") + chalk.bold.white("║"));
+  console.log(chalk.bold.white("  ║") + chalk.dim("      Application Security Agent for your code        ") + chalk.bold.white("║"));
+  console.log(chalk.bold.white("  ╚══════════════════════════════════════════════════════╝"));
+
+  console.log();
+  console.log(chalk.bold.underline("  USAGE"));
+  console.log();
+  console.log(`    ${chalk.white("$")} ${chalk.green("sentinel")} ${chalk.yellow("<command>")} ${chalk.dim("[options]")}`);
+  console.log();
+
+  console.log(chalk.bold.underline("  COMMANDS"));
+  console.log();
+
+  const commands: Array<[string, string, string]> = [
+    ["Setup", "", ""],
+    ["", "init", "Initialize Sentinel for the current repository"],
+    ["", "auth login", "Authenticate with browser-based device code"],
+    ["", "config show", "Display current configuration"],
+    ["", "config set <key> <val>", "Update a config value"],
+    ["Scanning", "", ""],
+    ["", "source [paths...]", "Scan the current git diff for vulnerabilities"],
+    ["", "scan [paths...]", "Full scan: SAST analysis + automated pentesting"],
+    ["", "plan <file|text>", "Review a plan or design doc for security issues"],
+    ["", "pentest [target]", "Manually pentest a specific finding"],
+    ["Findings", "", ""],
+    ["", "list", "List all findings with optional filters"],
+    ["", "pull <id>", "Fetch remediation context for a finding"],
+    ["", "suppress <id>", "Suppress a finding (with approval workflow)"],
+    ["Runs", "", ""],
+    ["", "runs list", "List all scan run traces"],
+    ["", "runs show <id>", "Show run details with token summary"],
+    ["", "runs watch <id>", "Stream live run events"],
+    ["", "runs cancel <id>", "Cancel an in-progress run"],
+  ];
+
+  for (const [section, cmd, desc] of commands) {
+    if (section && !cmd) {
+      console.log(`  ${chalk.bold.cyan(section)}`);
+    } else {
+      console.log(`    ${chalk.green(cmd.padEnd(26))} ${chalk.dim(desc)}`);
+    }
+  }
+
+  console.log();
+  console.log(chalk.bold.underline("  QUICK START"));
+  console.log();
+  console.log(`    ${chalk.dim("1.")} ${chalk.white("sentinel init")}${chalk.dim("                    # set up repo + build code graph")}`);
+  console.log(`    ${chalk.dim("2.")} ${chalk.white("sentinel config set provider local")}${chalk.dim("  # configure LLM provider")}`);
+  console.log(`    ${chalk.dim("3.")} ${chalk.white("sentinel source")}${chalk.dim("                  # scan your latest changes")}`);
+  console.log(`    ${chalk.dim("4.")} ${chalk.white("sentinel list")}${chalk.dim("                    # review findings")}`);
+  console.log(`    ${chalk.dim("5.")} ${chalk.white("sentinel pull <id>")}${chalk.dim("               # get fix guidance")}`);
+
+  console.log();
+  console.log(`  ${chalk.dim("Run")} ${chalk.white("sentinel <command> --help")} ${chalk.dim("for detailed usage of any command.")}`);
+  console.log(`  ${chalk.dim("Documentation:")} ${chalk.cyan("https://github.com/anthropics/sentinel")}`);
+  console.log();
+}
+
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
   .command("login")

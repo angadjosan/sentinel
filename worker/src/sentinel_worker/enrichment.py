@@ -36,7 +36,7 @@ async def enrich_graph_nodes(
     llm: SentinelLLMClient | None = None,
     source_by_file: dict[str, str] | None = None,
     only_new: bool = True,
-    cluster_size: int = 15,
+    cluster_size: int = 50,
 ) -> int:
     stmt = select(Node).where(Node.graph_id == graph_id)
     if only_new:
@@ -51,14 +51,18 @@ async def enrich_graph_nodes(
     applied = 0
     for index, cluster in enumerate(_clusters(nodes, cluster_size), start=1):
         payload = await _cluster_payload(db, graph_id, cluster, source_by_file or {})
-        result = await client.call(
-            system=ENRICHMENT_SYSTEM_PROMPT,
-            data=json.dumps(payload, sort_keys=True),
-            component="semantic_enrichment",
-            db=db,
-            run_id=run_id,
-            iteration=index,
-        )
+        try:
+            result = await client.call(
+                system=ENRICHMENT_SYSTEM_PROMPT,
+                data=json.dumps(payload, sort_keys=True),
+                component="semantic_enrichment",
+                db=db,
+                run_id=run_id,
+                iteration=index,
+            )
+        except Exception as exc:
+            log.warning("enrichment.llm_call_failed", error=str(exc), cluster=index)
+            continue
         annotations = _parse_annotations(result.content)
         by_id = {annotation.node_id: annotation for annotation in annotations}
         for node in cluster:
@@ -191,13 +195,17 @@ async def validate_enrichment_labels(
     applied = 0
     for cluster in _clusters(to_reenrich, 15):
         payload = await _cluster_payload(db, graph_id, cluster, source_by_file or {})
-        result = await client.call(
-            system=CLARIFYING_PROMPT,
-            data=json.dumps(payload, sort_keys=True),
-            component="enrichment_validation",
-            db=db,
-            run_id=run_id,
-        )
+        try:
+            result = await client.call(
+                system=CLARIFYING_PROMPT,
+                data=json.dumps(payload, sort_keys=True),
+                component="enrichment_validation",
+                db=db,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            log.warning("enrichment.validation_llm_call_failed", error=str(exc))
+            continue
         annotations = _parse_annotations(result.content)
         by_id = {a.node_id: a for a in annotations}
         for node in cluster:
