@@ -5,11 +5,22 @@ export function git(args: string[]): string {
 }
 
 export function currentDiff(options: { staged?: boolean; base?: string; paths?: string[] } = {}): string {
-  const args = ["diff"];
-  if (options.staged) args.push("--staged");
-  if (options.base) args.push(`${options.base}..HEAD`);
-  if (options.paths?.length) args.push("--", ...options.paths);
-  return git(args);
+  const pathArgs = options.paths?.length ? ["--", ...options.paths] : [];
+
+  if (options.staged) {
+    return git(["diff", "--staged", ...pathArgs]);
+  }
+  if (options.base) {
+    return git(["diff", `${options.base}..HEAD`, ...pathArgs]);
+  }
+
+  // Default: all uncommitted changes (staged + unstaged) vs HEAD.
+  // Falls back to the last commit diff if the working tree is clean.
+  const uncommitted = git(["diff", "HEAD", ...pathArgs]);
+  if (uncommitted.trim()) return uncommitted;
+
+  // Working tree is clean — scan the most recent commit.
+  return git(["diff", "HEAD~1..HEAD", ...pathArgs]);
 }
 
 export function lsFiles(): string[] {
