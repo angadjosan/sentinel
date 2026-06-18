@@ -4,23 +4,24 @@ export function git(args: string[]): string {
   return execFileSync("git", args, { encoding: "utf8" });
 }
 
-export function currentDiff(options: { staged?: boolean; base?: string; paths?: string[] } = {}): string {
+export type DiffResult = { diff: string; label: string };
+
+export function currentDiff(options: { staged?: boolean; base?: string; paths?: string[] } = {}): DiffResult {
   const pathArgs = options.paths?.length ? ["--", ...options.paths] : [];
 
   if (options.staged) {
-    return git(["diff", "--staged", ...pathArgs]);
+    return { diff: git(["diff", "--staged", ...pathArgs]), label: "staged changes" };
   }
   if (options.base) {
-    return git(["diff", `${options.base}..HEAD`, ...pathArgs]);
+    return { diff: git(["diff", `${options.base}..HEAD`, ...pathArgs]), label: `${options.base}..HEAD` };
   }
 
   // Default: all uncommitted changes (staged + unstaged) vs HEAD.
-  // Falls back to the last commit diff if the working tree is clean.
   const uncommitted = git(["diff", "HEAD", ...pathArgs]);
-  if (uncommitted.trim()) return uncommitted;
+  if (uncommitted.trim()) return { diff: uncommitted, label: "uncommitted changes" };
 
-  // Working tree is clean — scan the most recent commit.
-  return git(["diff", "HEAD~1..HEAD", ...pathArgs]);
+  // Working tree is clean — scan the most recent commit instead.
+  return { diff: git(["diff", "HEAD~1..HEAD", ...pathArgs]), label: "HEAD~1..HEAD  (working tree is clean)" };
 }
 
 export function lsFiles(): string[] {

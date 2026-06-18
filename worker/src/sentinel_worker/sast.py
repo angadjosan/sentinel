@@ -161,4 +161,4 @@ async def get_llm_for_graph(graph_id: str, db: AsyncSession) -> SentinelLLMClien
             f"Account for graph {graph_id!r} has no API key. "
             "Run `sentinel config set api-key <key>`."
         )
-    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key or "")
+    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key or "", api_endpoint=getattr(account, "api_endpoint", None))
