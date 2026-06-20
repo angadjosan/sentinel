@@ -1,6 +1,6 @@
 {
-  "apiUrl": "http://localhost:8000",
-  "repoName": "sentinel-example",
+  "apiUrl": "https://sentinel-api.vercel.app",
+  "repoName": "your-repo-name",
   "provider": "local",
   "model": "llama3.2",
   "boot": "docker compose up -d",

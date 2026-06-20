@@ -8,6 +8,26 @@ Sentinel's fix is contextual reasoning over exploitability. Pattern matching is 
 
 A raw LLM can't do this either — no persistent architectural context, stale CVE data, no way to verify its own hunches. Sentinel is the harness that supplies all three: a persistent code graph updated on every diff, live CVE feeds at scan time, and a pentest tier that confirms findings with runtime oracle evidence.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/angadjosan/sentinel/main/install.sh | bash
+```
+
+Then:
+
+```bash
+sentinel auth login     # browser device-code login
+cd your-repo && sentinel init
+sentinel source         # scan your diff
+```
+
+Scans and pentests run locally (Docker required); findings sync to the hosted backend and dashboard. Bring your own model key:
+
+```bash
+sentinel config set api-key sk-ant-...
+```
+
 ---
 
 ## How it works
