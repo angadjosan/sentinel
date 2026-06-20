@@ -180,6 +180,8 @@ def test_source_file_reads_are_account_scoped(monkeypatch):
 
 def test_device_auth_flow_issues_token_after_admin_approval(monkeypatch):
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    monkeypatch.delenv("SENTINEL_DEV_MODE", raising=False)
+    monkeypatch.setenv("SENTINEL_JWT_SECRET", "test-secret-for-auth-flow")
     admin = create_token("device-admin", "device-account", "admin")
     with TestClient(app) as client:
         started = client.post("/auth/device")
@@ -233,8 +235,9 @@ def test_device_auth_token_auto_approves_in_dev_mode(monkeypatch):
     assert body["user_id"]
 
 
-def test_device_auth_token_stays_pending_without_dev_mode():
+def test_device_auth_token_stays_pending_without_dev_mode(monkeypatch):
     """Without SENTINEL_DEV_MODE, polling before approval returns 202."""
+    monkeypatch.delenv("SENTINEL_DEV_MODE", raising=False)
     with TestClient(app) as client:
         started = client.post("/auth/device")
         pending = client.get(f"/auth/device/token?device_code={started.json()['device_code']}")

@@ -4,7 +4,7 @@ import json
 import structlog
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
-from .agent import SentinelLLMClient
+from .agent import SentinelLLMClient, ModelNotFoundError  # noqa: F401 — re-export for API handler
 from .tools import TOOLS, dispatch_tool
 from .models import Finding, Account, Graph
 from .security import compute_fingerprint
@@ -60,7 +60,7 @@ async def run_sast(
         system=system,
         user=user_content,
         tools=TOOLS,
-        max_iterations=50,
+        max_iterations=5,
         tool_dispatcher=tool_dispatcher,
         run_id=run_id,
         component="sast",

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -70,13 +72,40 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sentinel API", version="0.1.0", lifespan=lifespan)
-# TODO: production needs proper origins from config (e.g. CORS_ORIGINS env var)
+
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    from fastapi import HTTPException as _HTTPException
+    if isinstance(exc, _HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    log.error("unhandled_exception", path=str(request.url.path), error=str(exc), exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+
+
+def _is_dev_mode() -> bool:
+    """True when SENTINEL_DEV_MODE=1."""
+    return os.getenv("SENTINEL_DEV_MODE", "0") == "1"
+
+
+def _skip_tenant_filter(principal: "Principal") -> bool:
+    """True only when in dev mode AND the principal is the dev user.
+
+    This prevents production tokens with account_id='dev' from bypassing
+    tenant isolation — both conditions must hold simultaneously.
+    """
+    return _is_dev_mode() and principal.account_id == "dev"
+
+
+COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
@@ -204,7 +233,7 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/metrics")
-async def metrics() -> PlainTextResponse:
+async def metrics(principal: Principal = Depends(require_admin)) -> PlainTextResponse:
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -286,7 +315,8 @@ async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)
 async def get_account_config(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> AccountConfigResponse:
     actor = await _actor_from_principal(db, principal)
     account = await db.get(Account, actor.account_id)
-    assert account is not None
+    if account is None:
+        raise HTTPException(status_code=404, detail="account not found")
     return account_config_response(account)
 
 
@@ -294,7 +324,8 @@ async def get_account_config(db: AsyncSession = Depends(get_db), principal: Prin
 async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> AccountConfigResponse:
     actor = await _actor_from_principal(db, principal)
     account = await db.get(Account, actor.account_id)
-    assert account is not None
+    if account is None:
+        raise HTTPException(status_code=404, detail="account not found")
     fields = payload.model_fields_set
     if "provider" in fields and payload.provider is not None:
         account.provider = payload.provider
@@ -339,8 +370,11 @@ async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), pri
         RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
         SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
         return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
-    except (LLMNotConfiguredError, RuntimeError) as exc:
+    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("source_scan_failed", error=str(exc), exc_info=exc)
+        raise HTTPException(status_code=500, detail="Scan failed unexpectedly. Check server logs.") from exc
     finally:
         ACTIVE_RUNS.dec()
 
@@ -356,7 +390,8 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
@@ -367,7 +402,7 @@ async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_d
         result = await source(payload, db, principal)
         for finding in result.findings:
             yield f"data: {finding.model_dump_json()}\n\n"
-        yield f"data: {json.dumps({'kind': 'complete', 'run_id': result.run.id, 'finding_count': len(result.findings)})}\n\n"
+        yield f"data: {json.dumps({'kind': 'run.completed', 'run_id': result.run.id, 'finding_count': len(result.findings)})}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -411,8 +446,11 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
     await _check_token_budget(db, principal)
     try:
         run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
-    except (LLMNotConfiguredError, RuntimeError) as exc:
+    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("plan_scan_failed", error=str(exc), exc_info=exc)
+        raise HTTPException(status_code=500, detail="Plan review failed unexpectedly. Check server logs.") from exc
     RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
     for finding in findings:
         FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
@@ -436,7 +474,7 @@ async def findings(
             .where(Repo.name == repo_name)
         )
         joined_graph = True
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         if not joined_graph:
             stmt = stmt.join(Graph, Finding.graph_id == Graph.id)
         stmt = stmt.where(Graph.account_id == principal.account_id)
@@ -698,20 +736,30 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
 
 @app.post("/pentest", response_model=FindingResponse)
 async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
+    from sentinel_worker.sast import LLMNotConfiguredError
     finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal, payload.description)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    result = await run_pentest(
-        db,
-        finding,
-        PentestRequestContext(
-            sanitizer_output=payload.sanitizer_output,
-            behavioral_proof=payload.behavioral_proof,
-            proof_detail=payload.proof_detail,
-            sandbox=PentestSandboxConfig(boot=payload.boot, healthcheck=payload.healthcheck, egress_allowlist=payload.egress_allowlist),
-            executor=_pentest_executor(payload),
-        ),
-    )
+    try:
+        executor = _pentest_executor(payload)
+        result = await run_pentest(
+            db,
+            finding,
+            PentestRequestContext(
+                sanitizer_output=payload.sanitizer_output,
+                behavioral_proof=payload.behavioral_proof,
+                proof_detail=payload.proof_detail,
+                sandbox=PentestSandboxConfig(boot=payload.boot, healthcheck=payload.healthcheck, egress_allowlist=payload.egress_allowlist),
+                executor=executor,
+            ),
+        )
+    except HTTPException:
+        raise
+    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("pentest_failed", error=str(exc), exc_info=exc)
+        raise HTTPException(status_code=500, detail="Pentest failed unexpectedly. Check server logs.") from exc
     RUNS_TOTAL.labels(kind=result.run.kind, status=result.run.status).inc()
     return await finding_response(db, result.finding)
 
@@ -719,7 +767,7 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
 @app.get("/runs", response_model=list[RunResponse])
 async def runs(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[RunResponse]:
     stmt = select(Run).order_by(Run.created_at.desc())
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     rows = await db.scalars(stmt)
     return [await run_response(db, row) for row in rows]
@@ -784,7 +832,7 @@ async def _cancel_run_for_principal(db: AsyncSession, run_id: str, principal: Pr
 async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal), limit: int = 250) -> GraphResponse:
     node_stmt = select(Node).limit(limit)
     edge_stmt = select(Edge).limit(limit)
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         graph_ids = select(Graph.id).where(Graph.account_id == principal.account_id)
         node_stmt = node_stmt.where(Node.graph_id.in_(graph_ids))
         edge_stmt = edge_stmt.where(Edge.graph_id.in_(graph_ids))
@@ -795,17 +843,22 @@ async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depen
 
 @app.get("/source-files/{repo_name}/{commit_hash}/{file_path:path}", response_model=SourceReadResponse)
 async def read_source_file(repo_name: str, commit_hash: str, file_path: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceReadResponse:
+    if not COMMIT_HASH_RE.match(commit_hash) and commit_hash != "bootstrap":
+        raise HTTPException(status_code=400, detail="invalid commit hash")
+    normalized = os.path.normpath(file_path)
+    if normalized.startswith("..") or normalized.startswith("/"):
+        raise HTTPException(status_code=400, detail="invalid file path")
     stmt = select(Repo).where(Repo.name == repo_name)
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.where(Repo.account_id == principal.account_id)
     repo = await db.scalar(stmt)
     if repo is None:
         raise HTTPException(status_code=404, detail="repo not found")
     try:
-        content = await read_source_snapshot(db, repo_id=repo.id, commit_hash=commit_hash, file_path=file_path)
+        content = await read_source_snapshot(db, repo_id=repo.id, commit_hash=commit_hash, file_path=normalized)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="source file not found") from exc
-    return SourceReadResponse(repo_name=repo.name, commit_hash=commit_hash, file_path=file_path, content=content)
+    return SourceReadResponse(repo_name=repo.name, commit_hash=commit_hash, file_path=normalized, content=content)
 
 
 @app.post("/admin/graphs/merge")
@@ -814,7 +867,7 @@ async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = De
     main = await db.get(Graph, payload.main_graph_id)
     if branch is None or main is None:
         raise HTTPException(status_code=404, detail="branch or main graph not found")
-    if principal.account_id != "dev" and (branch.account_id != principal.account_id or main.account_id != principal.account_id):
+    if not _skip_tenant_filter(principal) and (branch.account_id != principal.account_id or main.account_id != principal.account_id):
         raise HTTPException(status_code=403, detail="cannot merge graphs from another account")
     copied = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
     return {"branch_graph_id": payload.branch_graph_id, "main_graph_id": payload.main_graph_id, "copied": copied}
@@ -831,7 +884,7 @@ async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal =
         .join(Run, TokenSpendByComponent.run_id == Run.id)
         .group_by(TokenSpendByComponent.component)
     )
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         spend_stmt = spend_stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     rows = await db.execute(spend_stmt)
     result = [
@@ -846,7 +899,7 @@ async def token_spend(db: AsyncSession = Depends(get_db), principal: Principal =
     if result:
         return result
     total_stmt = select(func.sum(Run.token_spend))
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         total_stmt = total_stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     total = await db.scalar(total_stmt) or 0
     return [{"component": "total", "input_tokens": int(total), "output_tokens": 0, "est_cost_usd": 0}]
@@ -863,7 +916,7 @@ async def finding_trends(db: AsyncSession = Depends(get_db), principal: Principa
         .group_by(func.date(Finding.created_at), Finding.severity)
         .order_by(func.date(Finding.created_at))
     )
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     rows = await db.execute(stmt)
     return [{"date": str(day), "severity": severity, "count": int(count)} for day, severity, count in rows]
@@ -872,7 +925,7 @@ async def finding_trends(db: AsyncSession = Depends(get_db), principal: Principa
 @app.get("/analytics/scan-latency")
 async def scan_latency(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[dict[str, float | str]]:
     stmt = select(Run).where(Run.completed_at.is_not(None))
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     rows = await db.scalars(stmt)
     buckets: dict[str, list[float]] = {}
@@ -895,7 +948,7 @@ async def scan_latency(db: AsyncSession = Depends(get_db), principal: Principal 
 async def false_positive_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
     total_stmt = select(func.count(Finding.id))
     suppressed_stmt = select(func.count(Finding.id)).where(Finding.suppressed.is_(True))
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         total_stmt = total_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
         suppressed_stmt = suppressed_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     total = await db.scalar(total_stmt) or 0
@@ -907,7 +960,7 @@ async def false_positive_rate(db: AsyncSession = Depends(get_db), principal: Pri
 async def confirmation_rate(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> dict[str, float | int]:
     total_stmt = select(func.count(Finding.id))
     confirmed_stmt = select(func.count(Finding.id)).where(Finding.confirmed.is_(True))
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         total_stmt = total_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
         confirmed_stmt = confirmed_stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     total = await db.scalar(total_stmt) or 0
@@ -917,7 +970,7 @@ async def confirmation_rate(db: AsyncSession = Depends(get_db), principal: Princ
 
 @app.put("/admin/accounts/{account_id}/token-budget")
 async def set_token_budget(account_id: str, payload: TokenBudgetRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str | None]:
-    if principal.account_id != "dev" and account_id != principal.account_id:
+    if not _skip_tenant_filter(principal) and account_id != principal.account_id:
         raise HTTPException(status_code=403, detail="cannot update another account")
     account = await db.get(Account, account_id)
     if account is None:
@@ -969,7 +1022,7 @@ async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Pr
         .where(Repo.name == repo_name)
         .where(Finding.status == "open")
     )
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.where(Graph.account_id == principal.account_id)
     findings = list(await db.scalars(stmt))
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -1007,14 +1060,14 @@ async def _finding_for_principal(db: AsyncSession, finding_id: str | None, princ
     if finding_id is None:
         return None
     stmt = select(Finding).where(Finding.id == finding_id)
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.join(Graph, Finding.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     return await db.scalar(stmt)
 
 
 async def _run_for_principal(db: AsyncSession, run_id: str, principal: Principal) -> Run | None:
     stmt = select(Run).where(Run.id == run_id)
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     return await db.scalar(stmt)
 
@@ -1049,8 +1102,14 @@ def _pentest_executor(payload: PentestRequest) -> SandboxExecutor:
                 guest_runner_argv=config.guest_runner_argv,
             )
         )
-    # No Firecracker config — fall back to local subprocess execution.
-    # Commands run directly on the host; isolation depends on the deployment environment.
+    # No Firecracker config: local subprocess executor.
+    # In production (non-dev-mode) refuse to run pentest without proper isolation.
+    if not _is_dev_mode():
+        raise HTTPException(
+            status_code=422,
+            detail="Pentest requires Firecracker sandbox in production. "
+                   "Configure firecracker.kernel_image + rootfs_image, or enable SENTINEL_DEV_MODE for local testing."
+        )
     return LocalSubprocessSandboxExecutor()
 
 
@@ -1131,4 +1190,4 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _graph_account_id(principal: Principal) -> str | None:
-    return None if principal.account_id == "dev" else principal.account_id
+    return None if _skip_tenant_filter(principal) else principal.account_id

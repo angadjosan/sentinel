@@ -19,11 +19,26 @@ class Principal:
 
 
 def jwt_secret() -> str:
-    return os.getenv("SENTINEL_JWT_SECRET", "dev-secret")
+    secret = os.getenv("SENTINEL_JWT_SECRET", "")
+    if not secret:
+        if os.getenv("SENTINEL_DEV_MODE", "0") == "1":
+            return "dev-secret-not-for-production"
+        raise RuntimeError(
+            "SENTINEL_JWT_SECRET must be set in production. "
+            'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
+        )
+    return secret
 
 
 def auth_required() -> bool:
-    return os.getenv("SENTINEL_REQUIRE_AUTH", "0") == "1"
+    """Auth is required unless dev mode is active.
+
+    SENTINEL_REQUIRE_AUTH=1 forces auth on even in dev mode (used by tests).
+    In production (SENTINEL_DEV_MODE not set) auth is always required.
+    """
+    if os.getenv("SENTINEL_REQUIRE_AUTH", "0") == "1":
+        return True
+    return os.getenv("SENTINEL_DEV_MODE", "0") != "1"
 
 
 def create_token(user_id: str, account_id: str, role: str = "admin", expires_minutes: int = 60) -> str:

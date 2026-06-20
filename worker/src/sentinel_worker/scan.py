@@ -101,7 +101,8 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
     sources: list[SourceFile] = []
     for path, content in files.items():
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
@@ -136,7 +137,8 @@ async def scan_diff(
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
     await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context, base_ref=base_ref, paths=paths or [], _llm=_llm)
     return run
 
@@ -227,22 +229,32 @@ async def execute_source_scan(
     if llm is None:
         llm = await get_llm_for_graph(graph.id, db)  # raises LLMNotConfiguredError if unconfigured
 
-    sast_findings = await run_sast(
-        diff=diff,
-        bootstrap_context=bootstrap_context,
-        run_id=run.id,
-        suppressed_fps=suppressed_fps,
-        graph=graph,
-        repo_id=str(repo.id),
-        db=db,
-        llm=llm,
-    )
+    try:
+        sast_findings = await asyncio.wait_for(
+            run_sast(
+                diff=diff,
+                bootstrap_context=bootstrap_context,
+                run_id=run.id,
+                suppressed_fps=suppressed_fps,
+                graph=graph,
+                repo_id=str(repo.id),
+                db=db,
+                llm=llm,
+            ),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        log.warning("sast_timeout", run_id=run.id)
+        sast_findings = []
     findings += len(sast_findings)
     log.info("scan.sast.completed", run_id=run.id, sast_finding_count=len(sast_findings))
 
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
-    from .enrichment import validate_enrichment_labels
-    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
+    # Graph enrichment runs only on the async worker path (run_context != "local"),
+    # not inline on synchronous /source requests, to keep response latency bounded.
+    if run_context != "local":
+        await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
+        from .enrichment import validate_enrichment_labels
+        await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -264,6 +276,7 @@ async def review_plan(
     with_retry: bool = False,
     account_id: str | None = None,
     _llm=None,
+    max_passes: int | None = None,
 ) -> tuple[Run, list[Finding]]:
     from .sast import run_sast, get_llm_for_graph, LLMNotConfiguredError
     from pathlib import Path
@@ -273,7 +286,8 @@ async def review_plan(
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
 
     llm = _llm
     if llm is None:
@@ -289,7 +303,9 @@ async def review_plan(
         select(Finding.fingerprint).where(Finding.graph_id == graph.id, Finding.suppressed.is_(True))
     ))
 
-    max_passes = 3 if with_retry else 1
+    # Default to 1 pass on the synchronous path; caller can override via max_passes
+    # (worker uses 3 passes when with_retry=True to find more issues asynchronously)
+    max_passes = max_passes if max_passes is not None else (3 if with_retry else 1)
     seen_fps: set[str] = set()
     trace_lines = [run.trace]
 

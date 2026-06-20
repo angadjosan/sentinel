@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +27,15 @@ from ..schemas import (
 router = APIRouter(prefix="/repos", tags=["repos"])
 
 
+def _is_dev_mode() -> bool:
+    return os.getenv("SENTINEL_DEV_MODE", "0") == "1"
+
+
+def _skip_tenant_filter(principal: Principal) -> bool:
+    """Bypass tenant scoping only when in dev mode AND using the dev principal."""
+    return _is_dev_mode() and principal.account_id == "dev"
+
+
 async def _run_response_simple(db: AsyncSession, run: Run) -> RunResponse:
     """Minimal run response used inside this router — avoids circular imports."""
     from sqlalchemy import func
@@ -45,12 +56,12 @@ async def _run_response_simple(db: AsyncSession, run: Run) -> RunResponse:
 
 
 def _graph_account_id(principal: Principal) -> str | None:
-    return None if principal.account_id == "dev" else principal.account_id
+    return None if _skip_tenant_filter(principal) else principal.account_id
 
 
 async def _get_repo(db: AsyncSession, repo_id: str, principal: Principal) -> Repo:
     stmt = select(Repo).where(Repo.id == repo_id)
-    if principal.account_id != "dev":
+    if not _skip_tenant_filter(principal):
         stmt = stmt.where(Repo.account_id == principal.account_id)
     repo = await db.scalar(stmt)
     if repo is None:
@@ -101,7 +112,8 @@ async def init_repo(
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
 
 
@@ -121,7 +133,8 @@ async def source_scan(
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
 
 
@@ -142,7 +155,8 @@ async def scan_wrapper(
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
 
 
@@ -162,7 +176,8 @@ async def pentest_scan(
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
 
 
@@ -182,5 +197,6 @@ async def plan_review(
         account_id=_graph_account_id(principal),
     )
     run = await db.get(Run, task.run_id)
-    assert run is not None
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))

@@ -34,7 +34,7 @@ export const ConfigSchema = z.object({
   apiUrl: z.string().url().default("http://localhost:8000"),
   repoName: z.string().min(1),
   provider: z.string().default("local"),
-  model: z.string().default("ollama"),
+  model: z.string().default("llama3.2"),
   boot: z.string().optional(),
   healthcheck: z.string().optional(),
   env: z.object({ from: z.string() }).optional(),

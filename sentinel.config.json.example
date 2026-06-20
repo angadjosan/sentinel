@@ -2,7 +2,7 @@
   "apiUrl": "http://localhost:8000",
   "repoName": "sentinel-example",
   "provider": "local",
-  "model": "ollama",
+  "model": "llama3.2",
   "boot": "docker compose up -d",
   "healthcheck": "curl -sf http://localhost:3000/health",
   "egress_allowlist": ["localhost"],

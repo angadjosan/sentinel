@@ -20,6 +20,11 @@ class ChannelViolationError(ValueError):
     pass
 
 
+class ModelNotFoundError(RuntimeError):
+    """Raised when the configured model is not available on the provider."""
+    pass
+
+
 @dataclass(frozen=True)
 class LLMCallResult:
     content: str
@@ -281,6 +286,8 @@ class SentinelLLMClient:
             kwargs["tools"] = openai_tools
             kwargs["tool_choice"] = "auto"
         response = await client.chat.completions.create(**kwargs)
+        if not response.choices:
+            return LLMCallResult(content="", input_tokens=0, output_tokens=0, model=self.model, provider="openai")
         choice = response.choices[0]
         content = choice.message.content or ""
         usage = response.usage
@@ -314,7 +321,7 @@ class SentinelLLMClient:
             payload["tools"] = tools
         async with httpx.AsyncClient() as http:
             try:
-                resp = await http.post(url, json=payload, timeout=120)
+                resp = await http.post(url, json=payload, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
                 msg = data.get("message", {})
@@ -334,11 +341,23 @@ class SentinelLLMClient:
                     "`sentinel config set provider anthropic` then `sentinel config set api-key <key>`"
                 )
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    raise ModelNotFoundError(
+                        f"Model '{self.model}' not found on Ollama at {endpoint}. "
+                        f"Run `ollama pull {self.model}` or set a valid model: "
+                        f"`sentinel config set model <model-name>`"
+                    ) from exc
                 # Fall back to non-tool JSON-mode if the model doesn't support tool calling
                 if tools and exc.response.status_code in (400, 422):
                     payload.pop("tools", None)
-                    resp = await http.post(url, json=payload, timeout=120)
-                    resp.raise_for_status()
+                    try:
+                        resp = await http.post(url, json=payload, timeout=30)
+                        resp.raise_for_status()
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        raise RuntimeError(
+                            f"Cannot connect to Ollama at {endpoint}. "
+                            "Either start Ollama or configure a cloud provider."
+                        )
                     data = resp.json()
                     msg = data.get("message", {})
                     content = msg.get("content", "")
@@ -350,7 +369,9 @@ class SentinelLLMClient:
                         model=self.model,
                         provider="local",
                     )
-                raise
+                raise RuntimeError(
+                    f"Ollama returned {exc.response.status_code}: {exc.response.text[:200]}"
+                ) from exc
 
     async def call_with_tools(
         self,
@@ -530,7 +551,10 @@ class SentinelLLMClient:
             messages.append(msg.model_dump())
 
             for tc in msg.tool_calls or []:
-                tool_input = json.loads(tc.function.arguments or "{}")
+                try:
+                    tool_input = json.loads(tc.function.arguments or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    tool_input = {}
                 result = await tool_dispatcher(tc.function.name, tool_input)
                 yield ToolCallEvent(
                     type="tool_call",
@@ -590,7 +614,7 @@ class SentinelLLMClient:
                     "stream": False,
                 }
                 try:
-                    resp = await http.post(url, json=payload, timeout=120)
+                    resp = await http.post(url, json=payload, timeout=30)
                     resp.raise_for_status()
                     data = resp.json()
                 except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -599,7 +623,17 @@ class SentinelLLMClient:
                         "Either start Ollama or configure a cloud provider: "
                         "`sentinel config set provider anthropic` then `sentinel config set api-key <key>`"
                     )
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == 404:
+                        raise ModelNotFoundError(
+                            f"Model '{self.model}' not found on Ollama at {endpoint}. "
+                            f"Run `ollama pull {self.model}` or set a valid model: "
+                            f"`sentinel config set model <model-name>`"
+                        ) from exc
+                    log.warning("ollama_error", status=exc.response.status_code, detail=exc.response.text[:200])
+                    break
                 except Exception:
+                    log.warning("local_agentic_loop_error", exc_info=True)
                     break
 
                 msg = data.get("message", {})

@@ -86,6 +86,12 @@ _LLM = _PatternLLM()
 
 
 @pytest.fixture(autouse=True)
+def _dev_mode(monkeypatch):
+    """Run all API tests in dev mode (no auth required, tenant isolation off)."""
+    monkeypatch.setenv("SENTINEL_DEV_MODE", "1")
+
+
+@pytest.fixture(autouse=True)
 def _isolated_db(monkeypatch, tmp_path):
     """Give every test an isolated SQLite database in a temp file.
 

@@ -54,7 +54,7 @@ async def test_llm_client_records_token_event_on_run():
             run = Run(graph_id="graph", kind="source")
             session.add(run)
             await session.flush()
-            result = await SentinelLLMClient().call(
+            result = await SentinelLLMClient(provider="mock").call(
                 system="You are a security reviewer.",
                 data="repo code lives in data channel",
                 component="sast",
