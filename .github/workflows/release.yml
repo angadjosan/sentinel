@@ -1,0 +1,45 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  build-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build binaries
+        working-directory: cli
+        run: |
+          bun install
+          bun build.ts
+      - name: Checksums
+        working-directory: cli/binaries
+        run: for f in sentinel-*; do shasum -a 256 "$f" > "$f.sha256"; done
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: cli/binaries/*
+
+  build-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: worker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/angadjosan/sentinel-worker:latest
+            ghcr.io/angadjosan/sentinel-worker:${{ github.ref_name }}
