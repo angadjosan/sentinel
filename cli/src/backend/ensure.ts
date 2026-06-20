@@ -1,12 +1,16 @@
 import { mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const SENTINEL_DIR = join(homedir(), ".sentinel");
 const PID_DIR = join(SENTINEL_DIR, "pids");
 const LOG_DIR = join(SENTINEL_DIR, "logs");
+const WORKER_CONN_FILE = join(SENTINEL_DIR, "worker-conn.json");
+
+const WORKER_IMAGE = "ghcr.io/angadjosan/sentinel-worker:latest";
+const WORKER_CONTAINER_NAME = "sentinel-worker";
 
 function ensureDirs(): void {
   mkdirSync(PID_DIR, { recursive: true });
@@ -40,7 +44,6 @@ function readPid(name: string): number | null {
     const raw = readFileSync(join(PID_DIR, `${name}.pid`), "utf8").trim();
     const pid = parseInt(raw, 10);
     if (!Number.isFinite(pid)) return null;
-    // Verify the process is still alive
     process.kill(pid, 0);
     return pid;
   } catch {
@@ -57,6 +60,88 @@ function removePid(name: string): void {
     unlinkSync(join(PID_DIR, `${name}.pid`));
   } catch {}
 }
+
+// ── Worker connection info (written at login, read by ensureWorkerContainer) ──
+
+export interface WorkerConn {
+  databaseUrl: string;
+  accountId: string;
+  anthropicKey?: string;
+  openaiKey?: string;
+}
+
+export function writeWorkerConn(conn: WorkerConn): void {
+  mkdirSync(SENTINEL_DIR, { recursive: true });
+  writeFileSync(WORKER_CONN_FILE, JSON.stringify(conn, null, 2), { mode: 0o600 });
+}
+
+export function readWorkerConn(): WorkerConn | null {
+  try {
+    return JSON.parse(readFileSync(WORKER_CONN_FILE, "utf8")) as WorkerConn;
+  } catch {
+    return null;
+  }
+}
+
+// ── Docker worker ─────────────────────────────────────────────────────────────
+
+export function workerDockerArgs(opts: {
+  image: string;
+  databaseUrl: string;
+  accountId: string;
+  anthropicKey?: string;
+  openaiKey?: string;
+}): string[] {
+  const env: string[] = [
+    `DATABASE_URL=${opts.databaseUrl}`,
+    `SENTINEL_ACCOUNT_ID=${opts.accountId}`,
+    `SENTINEL_WORKER_ID=local-${opts.accountId}`,
+  ];
+  if (opts.anthropicKey) env.push(`ANTHROPIC_API_KEY=${opts.anthropicKey}`);
+  if (opts.openaiKey) env.push(`OPENAI_API_KEY=${opts.openaiKey}`);
+  const argv = ["run", "--rm", `--name=${WORKER_CONTAINER_NAME}`, "-d"];
+  for (const e of env) argv.push("-e", e);
+  argv.push(opts.image);
+  return argv;
+}
+
+function isWorkerContainerRunning(): boolean {
+  const result = spawnSync("docker", [
+    "ps", "--filter", `name=${WORKER_CONTAINER_NAME}`, "--format", "{{.Names}}",
+  ], { encoding: "utf8" });
+  return result.stdout?.includes(WORKER_CONTAINER_NAME) ?? false;
+}
+
+async function ensureWorkerContainer(): Promise<void> {
+  if (isWorkerContainerRunning()) return;
+
+  const conn = readWorkerConn();
+  if (!conn) {
+    throw new Error('Run `sentinel auth login` first to configure your worker connection.');
+  }
+
+  const dockerResult = spawnSync("docker", ["version"], { encoding: "utf8" });
+  if (dockerResult.error || dockerResult.status !== 0) {
+    throw new Error(
+      "Docker is required to run scans locally. " +
+        "Install Docker Desktop, or set apiUrl to a backend that runs its own worker."
+    );
+  }
+
+  const argv = workerDockerArgs({
+    image: WORKER_IMAGE,
+    databaseUrl: conn.databaseUrl,
+    accountId: conn.accountId,
+    anthropicKey: conn.anthropicKey,
+    openaiKey: conn.openaiKey,
+  });
+  const proc = spawnSync("docker", argv, { encoding: "utf8" });
+  if (proc.status !== 0) {
+    throw new Error(`Failed to start worker container: ${proc.stderr}`);
+  }
+}
+
+// ── Legacy localhost spawning (kept for self-hosted local dev) ─────────────────
 
 export async function startBackend(apiUrl: string): Promise<void> {
   ensureDirs();
@@ -97,7 +182,6 @@ export async function startBackend(apiUrl: string): Promise<void> {
     }
   }
 
-  // Poll /health until ready (max ~8s)
   for (let i = 0; i < 16; i++) {
     if (await isHealthy(apiUrl, 500)) return;
     await sleep(500);
@@ -134,13 +218,19 @@ export async function backendStatus(
 }
 
 export async function ensureBackend(apiUrl: string): Promise<void> {
-  if (await isHealthy(apiUrl)) return;
   if (!isLocalhost(apiUrl)) {
-    throw new Error(
-      `Cannot reach Sentinel backend at ${apiUrl}. ` +
-        `The backend must be running at this URL. If running locally, use 'sentinel up'.`
-    );
+    // Remote (cloud) backend: verify reachability, then ensure local worker is up
+    if (!(await isHealthy(apiUrl, 4000))) {
+      throw new Error(
+        `Cannot reach Sentinel cloud backend at ${apiUrl}. ` +
+          `Check your network or run \`sentinel config set apiUrl <url>\`.`
+      );
+    }
+    await ensureWorkerContainer();
+    return;
   }
+  // Localhost path: spawn API + worker via Python (self-hosted dev)
+  if (await isHealthy(apiUrl)) return;
   console.log("Backend not running. Starting...");
   await startBackend(apiUrl);
   console.log("Backend ready.");
