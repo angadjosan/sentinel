@@ -117,6 +117,28 @@ def _isolated_db(monkeypatch, tmp_path):
     monkeypatch.setattr(deps, "SessionLocal", fresh_sm)
 
 
+def process_tasks(n: int = 1) -> None:
+    """Run n queued worker tasks inline using the test's patched DB and mock LLM.
+
+    Must be called inside a test that has the _isolated_db and _inject_mock_llm
+    autouse fixtures active (i.e., any API test).
+    """
+    import asyncio
+    from sentinel_api.deps import SessionLocal
+    from sentinel_worker.runner import run_one_task
+
+    async def _run() -> None:
+        for _ in range(n):
+            async with SessionLocal() as session:
+                async with session.begin():
+                    await run_one_task(session, worker_id="test-worker")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
 @pytest.fixture(autouse=True)
 def _inject_mock_llm(monkeypatch):
     """Replace get_llm_for_graph with a mock for every API test."""

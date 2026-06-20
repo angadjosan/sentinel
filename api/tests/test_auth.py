@@ -1,28 +1,10 @@
-import asyncio
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
 from sentinel_api.main import app
-
-
-def _process_tasks(n: int = 1) -> None:
-    """Run n queued worker tasks inline, using the test's already-patched DB and LLM."""
-    from sentinel_api.deps import SessionLocal
-    from sentinel_worker.runner import run_one_task
-
-    async def _run():
-        for _ in range(n):
-            async with SessionLocal() as session:
-                async with session.begin():
-                    await run_one_task(session, worker_id="test-worker")
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_run())
-    finally:
-        loop.close()
+from .conftest import process_tasks as _process_tasks
 
 
 def test_auth_required_rejects_missing_token(monkeypatch):
