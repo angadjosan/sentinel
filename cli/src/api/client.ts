@@ -316,61 +316,20 @@ export class SentinelApiClient {
   }
 
   async *runEvents(id: string, timeoutMs = 120_000): AsyncGenerator<string> {
-    const controller = new AbortController();
-    // Overall wall-clock deadline for the entire stream
-    const wallTimer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(
-        `${this.config.apiUrl}/runs/${id}/events`,
-        { signal: controller.signal, headers: await this.authHeaders() }
-      );
-      if (!response.ok || !response.body) {
-        throw new Error(
-          `${response.status} ${response.statusText}: ${await response.text()}`
-        );
-      }
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let idleTimer: ReturnType<typeof setTimeout> | undefined;
-
-      const resetIdle = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        // Abort if no data arrives for 30s
-        idleTimer = setTimeout(() => controller.abort(), 30_000);
-      };
-
-      resetIdle();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          resetIdle();
-          buffer += decoder.decode(value, { stream: true });
-          let boundary = buffer.indexOf("\n\n");
-          while (boundary >= 0) {
-            const chunk = buffer.slice(0, boundary);
-            buffer = buffer.slice(boundary + 2);
-            for (const line of chunk.split("\n")) {
-              if (line.startsWith("data: ")) {
-                yield line.slice("data: ".length);
-              }
-            }
-            boundary = buffer.indexOf("\n\n");
-          }
+    const deadline = Date.now() + timeoutMs;
+    const emitted = new Set<string>();
+    const terminal = new Set(["completed", "failed", "cancelled"]);
+    while (Date.now() < deadline) {
+      const run = await this.run(id);
+      for (const line of (run.trace ?? "").split("\n")) {
+        const t = line.trim();
+        if (t && !emitted.has(t)) {
+          emitted.add(t);
+          yield t;
         }
-      } finally {
-        if (idleTimer) clearTimeout(idleTimer);
-        reader.releaseLock();
       }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        // Stream ended due to timeout — caller handles gracefully
-        return;
-      }
-      this.wrapFetchError(error, this.config.apiUrl, `/runs/${id}/events`);
-    } finally {
-      clearTimeout(wallTimer);
+      if (terminal.has(run.status)) return;
+      await new Promise<void>((r) => setTimeout(r, 1000));
     }
   }
 }
