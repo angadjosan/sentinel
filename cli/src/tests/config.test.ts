@@ -32,6 +32,11 @@ test("scan config validation rejects shell metacharacters", () => {
   assert.throws(() => validateConfigForScan(config), /shell metacharacters/);
 });
 
+test("apiUrl defaults to the hosted backend", () => {
+  const cfg = ConfigSchema.parse({ repoName: "demo" });
+  assert.equal(cfg.apiUrl, "https://sentinel-api.vercel.app");
+});
+
 test("loadConfig maps spec api_endpoint to apiUrl", () => {
   const root = mkdtempSync(join(tmpdir(), "sentinel-config-"));
   mkdirSync(join(root, ".git"));
