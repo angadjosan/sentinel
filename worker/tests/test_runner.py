@@ -12,6 +12,8 @@ from tests.conftest import MockLLMClient
 
 def _sqli_llm():
     """Mock LLM that emits a sqli finding."""
+    from sentinel_worker.agent import LLMCallResult
+
     class _FindingLLM:
         async def call_with_tools(self, *, tool_dispatcher, **kwargs):
             result = await tool_dispatcher("emit_finding", {
@@ -24,6 +26,10 @@ def _sqli_llm():
                 "taint_path": ["param:app.js:id", "fn:app.js:query"],
             })
             yield ToolCallEvent(type="tool_call", tool_name="emit_finding", tool_input={}, result=result)
+
+        async def call(self, **kwargs) -> LLMCallResult:
+            return LLMCallResult(content='{"annotations": []}', input_tokens=0, output_tokens=0, model="mock", provider="mock")
+
     return _FindingLLM()
 
 

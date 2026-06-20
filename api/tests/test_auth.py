@@ -1,9 +1,28 @@
+import asyncio
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
 from sentinel_api.main import app
+
+
+def _process_tasks(n: int = 1) -> None:
+    """Run n queued worker tasks inline, using the test's already-patched DB and LLM."""
+    from sentinel_api.deps import SessionLocal
+    from sentinel_worker.runner import run_one_task
+
+    async def _run():
+        for _ in range(n):
+            async with SessionLocal() as session:
+                async with session.begin():
+                    await run_one_task(session, worker_id="test-worker")
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
 
 
 def test_auth_required_rejects_missing_token(monkeypatch):
@@ -46,6 +65,10 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
         )
         assert scan_a.status_code == 200
         assert scan_b.status_code == 200
+
+    _process_tasks(2)
+
+    with TestClient(app) as client:
         findings_a = client.get("/findings?repo_name=shared-repo", headers={"Authorization": f"Bearer {token_a}"})
         findings_b = client.get("/findings?repo_name=shared-repo", headers={"Authorization": f"Bearer {token_b}"})
     assert findings_a.status_code == 200
@@ -54,26 +77,33 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     assert {finding["vuln_type"] for finding in findings_b.json()} == {"cmdi"}
 
 
-def test_authenticated_source_stream_uses_authenticated_account(monkeypatch):
+def test_authenticated_source_enqueues_and_run_is_scoped(monkeypatch):
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
-    token = create_token("stream-user", f"stream-account-{uuid4().hex}", "admin")
+    account_id = f"stream-account-{uuid4().hex}"
+    token = create_token("stream-user", account_id, "admin")
     with TestClient(app) as client:
-        with client.stream(
-            "POST",
-            "/source/stream",
+        resp = client.post(
+            "/source",
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "repo_name": "stream-repo",
                 "diff": "+++ b/app.js\n+db.query(`select ${req.query.id}`)",
                 "run_context": "local",
             },
-        ) as response:
-            body = response.read().decode()
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["run"]["status"] in ("queued", "running", "claimed")
+        run_id = body["run"]["id"]
 
-    assert response.status_code == 200
-    assert "graph_update" in body
-    assert "sqli" in body
-    assert "complete" in body
+    _process_tasks(1)
+
+    with TestClient(app) as client:
+        run = client.get(f"/runs/{run_id}", headers={"Authorization": f"Bearer {token}"})
+        assert run.status_code == 200
+        findings = client.get("/findings?repo_name=stream-repo", headers={"Authorization": f"Bearer {token}"})
+        assert findings.status_code == 200
+        assert any(f["vuln_type"] == "sqli" for f in findings.json())
 
 
 def test_authenticated_accounts_cannot_access_other_account_details(monkeypatch):
@@ -87,8 +117,14 @@ def test_authenticated_accounts_cannot_access_other_account_details(monkeypatch)
             json={"repo_name": "detail-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
         )
         assert created.status_code == 200
-        finding_id = created.json()["findings"][0]["id"]
         run_id = created.json()["run"]["id"]
+
+    _process_tasks(1)
+
+    with TestClient(app) as client:
+        findings_resp = client.get("/findings?repo_name=detail-repo", headers={"Authorization": f"Bearer {token_a}"})
+        assert findings_resp.status_code == 200
+        finding_id = findings_resp.json()[0]["id"]
 
         own_finding = client.get(f"/findings/{finding_id}", headers={"Authorization": f"Bearer {token_a}"})
         other_finding = client.get(f"/findings/{finding_id}", headers={"Authorization": f"Bearer {token_b}"})
@@ -129,13 +165,17 @@ def test_authenticated_graph_runs_and_analytics_are_account_scoped(monkeypatch):
         )
         assert scan_a.status_code == 200
         assert scan_b.status_code == 200
+        run_a_id = scan_a.json()["run"]["id"]
 
+    _process_tasks(2)
+
+    with TestClient(app) as client:
         runs_a = client.get("/runs", headers={"Authorization": f"Bearer {token_a}"})
         graph_a = client.get("/graph", headers={"Authorization": f"Bearer {token_a}"})
         trends_a = client.get("/analytics/finding-trends", headers={"Authorization": f"Bearer {token_a}"})
         fp_a = client.get("/analytics/false-positive-rate", headers={"Authorization": f"Bearer {token_a}"})
 
-    assert {run["id"] for run in runs_a.json()} == {scan_a.json()["run"]["id"]}
+    assert {run["id"] for run in runs_a.json()} == {run_a_id}
     assert any((node.get("file") or "") == "services/a/app.js" for node in graph_a.json()["nodes"])
     assert all((node.get("file") or "") != "services/b/app.js" for node in graph_a.json()["nodes"])
     assert {row["severity"] for row in trends_a.json()} == {"high"}
@@ -172,6 +212,10 @@ def test_source_file_reads_are_account_scoped(monkeypatch):
             json={"repo_name": "shared-source", "files": {"app.js": "const tenant = 'a';"}},
         )
         assert created.status_code == 200
+
+    _process_tasks(1)
+
+    with TestClient(app) as client:
         allowed = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_a}"})
         denied = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_b}"})
     assert allowed.status_code == 200
