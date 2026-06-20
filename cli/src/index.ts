@@ -7,6 +7,7 @@ import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
 import { writeApiKey } from "./auth/keychain.js";
+import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff, lsFiles } from "./diff/git.js";
 import { ensureBackend, startBackend, stopBackend, backendStatus } from "./backend/ensure.js";
@@ -40,6 +41,9 @@ auth
       const token = await client.deviceAuthToken(started.device_code);
       if (token.status === "approved") {
         await writeApiKey(config, token.access_token);
+        if (token.database_url) {
+          writeWorkerConn({ databaseUrl: token.database_url, accountId: token.account_id });
+        }
         console.log(`logged in as ${token.user_id} for account ${token.account_id}`);
         return;
       }

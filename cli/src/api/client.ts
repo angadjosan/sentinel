@@ -45,6 +45,7 @@ export type DeviceAuthToken =
       access_token: string;
       account_id: string;
       user_id: string;
+      database_url?: string;
     };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
