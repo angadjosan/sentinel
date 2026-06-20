@@ -7,6 +7,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:binaries": "bun build.ts",
     "test": "node --test dist/tests/*.test.js"
   },
   "dependencies": {
