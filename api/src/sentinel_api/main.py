@@ -18,13 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
-from sentinel_worker.pentest import PentestRequestContext, run_pentest
 from sentinel_worker.graph_merge import merge_graph
-from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff
 from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import read_run_trace
-from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, PentestSandboxConfig, SandboxExecutor
 
 from .auth import Principal, create_token, current_principal, require_admin
 from .deps import get_db, init_schema
@@ -308,7 +305,12 @@ async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)
     if session.status != "approved" or not session.account_id or not session.user_id:
         raise HTTPException(status_code=202, detail="authorization pending")
     token = create_token(session.user_id, session.account_id, session.role or "admin")
-    return DeviceTokenResponse(access_token=token, account_id=session.account_id, user_id=session.user_id)
+    return DeviceTokenResponse(
+        access_token=token,
+        account_id=session.account_id,
+        user_id=session.user_id,
+        database_url=os.getenv("SENTINEL_WORKER_DATABASE_URL"),
+    )
 
 
 @app.get("/config", response_model=AccountConfigResponse)
@@ -344,39 +346,35 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
     return account_config_response(account)
 
 
-@app.post("/init", response_model=RunResponse)
-async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RunResponse:
-    from sentinel_worker.sast import LLMNotConfiguredError
-    try:
-        run = await bootstrap_repo(db, payload.repo_name, payload.files, account_id=_graph_account_id(principal))
-    except (LLMNotConfiguredError, ValueError, RuntimeError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
-    return await run_response(db, run)
+@app.post("/init", response_model=EnqueueResponse)
+async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
+    task = await enqueue_task(
+        db,
+        repo_name=payload.repo_name,
+        kind="init",
+        payload={"repo_name": payload.repo_name, "files": payload.files},
+        account_id=_graph_account_id(principal),
+    )
+    run = await db.get(Run, task.run_id)
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
+    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
-@app.post("/source", response_model=SourceResponse)
-async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
-    from sentinel_worker.sast import LLMNotConfiguredError
+@app.post("/source", response_model=EnqueueResponse)
+async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
     await _check_token_budget(db, principal)
-    ACTIVE_RUNS.inc()
-    start = datetime.now(UTC)
-    try:
-        run = await scan_diff(db, payload.repo_name, payload.diff, run_context=payload.run_context, account_id=_graph_account_id(principal), base_ref=payload.base_ref, paths=payload.paths)
-        rows = await db.scalars(select(Finding).where(Finding.run_id == run.id))
-        findings = list(rows)
-        for finding in findings:
-            FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
-        RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
-        SCAN_DURATION.labels(kind=run.kind).observe((datetime.now(UTC) - start).total_seconds())
-        return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
-    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("source_scan_failed", error=str(exc), exc_info=exc)
-        raise HTTPException(status_code=500, detail="Scan failed unexpectedly. Check server logs.") from exc
-    finally:
-        ACTIVE_RUNS.dec()
+    task = await enqueue_task(
+        db,
+        repo_name=payload.repo_name,
+        kind="source",
+        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
+        account_id=_graph_account_id(principal),
+    )
+    run = await db.get(Run, task.run_id)
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
+    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
 @app.post("/source/enqueue", response_model=EnqueueResponse)
@@ -394,17 +392,6 @@ async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
-
-@app.post("/source/stream")
-async def source_stream(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
-    async def events():
-        yield f"data: {json.dumps({'kind': 'graph_update', 'message': 'scan started'})}\n\n"
-        result = await source(payload, db, principal)
-        for finding in result.findings:
-            yield f"data: {finding.model_dump_json()}\n\n"
-        yield f"data: {json.dumps({'kind': 'run.completed', 'run_id': result.run.id, 'finding_count': len(result.findings)})}\n\n"
-
-    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @app.post("/tasks/claim", response_model=TaskResponse | None)
@@ -440,21 +427,20 @@ async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db),
     return task_response(task)
 
 
-@app.post("/plan", response_model=SourceResponse)
-async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceResponse:
-    from sentinel_worker.sast import LLMNotConfiguredError
+@app.post("/plan", response_model=EnqueueResponse)
+async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
     await _check_token_budget(db, principal)
-    try:
-        run, findings = await review_plan(db, payload.repo_name, payload.content, with_retry=payload.with_retry, account_id=_graph_account_id(principal))
-    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("plan_scan_failed", error=str(exc), exc_info=exc)
-        raise HTTPException(status_code=500, detail="Plan review failed unexpectedly. Check server logs.") from exc
-    RUNS_TOTAL.labels(kind=run.kind, status=run.status).inc()
-    for finding in findings:
-        FINDINGS_TOTAL.labels(vuln_type=finding.vuln_type, severity=finding.severity).inc()
-    return SourceResponse(run=await run_response(db, run), findings=[await finding_response(db, finding) for finding in findings])
+    task = await enqueue_task(
+        db,
+        repo_name=payload.repo_name,
+        kind="plan",
+        payload={"repo_name": payload.repo_name, "content": payload.content, "with_retry": payload.with_retry},
+        account_id=_graph_account_id(principal),
+    )
+    run = await db.get(Run, task.run_id)
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
+    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
 @app.get("/findings", response_model=list[FindingResponse])
@@ -734,34 +720,30 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
     )
 
 
-@app.post("/pentest", response_model=FindingResponse)
-async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> FindingResponse:
-    from sentinel_worker.sast import LLMNotConfiguredError
+@app.post("/pentest", response_model=EnqueueResponse)
+async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
     finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal, payload.description)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    try:
-        executor = _pentest_executor(payload)
-        result = await run_pentest(
-            db,
-            finding,
-            PentestRequestContext(
-                sanitizer_output=payload.sanitizer_output,
-                behavioral_proof=payload.behavioral_proof,
-                proof_detail=payload.proof_detail,
-                sandbox=PentestSandboxConfig(boot=payload.boot, healthcheck=payload.healthcheck, egress_allowlist=payload.egress_allowlist),
-                executor=executor,
-            ),
-        )
-    except HTTPException:
-        raise
-    except (LLMNotConfiguredError, RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        log.error("pentest_failed", error=str(exc), exc_info=exc)
-        raise HTTPException(status_code=500, detail="Pentest failed unexpectedly. Check server logs.") from exc
-    RUNS_TOTAL.labels(kind=result.run.kind, status=result.run.status).inc()
-    return await finding_response(db, result.finding)
+    task = await enqueue_task(
+        db,
+        repo_name=payload.repo_name or "",
+        kind="pentest",
+        payload={
+            "finding_id": finding.id,
+            "sanitizer_output": payload.sanitizer_output,
+            "behavioral_proof": payload.behavioral_proof,
+            "proof_detail": payload.proof_detail,
+            "boot": payload.boot,
+            "healthcheck": payload.healthcheck,
+            "egress_allowlist": payload.egress_allowlist,
+        },
+        account_id=_graph_account_id(principal),
+    )
+    run = await db.get(Run, task.run_id)
+    if run is None:
+        raise HTTPException(status_code=500, detail="run record not found after enqueue")
+    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
 
 
 @app.get("/runs", response_model=list[RunResponse])
@@ -1071,46 +1053,6 @@ async def _run_for_principal(db: AsyncSession, run_id: str, principal: Principal
         stmt = stmt.join(Graph, Run.graph_id == Graph.id).where(Graph.account_id == principal.account_id)
     return await db.scalar(stmt)
 
-
-def _pentest_executor(payload: PentestRequest) -> SandboxExecutor:
-    """Return the appropriate sandbox executor.
-
-    Priority order:
-    1. Firecracker microVM — when kernel_image + rootfs_image are configured (production).
-    2. LocalSubprocessSandboxExecutor — fallback for local/CI runs without Firecracker.
-
-    The executor is NEVER None; returning None would silently skip all sandbox execution.
-    """
-    from sentinel_worker.vm import LocalSubprocessSandboxExecutor
-    config = payload.firecracker
-    if config is not None and (config.enabled or config.kernel_image or config.rootfs_image):
-        if not config.kernel_image or not config.rootfs_image:
-            raise HTTPException(status_code=422, detail="firecracker.kernel_image and firecracker.rootfs_image are required when Firecracker is enabled")
-        return FirecrackerMicroVMExecutor(
-            FirecrackerConfig(
-                kernel_image=config.kernel_image,
-                rootfs_image=config.rootfs_image,
-                api_socket=config.api_socket,
-                firecracker_bin=config.firecracker_bin,
-                boot_args=config.boot_args,
-                vcpu_count=config.vcpu_count,
-                mem_size_mib=config.mem_size_mib,
-                smt=config.smt,
-                network_interface_id=config.network_interface_id,
-                host_dev_name=config.host_dev_name,
-                guest_mac=config.guest_mac,
-                guest_runner_argv=config.guest_runner_argv,
-            )
-        )
-    # No Firecracker config: local subprocess executor.
-    # In production (non-dev-mode) refuse to run pentest without proper isolation.
-    if not _is_dev_mode():
-        raise HTTPException(
-            status_code=422,
-            detail="Pentest requires Firecracker sandbox in production. "
-                   "Configure firecracker.kernel_image + rootfs_image, or enable SENTINEL_DEV_MODE for local testing."
-        )
-    return LocalSubprocessSandboxExecutor()
 
 
 def node_response(node: Node) -> NodeResponse:
