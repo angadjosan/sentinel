@@ -450,6 +450,7 @@ class TestScanDB:
                     session,
                     "my-repo",
                     {"app.py": "def index(): return 'ok'"},
+                    _llm=MockLLMClient(),
                 )
 
         assert run.status == "completed"
@@ -460,12 +461,13 @@ class TestScanDB:
         """bootstrap_repo stores an encrypted source snapshot for each file."""
         from sentinel_worker.scan import bootstrap_repo
         from sentinel_worker.models import SourceFileSnapshot
+        from tests.conftest import MockLLMClient
 
         engine = _engine()
         sm = await _session_factory(engine)
         async with sm() as session:
             async with session.begin():
-                await bootstrap_repo(session, "my-repo", {"main.py": "print('hello')"})
+                await bootstrap_repo(session, "my-repo", {"main.py": "print('hello')"}, _llm=MockLLMClient())
             async with session.begin():
                 snapshot = await session.scalar(select(SourceFileSnapshot).where(SourceFileSnapshot.file_path == "main.py"))
         assert snapshot is not None
@@ -731,7 +733,7 @@ class TestVM:
         import asyncio
         from sentinel_worker.vm import DryRunSandboxExecutor
         executor = DryRunSandboxExecutor()
-        result = asyncio.get_event_loop().run_until_complete(executor.run(["any", "command"]))
+        result = asyncio.run(executor.run(["any", "command"]))
         assert result.exit_code == 0
         assert result.stdout == "dry-run"
 

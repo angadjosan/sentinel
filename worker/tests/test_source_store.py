@@ -34,13 +34,14 @@ async def test_source_snapshot_encrypts_and_reads_content():
 
 @pytest.mark.asyncio
 async def test_bootstrap_stores_source_separately_from_nodes():
+    from tests.conftest import MockLLMClient
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     async with sessionmaker() as session:
         async with session.begin():
-            run = await bootstrap_repo(session, "repo", {"app.js": "const password = 'secret';"})
+            run = await bootstrap_repo(session, "repo", {"app.js": "const password = 'secret';"}, _llm=MockLLMClient())
         async with session.begin():
             graph = await session.get(Graph, run.graph_id)
             node = await session.get(Node, "file:app.js")

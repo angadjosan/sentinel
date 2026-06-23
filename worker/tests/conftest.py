@@ -32,7 +32,7 @@ class MockLLMClient:
         self.calls = []
 
     async def call(self, *, system: str, user: str | None = None, data: str | None = None, **kwargs):
-        from sentinel_worker.agent import LLMCallResult
+        from sentinel_worker.agent import LLMCallResult, record_token_event
         content_input = user or data or ""
         self.calls.append({"system": system, "content_input": content_input})
         # Return an empty but valid annotations payload for enrichment calls
@@ -41,13 +41,25 @@ class MockLLMClient:
             try:
                 payload = _json.loads(data)
                 nodes = payload.get("nodes", [])
-                annotations = [{"node_id": n["id"], "label": n.get("name", ""), "intent": ""} for n in nodes]
+                annotations = [{"node_id": n["id"], "label": n.get("name", ""), "intent": f"mock intent for {n.get('name', n['id'])}"} for n in nodes]
                 content = _json.dumps({"annotations": annotations})
             except Exception:
                 content = '{"annotations": []}'
         else:
             content = ""
-        return LLMCallResult(content=content, input_tokens=0, output_tokens=0, model="mock", provider="mock")
+        # Use small non-zero token counts so token_spend tracking works in tests
+        result = LLMCallResult(content=content, input_tokens=5, output_tokens=5, model="mock", provider="mock")
+        # Record token event when called in enrichment context (db + run_id provided)
+        db = kwargs.get("db")
+        run_id = kwargs.get("run_id")
+        if db is not None and run_id is not None:
+            await record_token_event(
+                db, run_id,
+                kwargs.get("component", "mock"),
+                result,
+                iteration=kwargs.get("iteration"),
+            )
+        return result
 
     async def call_with_tools(self, *, system, user, tools, tool_dispatcher, max_iterations=50, **kwargs):
         self.calls.append({"system": system, "user": user})
