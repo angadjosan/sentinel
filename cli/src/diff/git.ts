@@ -1,7 +1,25 @@
 import { execFileSync } from "node:child_process";
 
 export function git(args: string[]): string {
-  return execFileSync("git", args, { encoding: "utf8" });
+  try {
+    return execFileSync("git", args, { encoding: "utf8" });
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const detail = raw.replace(/\n/g, " ").trim();
+    if (detail.includes("not a git repository")) {
+      throw new Error("Not a git repository. Run `git init && git add . && git commit -m 'initial commit'` first.");
+    }
+    if (detail.includes("unknown revision") && args.some((a) => a.includes("HEAD~"))) {
+      throw new Error(
+        "Cannot diff HEAD~1 — this repo may have only one commit. " +
+        "Use `sentinel source --base <ref>` or make at least one more commit."
+      );
+    }
+    if (detail.includes("does not have any commits")) {
+      throw new Error("This repository has no commits yet. Make an initial commit before running a scan.");
+    }
+    throw new Error(`Git error: ${detail}`);
+  }
 }
 
 export type DiffResult = { diff: string; label: string };

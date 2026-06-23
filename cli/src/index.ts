@@ -6,9 +6,9 @@ import chalk from "chalk";
 import { Command } from "commander";
 
 import { type Finding, type Run, SentinelApiClient } from "./api/client.js";
-import { writeApiKey } from "./auth/keychain.js";
-import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
-import { currentDiff, lsFiles } from "./diff/git.js";
+import { readApiKey, writeApiKey } from "./auth/keychain.js";
+import { type SentinelConfig, ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
+import { git, currentDiff, lsFiles } from "./diff/git.js";
 
 const program = new Command();
 
@@ -151,13 +151,36 @@ function die(error: unknown): never {
 
   console.error("");
 
-  if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("Failed to fetch")) {
+  const httpStatus = msg.match(/^(\d{3})\s/)?.[1];
+
+  if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("Failed to fetch") || msg.includes("ETIMEDOUT") || msg.includes("UND_ERR_CONNECT_TIMEOUT")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold("Cannot connect to the Sentinel API")}`);
     console.error(`     URL:   ${chalk.dim(apiUrl)}`);
-    console.error(`     Fix:   ${chalk.white("docker compose up")}`);
+    console.error(`     Fix:   ${chalk.white("docker compose up -d")}`);
+    console.error(`     Check: ${chalk.white(`curl ${apiUrl}/health`)}`);
   } else if (msg.includes("401") || msg.toLowerCase().includes("unauthorized")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold("Not authenticated")}`);
     console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
+  } else if (httpStatus === "403") {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Permission denied")}`);
+    console.error(`     Your token may not have access to this resource.`);
+    console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
+  } else if (httpStatus === "404") {
+    const resource = /finding/i.test(msg) ? "finding" : /run/i.test(msg) ? "run" : "resource";
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold(`${resource.charAt(0).toUpperCase() + resource.slice(1)} not found`)}`);
+    if (resource === "finding") console.error(`     Hint:  ${chalk.white("sentinel list")}  ${chalk.dim("to see valid finding IDs")}`);
+    else if (resource === "run") console.error(`     Hint:  ${chalk.white("sentinel runs list")}  ${chalk.dim("to see valid run IDs")}`);
+  } else if (httpStatus === "422") {
+    let detail = msg.replace(/^422[^:]*:\s*/, "").trim();
+    try {
+      const parsed = JSON.parse(detail) as { detail?: string };
+      detail = parsed.detail ?? detail;
+    } catch { /* keep raw */ }
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Invalid request")}`);
+    console.error(`     ${chalk.dim(detail)}`);
+  } else if (httpStatus === "500" || msg.includes("Internal Server Error")) {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Server error — the API crashed processing your request")}`);
+    console.error(`     Check: ${chalk.white("docker compose logs api --tail 50")}`);
   } else if (msg.includes("LLM authentication failed")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold("LLM API key is invalid or missing")}`);
     console.error(`     Fix:   ${chalk.white("sentinel config set api-key <your-key>")}`);
@@ -168,16 +191,30 @@ function die(error: unknown): never {
   } else if (msg.includes("sentinel.config.json not found")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold("Repository not initialized")}`);
     console.error(`     Fix:   ${chalk.white("sentinel init")}`);
+  } else if (msg.includes("Not a git repository")) {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Not a git repository")}`);
+    console.error(`     Fix:   ${chalk.white("git init && git add . && git commit -m 'initial commit'")}`);
+  } else if (msg.includes("Cannot diff HEAD~1") || msg.includes("no commits yet")) {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Cannot diff — no prior commit")}`);
+    console.error(`     ${chalk.dim(msg)}`);
+    console.error(`     Use:   ${chalk.white("sentinel source --base <ref>")}`);
+  } else if (msg.includes("Git error:")) {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Git error")}`);
+    console.error(`     ${chalk.dim(msg.replace("Git error: ", ""))}`);
   } else if (msg.includes("device code expired")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold("Authorization timed out")}`);
     console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
-  } else if (msg.includes("Unsupported config key")) {
+  } else if (msg.includes("Unsupported config key") || msg.includes("Unsupported firecracker config key")) {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold(msg)}`);
     console.error(`     Valid keys: apiUrl, repoName, provider, model, boot, healthcheck, api_endpoint`);
+  } else if (msg.includes("shell metacharacters")) {
+    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Unsafe command in config")}`);
+    console.error(`     ${chalk.dim(msg)}`);
   } else {
     console.error(`  ${chalk.red("✗")}  ${chalk.bold(msg)}`);
   }
 
+  console.error(`\n  ${chalk.dim("Run")} ${chalk.white("sentinel doctor")} ${chalk.dim("to diagnose common setup issues.")}`);
   console.error("");
   process.exit(2);
 }
@@ -337,10 +374,28 @@ program
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
   .option("--queue", "Queue scan for cloud worker instead of running synchronously")
+  .option("--dry-run", "Preview what would be scanned without running the scan")
   .action(async (paths: string[], options) => {
     validateConfigForScan(loadConfig());
     const { diff, label } = currentDiff({ staged: options.staged, base: options.base, paths });
     const fileCount = diffFileCount(diff);
+
+    if (options.dryRun) {
+      console.log(`\n  ${chalk.bold("Dry run")}  ·  ${chalk.dim(label)}\n`);
+      const lines = diff.split("\n").filter((l) => l.startsWith("diff --git "));
+      if (lines.length === 0) {
+        console.log(`  ${chalk.dim("Empty diff — nothing to scan.")}\n`);
+        return;
+      }
+      console.log(`  ${chalk.bold(lines.length)} file${lines.length !== 1 ? "s" : ""} would be scanned:\n`);
+      for (const line of lines) {
+        const match = line.match(/diff --git a\/.+ b\/(.+)/);
+        if (match) console.log(`    ${chalk.dim("·")}  ${match[1]}`);
+      }
+      console.log();
+      return;
+    }
+
     const runContext = process.env.CI ? "ci" : "local";
     const client = new SentinelApiClient();
     const scope = { baseRef: options.base, paths };
@@ -379,11 +434,28 @@ program
   .option("--base <ref>", "Diff against this base ref")
   .option("--no-pentest", "Skip pentest")
   .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
+  .option("--dry-run", "Preview what would be scanned without running the scan")
   .action(async (paths: string[], options) => {
     validateConfigForScan(loadConfig());
     const client = new SentinelApiClient();
     const { diff, label } = currentDiff({ staged: options.staged, base: options.base, paths });
     const fileCount = diffFileCount(diff);
+
+    if (options.dryRun) {
+      console.log(`\n  ${chalk.bold("Dry run")}  ·  ${chalk.dim(label)}\n`);
+      const lines = diff.split("\n").filter((l) => l.startsWith("diff --git "));
+      if (lines.length === 0) {
+        console.log(`  ${chalk.dim("Empty diff — nothing to scan.")}\n`);
+        return;
+      }
+      console.log(`  ${chalk.bold(lines.length)} file${lines.length !== 1 ? "s" : ""} would be scanned:\n`);
+      for (const line of lines) {
+        const match = line.match(/diff --git a\/.+ b\/(.+)/);
+        if (match) console.log(`    ${chalk.dim("·")}  ${match[1]}`);
+      }
+      console.log();
+      return;
+    }
 
     console.log(`\n  Scanning ${chalk.bold(label)}${fileCount ? chalk.dim(`  ·  ${fileCount} file${fileCount !== 1 ? "s" : ""}`) : ""}\n`);
 
@@ -650,6 +722,128 @@ runs
   .action(async (id: string) => {
     const run = await new SentinelApiClient().cancelRun(id);
     console.log(`\n  ${chalk.green("✓")}  Run ${chalk.dim(run.id.slice(0, 8))} cancelled\n`);
+  });
+
+program
+  .command("doctor")
+  .description("Check that Sentinel is correctly set up in this repository")
+  .action(async () => {
+    type CheckResult = { label: string; ok: boolean; warn: boolean; detail: string };
+    const results: CheckResult[] = [];
+
+    function check(label: string, status: "ok" | "warn" | "fail", detail: string) {
+      results.push({ label, ok: status !== "fail", warn: status === "warn", detail });
+    }
+
+    // 1. Git repository
+    try {
+      git(["rev-parse", "--git-dir"]);
+      check("Git repository", "ok", "found");
+    } catch {
+      check("Git repository", "fail", "Not a git repository — run `git init && git commit`");
+    }
+
+    // 2. Config file
+    let config: SentinelConfig | null = null;
+    try {
+      config = loadConfig();
+      check("sentinel.config.json", "ok", `repo: ${config.repoName}  ·  api: ${config.apiUrl}`);
+    } catch {
+      check("sentinel.config.json", "fail", "Not found — run `sentinel init`");
+    }
+
+    // 3. API reachable
+    if (config) {
+      try {
+        const res = await fetch(`${config.apiUrl}/health`, { signal: AbortSignal.timeout(5000) });
+        if (res.ok) {
+          check("API reachable", "ok", config.apiUrl);
+        } else {
+          check("API reachable", "fail", `${config.apiUrl} returned ${res.status}`);
+        }
+      } catch {
+        check("API reachable", "fail", `Cannot reach ${config.apiUrl} — run \`docker compose up -d\``);
+      }
+    }
+
+    // 4. Authentication
+    if (config) {
+      let token: string | undefined;
+      try { token = await readApiKey(config); } catch { /* ignore */ }
+      if (!token) {
+        check("Authenticated", "fail", "No token — run `sentinel auth login`");
+      } else {
+        try {
+          await new SentinelApiClient(config).runs();
+          check("Authenticated", "ok", "token valid");
+        } catch (e) {
+          const m = e instanceof Error ? e.message : String(e);
+          if (m.includes("401")) {
+            check("Authenticated", "fail", "Token rejected — run `sentinel auth login`");
+          } else {
+            check("Authenticated", "warn", "Token present but could not verify (API may be down)");
+          }
+        }
+      }
+    }
+
+    // 5. LLM / Ollama
+    if (config) {
+      if (config.provider === "local") {
+        const ollamaUrl = config.api_endpoint ?? "http://localhost:11434";
+        try {
+          const res = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
+          if (res.ok) {
+            const body = (await res.json()) as { models?: Array<{ name: string }> };
+            const modelList = body.models?.map((m) => m.name).join(", ") || "none pulled yet";
+            check("Ollama reachable", "ok", `${ollamaUrl}  ·  models: ${modelList}`);
+            if (!body.models?.length) {
+              check("Ollama model", "fail", `No model pulled — run \`ollama pull ${config.model || "llama3.2"}\``);
+            } else {
+              const modelName = config.model === "ollama" ? "" : config.model;
+              const found = body.models.some((m) => m.name === modelName || m.name.startsWith(`${modelName}:`));
+              if (modelName && !found) {
+                check("Ollama model", "warn", `Model "${modelName}" not found locally — run \`ollama pull ${modelName}\``);
+              } else {
+                check("Ollama model", "ok", modelName || body.models[0].name);
+              }
+            }
+          } else {
+            check("Ollama reachable", "fail", `${ollamaUrl} returned ${res.status} — is Ollama running?`);
+          }
+        } catch {
+          check("Ollama reachable", "fail", `Cannot reach ${ollamaUrl} — start Ollama or set \`sentinel config set api_endpoint <url>\``);
+        }
+      } else {
+        const providerLabel = config.provider === "anthropic" ? "Anthropic" : config.provider === "openai" ? "OpenAI" : config.provider;
+        check(`LLM provider`, "ok", `${providerLabel}  ·  model: ${config.model}`);
+      }
+    }
+
+    // 6. Node.js version
+    const major = parseInt(process.version.slice(1), 10);
+    if (major >= 20) {
+      check("Node.js", "ok", process.version);
+    } else {
+      check("Node.js", "fail", `${process.version} is too old — requires v20 or later`);
+    }
+
+    // Display results
+    console.log(`\n  ${chalk.bold("sentinel doctor")}\n`);
+    let anyFail = false;
+    for (const r of results) {
+      const icon = r.ok && !r.warn ? chalk.green("✓") : r.warn ? chalk.yellow("⚠") : chalk.red("✗");
+      const label = chalk.bold(r.label.padEnd(24));
+      console.log(`  ${icon}  ${label}  ${chalk.dim(r.detail)}`);
+      if (!r.ok) anyFail = true;
+    }
+    console.log();
+    if (anyFail) {
+      console.log(`  ${chalk.bold("Issues found.")}  Fix the items marked ${chalk.red("✗")} above, then re-run ${chalk.white("sentinel doctor")}.\n`);
+      process.exitCode = 2;
+    } else {
+      console.log(`  ${chalk.green("✓")}  ${chalk.bold("Everything looks good")}\n`);
+    }
   });
 
 const config = program.command("config").description("Manage local Sentinel config");

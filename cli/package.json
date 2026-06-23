@@ -1,13 +1,37 @@
 {
   "name": "@sentinel/cli",
   "version": "0.1.0",
+  "description": "LLM-powered application security agent — finds real vulnerabilities, not just pattern matches",
   "type": "module",
   "bin": {
     "sentinel": "dist/index.js"
   },
+  "files": [
+    "dist/**/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "node --test dist/tests/*.test.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "security",
+    "appsec",
+    "sast",
+    "vulnerability-scanner",
+    "llm",
+    "ai-security"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/sentinel"
   },
   "dependencies": {
     "chalk": "^5.3.0",
