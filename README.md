@@ -11,7 +11,7 @@ A raw LLM can't do this either — no persistent architectural context, stale CV
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/angadjosan/sentinel/main/install.sh | bash
+npm install -g sentinel-sec
 ```
 
 Then:
@@ -26,6 +26,23 @@ Scans and pentests run locally (Docker required); findings sync to the hosted ba
 
 ```bash
 sentinel config set api-key sk-ant-...
+```
+
+**Pin in your project** (recommended for CI):
+
+```bash
+npm install --save-dev sentinel-sec
+```
+
+```yaml
+# .github/workflows/pr.yml
+- run: npx sentinel source
+```
+
+**Alternative — curl install** (for non-Node projects):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/angadjosan/sentinel/main/install.sh | bash
 ```
 
 ---
