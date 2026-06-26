@@ -563,20 +563,21 @@ async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, route
     language = language_for(source.path)
 
     for fn_node in functions:
-        fn_content = _lines_between(source.content, fn_node.line_start, fn_node.line_end)
+        fn_content = _lines_between(source.content, fn_node.line_start or 0, fn_node.line_end or 0)
         params = list(param_pattern.finditer(fn_content))
         sinks = list(SINK_RE.finditer(fn_content))
         if not params or not sinks:
             continue
 
+        fn_line_start = fn_node.line_start or 0
         param_source_node = Node(
             id=f"param:{source.path}:{fn_node.name}:request",
             graph_id=graph_id,
             kind="PARAMETER",
             name="request input",
             file=source.path,
-            line_start=fn_node.line_start + fn_content[: params[0].start()].count("\n"),
-            line_end=fn_node.line_start + fn_content[: params[0].start()].count("\n"),
+            line_start=fn_line_start + fn_content[: params[0].start()].count("\n"),
+            line_end=fn_line_start + fn_content[: params[0].start()].count("\n"),
             language=language,
             trust_level="untrusted",
             is_new=source.is_new,
@@ -586,7 +587,7 @@ async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, route
         await db.merge(param_source_node)
 
         for sink in sinks:
-            abs_line = fn_node.line_start + fn_content[: sink.start()].count("\n")
+            abs_line = fn_line_start + fn_content[: sink.start()].count("\n")
             sink_id = f"fn:{source.path}:{fn_node.name}:{sink.group(1)}"
             sink_node = Node(
                 id=sink_id,

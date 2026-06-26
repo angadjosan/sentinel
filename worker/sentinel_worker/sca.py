@@ -280,11 +280,11 @@ def parse_dependencies(path: str, content: str) -> list[Dependency]:
                 Dependency(name=match.group(1), version=match.group(2), ecosystem="npm", manifest_path=path)
                 for match in re.finditer(r'"(@?[^"]+)"\s*:\s*"[\^~]?([^"]+)"', content)
             ]
-        deps: list[Dependency] = []
+        pkg_deps: list[Dependency] = []
         for section in ("dependencies", "devDependencies"):
             for name, version in payload.get(section, {}).items():
-                deps.append(Dependency(name=name, version=str(version).lstrip("^~"), ecosystem="npm", manifest_path=path))
-        return deps
+                pkg_deps.append(Dependency(name=name, version=str(version).lstrip("^~"), ecosystem="npm", manifest_path=path))
+        return pkg_deps
     if path.endswith("requirements.txt"):
         return [Dependency(name=match.group(1), version=match.group(2), ecosystem="pypi", manifest_path=path) for match in REQUIREMENT_RE.finditer(content)]
     if path.endswith("Pipfile.lock"):

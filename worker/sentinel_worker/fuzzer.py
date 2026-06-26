@@ -262,10 +262,10 @@ async def execute_fuzzer_harness(
             stale_iterations += 1
         if run_result.exit_code != 0 or stale_iterations >= stagnation_limit:
             break
-    run_result = iterations[-1].result if iterations else None
+    final_run_result: CommandResult | None = iterations[-1].result if iterations else None
     return FuzzerExecutionResult(
         compile_result=compile_result,
-        run_result=run_result,
+        run_result=final_run_result,
         coverage_lines=_merged_coverage_lines(iterations),
         sanitizer_output=_sanitizer_text([compile_result]) or "\n".join(iteration.sanitizer_output for iteration in iterations if iteration.sanitizer_output),
         iterations=iterations,

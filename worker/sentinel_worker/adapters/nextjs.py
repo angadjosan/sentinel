@@ -36,15 +36,17 @@ def _route_path_from_file(file_path: str) -> str:
 
 class NextJSAdapter(FrameworkAdapter):
     def detect(self, file_path: str, content: str) -> bool:
-        return _is_next_route_file(file_path) or (
-            "next" in content.lower()
-            and (
-                "export default" in content
-                or "export async function" in content
-                or re.search(r"export\s+(const|function)\s+(GET|POST|PUT|DELETE|PATCH)", content)
-            )
-            and (
-                "/app/" in f"/{file_path}" or "/pages/" in f"/{file_path}"
+        return bool(
+            _is_next_route_file(file_path) or (
+                "next" in content.lower()
+                and (
+                    "export default" in content
+                    or "export async function" in content
+                    or re.search(r"export\s+(const|function)\s+(GET|POST|PUT|DELETE|PATCH)", content)
+                )
+                and (
+                    "/app/" in f"/{file_path}" or "/pages/" in f"/{file_path}"
+                )
             )
         )
 

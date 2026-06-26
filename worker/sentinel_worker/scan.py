@@ -399,7 +399,8 @@ async def _blast_radius_files(db: AsyncSession, graph_id: str, changed_paths: li
     for edge in edges:
         if edge.src in seed_ids or edge.dst in seed_ids:
             for node_id in (edge.src, edge.dst):
-                file = by_id.get(node_id).file if node_id in by_id else None
+                node_obj = by_id.get(node_id)
+                file = node_obj.file if node_obj is not None else None
                 if file:
                     affected.add(file)
     return sorted(affected)

@@ -676,7 +676,7 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
 
     if account and getattr(account, "provider", None) and getattr(account, "api_key", None):
         try:
-            llm = SentinelLLMClient(provider=account.provider, model=account.model, api_key=account.api_key)
+            llm = SentinelLLMClient(provider=account.provider, model=account.model, api_key=account.api_key or "")
             remediation_prompt_path = _Path(__file__).parent.parent.parent.parent / "worker" / "src" / "sentinel_worker" / "prompts" / "remediation.txt"
             system = remediation_prompt_path.read_text() if remediation_prompt_path.exists() else (
                 "You are a security engineer. Produce a concrete remediation plan as a JSON list of steps."

@@ -36,7 +36,7 @@ async def stream_run_events(
     if terminal.done:
         return
 
-    url = database_url or os.getenv("DATABASE_URL", "")
+    url: str = database_url or os.getenv("DATABASE_URL") or ""
     if not _is_postgres_url(url):
         async for event in _poll_run_events(db, run_id, emitted, poll_interval):
             yield event
@@ -54,7 +54,7 @@ async def _listen_run_events(db: AsyncSession, run_id: str, emitted: int, databa
         queue.put_nowait(payload)
 
     connection = await connect(database_url)
-    await connection.add_listener(channel, listener)
+    await connection.add_listener(channel, listener)  # type: ignore[attr-defined]
     try:
         run = await db.get(Run, run_id)
         if run is not None:
@@ -75,8 +75,8 @@ async def _listen_run_events(db: AsyncSession, run_id: str, emitted: int, databa
                 yield _sse({"kind": "complete", "run_id": run.id, "status": run.status})
                 return
     finally:
-        await connection.remove_listener(channel, listener)
-        await connection.close()
+        await connection.remove_listener(channel, listener)  # type: ignore[attr-defined]
+        await connection.close()  # type: ignore[attr-defined]
 
 
 async def _poll_run_events(db: AsyncSession, run_id: str, emitted: int, poll_interval: float) -> AsyncIterator[str]:

@@ -218,7 +218,7 @@ def _serialize_node(node: Node) -> dict:
         "is_sink": node.is_sink,
         "is_entry_point": node.is_entry_point,
         "auth_required": node.auth_required,
-        "tainted": node.tainted,
+        "tainted": node.tainted,  # type: ignore[attr-defined]
         "taint_uncertain": node.taint_uncertain,
         "line_start": node.line_start,
         "line_end": node.line_end,

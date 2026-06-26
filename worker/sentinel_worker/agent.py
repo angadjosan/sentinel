@@ -165,7 +165,7 @@ class SentinelLLMClient:
 
         # Use legacy protocol provider if set
         if self._legacy_provider is not None:
-            result = await self._legacy_provider.complete(
+            result = await self._legacy_provider.complete(  # type: ignore[attr-defined]
                 system=system, data=effective_user, model=self.model
             )
             if db is not None and run_id is not None:
@@ -448,8 +448,8 @@ class SentinelLLMClient:
                 model=self.model,
                 max_tokens=8192,
                 system=system,
-                messages=messages,
-                tools=tools,
+                messages=messages,  # type: ignore[arg-type]
+                tools=tools,  # type: ignore[arg-type]
             )
             total_input += response.usage.input_tokens
             total_output += response.usage.output_tokens
@@ -459,7 +459,7 @@ class SentinelLLMClient:
 
             if response.stop_reason == "tool_use":
                 # Append assistant message
-                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "assistant", "content": response.content})  # type: ignore[dict-item]
                 tool_results = []
                 for block in response.content:
                     if block.type == "tool_use":
@@ -476,7 +476,7 @@ class SentinelLLMClient:
                             "tool_use_id": block.id,
                             "content": json.dumps(result),
                         })
-                messages.append({"role": "user", "content": tool_results})
+                messages.append({"role": "user", "content": tool_results})  # type: ignore[dict-item]
             else:
                 break
 
@@ -531,10 +531,10 @@ class SentinelLLMClient:
         total_output = 0
 
         for _ in range(max_iterations):
-            response = await client.chat.completions.create(
+            response = await client.chat.completions.create(  # type: ignore[call-overload]
                 model=self.model,
-                messages=messages,
-                tools=openai_tools,
+                messages=messages,  # type: ignore[arg-type]
+                tools=openai_tools,  # type: ignore[arg-type]
                 tool_choice="auto",
             )
             usage = response.usage
