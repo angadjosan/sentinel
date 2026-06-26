@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { workerDockerArgs } from "../backend/ensure.js";
+import { workerDockerArgs } from "../src/backend/ensure.js";
 
 test("workerDockerArgs wires Neon + LLM env into the container", () => {
   const argv = workerDockerArgs({

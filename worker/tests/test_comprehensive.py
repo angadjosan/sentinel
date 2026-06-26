@@ -218,7 +218,7 @@ class TestConstructionPureFunctions:
 class TestConstructionDB:
     @pytest.mark.asyncio
     async def test_sanitized_taint_edge_is_not_tainted(self):
-        """When a sanitizer is called before the sink, the FLOWS_TO edge has tainted=False."""
+        """When a sanitizer is called before the sink inside a function, the FLOWS_TO edge has tainted=False."""
         from sentinel_worker.construction import SourceFile, build_file_graph
         engine = _engine()
         sm = await _session_factory(engine)
@@ -232,7 +232,7 @@ class TestConstructionDB:
                     graph.id,
                     SourceFile(
                         path="safe.py",
-                        content="sanitize(req.query)\ndb.query(safe_val)",
+                        content="def handle(request):\n    sanitize(request.GET)\n    db.query(safe_val)\n",
                         is_new=True,
                     ),
                 )
@@ -241,6 +241,80 @@ class TestConstructionDB:
         assert edge is not None
         assert edge.sanitized is True
         assert edge.tainted is False
+
+    @pytest.mark.asyncio
+    async def test_taint_without_function_produces_no_edges(self):
+        """Taint is function-scoped: bare param+sink at module level (no function) emits no FLOWS_TO edge."""
+        from sentinel_worker.construction import SourceFile, build_file_graph
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                graph = Graph(account_id="a", repo_id="r", kind="main")
+                session.add(graph)
+                await session.flush()
+                await build_file_graph(
+                    session,
+                    graph.id,
+                    SourceFile(
+                        path="module.py",
+                        content="req_val = request.GET['id']\ndb.query(req_val)\n",
+                        is_new=True,
+                    ),
+                )
+            async with session.begin():
+                edges = list(await session.scalars(select(Edge).where(Edge.kind == "FLOWS_TO")))
+        assert edges == []
+
+    @pytest.mark.asyncio
+    async def test_taint_does_not_cross_function_boundaries(self):
+        """A param in one function and a sink in another must NOT produce a FLOWS_TO edge."""
+        from sentinel_worker.construction import SourceFile, build_file_graph
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                graph = Graph(account_id="a", repo_id="r", kind="main")
+                session.add(graph)
+                await session.flush()
+                # get_input has a param but no sink; execute_sql has a sink but no param
+                content = (
+                    "def get_input(request):\n"
+                    "    return request.GET['id']\n"
+                    "\n"
+                    "def execute_sql():\n"
+                    "    cursor.execute('SELECT 1')\n"
+                )
+                await build_file_graph(
+                    session, graph.id, SourceFile(path="split.py", content=content, is_new=True)
+                )
+            async with session.begin():
+                edges = list(await session.scalars(select(Edge).where(Edge.kind == "FLOWS_TO")))
+        assert edges == []
+
+    @pytest.mark.asyncio
+    async def test_taint_within_single_function_emits_edge(self):
+        """A param and sink within the same function body produce a FLOWS_TO edge."""
+        from sentinel_worker.construction import SourceFile, build_file_graph
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                graph = Graph(account_id="a", repo_id="r", kind="main")
+                session.add(graph)
+                await session.flush()
+                content = (
+                    "def vulnerable(request):\n"
+                    "    user_id = request.GET['id']\n"
+                    "    db.query(user_id)\n"
+                )
+                await build_file_graph(
+                    session, graph.id, SourceFile(path="vuln.py", content=content, is_new=True)
+                )
+            async with session.begin():
+                edges = list(await session.scalars(select(Edge).where(Edge.kind == "FLOWS_TO")))
+        assert len(edges) == 1
+        assert edges[0].tainted is True
 
     @pytest.mark.asyncio
     async def test_python_fastapi_route_detected(self):
@@ -737,6 +811,53 @@ class TestVM:
         assert result.exit_code == 0
         assert result.stdout == "dry-run"
 
+    @pytest.mark.asyncio
+    async def test_firecracker_executor_runs_directly_without_guest_runner(self):
+        """When guest_runner_argv is empty, run() passes argv directly to _command_executor."""
+        import asyncio
+        from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, CommandResult
+
+        recorded: list[list[str]] = []
+
+        class RecordingExecutor:
+            async def run(self, argv, *, timeout_seconds=30):
+                recorded.append(argv)
+                return CommandResult(argv=argv, exit_code=0, stdout="ok")
+            async def close(self):
+                pass
+
+        config = FirecrackerConfig(kernel_image="/k", rootfs_image="/r", guest_runner_argv=[])
+        executor = FirecrackerMicroVMExecutor(config, command_executor=RecordingExecutor())
+        executor._started = True  # skip actual VM boot
+
+        result = await executor.run(["echo", "hello"])
+        assert result.exit_code == 0
+        assert recorded == [["echo", "hello"]]
+
+    @pytest.mark.asyncio
+    async def test_firecracker_executor_prepends_guest_runner_when_configured(self):
+        """When guest_runner_argv is set, run() prepends it to the argv."""
+        from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, CommandResult
+
+        recorded: list[list[str]] = []
+
+        class RecordingExecutor:
+            async def run(self, argv, *, timeout_seconds=30):
+                recorded.append(argv)
+                return CommandResult(argv=argv, exit_code=0, stdout="ok")
+            async def close(self):
+                pass
+
+        config = FirecrackerConfig(
+            kernel_image="/k", rootfs_image="/r",
+            guest_runner_argv=["ssh", "root@172.16.0.2"]
+        )
+        executor = FirecrackerMicroVMExecutor(config, command_executor=RecordingExecutor())
+        executor._started = True
+
+        await executor.run(["id"])
+        assert recorded == [["ssh", "root@172.16.0.2", "id"]]
+
 
 # ===========================================================================
 # notifications.py — channel sanitization + sqlite no-op
@@ -1059,3 +1180,65 @@ class TestLanguages:
     def test_language_for(self, path, expected):
         from sentinel_worker.languages import language_for
         assert language_for(path) == expected
+
+
+# ===========================================================================
+# pentest.py — _payload_candidates
+# ===========================================================================
+
+class TestPayloadCandidates:
+    def _make_finding(self, vuln_type):
+        return Finding(
+            graph_id="g", vuln_type=vuln_type, severity="high",
+            title="t", description="d", remediation="r", fingerprint=f"fp-{vuln_type}"
+        )
+
+    def test_sqli_payloads_include_sleep_and_union(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("sqli"), None)
+        joined = " ".join(payloads)
+        assert "SLEEP" in joined or "pg_sleep" in joined
+        assert "UNION" in joined
+
+    def test_cmdi_payloads_include_id_and_whoami(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("cmdi"), None)
+        joined = " ".join(payloads)
+        assert "id" in joined
+        assert "whoami" in joined
+
+    def test_path_traversal_payloads_include_etc_passwd(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("path_traversal"), None)
+        assert any("etc/passwd" in p for p in payloads)
+
+    def test_xss_payloads_include_script_tag(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("xss"), None)
+        assert any("<script>" in p for p in payloads)
+
+    def test_ssrf_payloads_include_imds_endpoint(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("ssrf"), None)
+        assert any("169.254.169.254" in p for p in payloads)
+
+    def test_ssti_payloads_include_template_expression(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("ssti"), None)
+        assert any("{{" in p or "${" in p for p in payloads)
+
+    def test_auth_bypass_payloads_include_none_alg_jwt(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("auth_bypass"), None)
+        # The none-alg JWT is base64-encoded; check for its characteristic header segment
+        assert any("eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" in p for p in payloads)
+
+    def test_sca_reachable_returns_multiple_payload_types(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("sca_reachable"), None)
+        assert len(payloads) >= 3
+
+    def test_unknown_vuln_type_returns_generic_payloads(self):
+        from sentinel_worker.pentest import _payload_candidates
+        payloads = _payload_candidates(self._make_finding("unknown_type"), None)
+        assert len(payloads) > 0

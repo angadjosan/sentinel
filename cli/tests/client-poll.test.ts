@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { SentinelApiClient } from "../api/client.js";
-import type { SentinelConfig } from "../config/sentinel.config.js";
+import { SentinelApiClient } from "../src/api/client.js";
+import type { SentinelConfig } from "../src/config/sentinel.config.js";
 
 test("runEvents polls run trace until terminal", async () => {
   const snapshots = [

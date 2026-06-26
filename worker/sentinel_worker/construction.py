@@ -560,47 +560,54 @@ async def _emit_imports(db: AsyncSession, graph_id: str, source: SourceFile, imp
 
 async def _emit_taint(db: AsyncSession, graph_id: str, source: SourceFile, routes: list[Node], functions: list[Node]) -> None:
     param_pattern = PY_PARAM_RE if language_for(source.path) == "python" else JS_PARAM_RE
-    params = list(param_pattern.finditer(source.content))
-    sinks = list(SINK_RE.finditer(source.content))
-    if not params or not sinks:
-        return
-    source_node = Node(
-        id=f"param:{source.path}:request",
-        graph_id=graph_id,
-        kind="PARAMETER",
-        name="request input",
-        file=source.path,
-        line_start=source.content[: params[0].start()].count("\n") + 1,
-        line_end=source.content[: params[0].start()].count("\n") + 1,
-        language=language_for(source.path),
-        trust_level="untrusted",
-        is_new=source.is_new,
-        label="HTTP request input",
-        intent="Untrusted input supplied by an external caller.",
-    )
-    await db.merge(source_node)
-    for sink in sinks:
-        sink_id = f"fn:{source.path}:{sink.group(1)}"
-        line = source.content[: sink.start()].count("\n") + 1
-        sink_node = Node(
-            id=sink_id,
+    language = language_for(source.path)
+
+    for fn_node in functions:
+        fn_content = _lines_between(source.content, fn_node.line_start, fn_node.line_end)
+        params = list(param_pattern.finditer(fn_content))
+        sinks = list(SINK_RE.finditer(fn_content))
+        if not params or not sinks:
+            continue
+
+        param_source_node = Node(
+            id=f"param:{source.path}:{fn_node.name}:request",
             graph_id=graph_id,
-            kind="FUNCTION",
-            name=sink.group(1),
+            kind="PARAMETER",
+            name="request input",
             file=source.path,
-            line_start=line,
-            line_end=line,
-            language=language_for(source.path),
-            is_sink=True,
+            line_start=fn_node.line_start + fn_content[: params[0].start()].count("\n"),
+            line_end=fn_node.line_start + fn_content[: params[0].start()].count("\n"),
+            language=language,
+            trust_level="untrusted",
             is_new=source.is_new,
-            label=f"{sink.group(1)} sink",
-            intent="Security-sensitive sink reached by code in this file.",
+            label="HTTP request input",
+            intent="Untrusted input supplied by an external caller.",
         )
-        await db.merge(sink_node)
-        sanitized = bool(SANITIZER_RE.search(source.content[: sink.start()]))
-        await _add_edge(db, graph_id, source_node.id, sink_node.id, "FLOWS_TO", tainted=not sanitized, sanitized=sanitized)
+        await db.merge(param_source_node)
+
+        for sink in sinks:
+            abs_line = fn_node.line_start + fn_content[: sink.start()].count("\n")
+            sink_id = f"fn:{source.path}:{fn_node.name}:{sink.group(1)}"
+            sink_node = Node(
+                id=sink_id,
+                graph_id=graph_id,
+                kind="FUNCTION",
+                name=sink.group(1),
+                file=source.path,
+                line_start=abs_line,
+                line_end=abs_line,
+                language=language,
+                is_sink=True,
+                is_new=source.is_new,
+                label=f"{sink.group(1)} sink",
+                intent="Security-sensitive sink reached by code in this file.",
+            )
+            await db.merge(sink_node)
+            sanitized = bool(SANITIZER_RE.search(fn_content[: sink.start()]))
+            await _add_edge(db, graph_id, param_source_node.id, sink_node.id, "FLOWS_TO", tainted=not sanitized, sanitized=sanitized)
+
         for route in routes:
-            await _add_edge(db, graph_id, route.id, sink_node.id, "CALLS")
+            await _add_edge(db, graph_id, route.id, fn_node.id, "CALLS")
 
 
 async def _emit_cross_service_calls(db: AsyncSession, graph_id: str, source: SourceFile) -> None:
