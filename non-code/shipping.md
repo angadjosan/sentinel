@@ -1,5 +1,7 @@
 # Shipping Guide
 
+> **TODO:** Deploy the API to Vercel first (`vercel --prod` from repo root, set env vars per `non-code/DEPLOY.md`) — nothing below works until the cloud backend is live at a real URL.
+
 ## Publishing the npm CLI
 
 `publish.yml` fires automatically on any `v*` tag pushed to the repo.
