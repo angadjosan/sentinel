@@ -1,0 +1,62 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sentinel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-sentinel}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sentinel} -d ${POSTGRES_DB:-sentinel}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  api:
+    image: ${SENTINEL_IMAGE_API:-ghcr.io/your-org/sentinel/api:latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sentinel}
+      SENTINEL_JWT_SECRET: ${SENTINEL_JWT_SECRET:?SENTINEL_JWT_SECRET is required}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    image: ${SENTINEL_IMAGE_API:-ghcr.io/your-org/sentinel/api:latest}
+    command: ["sentinel-worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sentinel}
+      SENTINEL_WORKER_ID: ${HOSTNAME:-worker-1}
+      SENTINEL_WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  dashboard:
+    image: ${SENTINEL_IMAGE_DASHBOARD:-ghcr.io/your-org/sentinel/dashboard:latest}
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_SENTINEL_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      SENTINEL_API_INTERNAL_URL: http://api:8000
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:

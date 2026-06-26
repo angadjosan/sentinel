@@ -1,15 +1,15 @@
 import { FindingTable } from "../components/FindingTable";
 import { FindingTrend, TokenChart } from "../components/TrendCharts";
-import { confirmationRate, falsePositiveRate, listFindings, listRuns, scanLatency, tokenSpend } from "../lib/api";
+import { type Finding, type Run, confirmationRate, falsePositiveRate, listFindings, listRuns, scanLatency, tokenSpend } from "../lib/api";
 
 export default async function OverviewPage() {
   const [findings, runs, spend, latency, falsePositive, confirmation] = await Promise.all([
-    listFindings(),
-    listRuns(),
-    tokenSpend(),
-    scanLatency(),
-    falsePositiveRate(),
-    confirmationRate()
+    listFindings().catch((): Finding[] => []),
+    listRuns().catch((): Run[] => []),
+    tokenSpend().catch((): Array<{ component: string; input_tokens: number; output_tokens: number; est_cost_usd: number }> => []),
+    scanLatency().catch((): Array<{ kind: string; p50_seconds: number; p90_seconds: number; count: number }> => []),
+    falsePositiveRate().catch(() => ({ total: 0, suppressed: 0, rate: 0 })),
+    confirmationRate().catch(() => ({ total: 0, confirmed: 0, rate: 0 })),
   ]);
   const open = findings.filter((finding) => finding.status === "open").length;
   const critical = findings.filter((finding) => finding.severity === "critical").length;

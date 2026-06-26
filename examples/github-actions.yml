@@ -1,0 +1,40 @@
+# Add this to .github/workflows/sentinel.yml in your repo
+# It runs Sentinel on every pull request and blocks merge if findings are returned.
+#
+# Prerequisites:
+#   1. Self-host the Sentinel backend (see README) or use a hosted instance
+#   2. Set SENTINEL_API_URL and SENTINEL_TOKEN as repository secrets
+
+name: Sentinel Security Scan
+
+on:
+  pull_request:
+
+jobs:
+  sentinel:
+    name: Sentinel scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Sentinel CLI
+        run: npm install -g @sentinel/cli
+
+      - name: Initialize repo (first run only — cached after)
+        run: sentinel init --api-url ${{ secrets.SENTINEL_API_URL }}
+        env:
+          SENTINEL_TOKEN: ${{ secrets.SENTINEL_TOKEN }}
+
+      - name: Scan PR diff
+        run: sentinel source --base ${{ github.event.pull_request.base.sha }}
+        env:
+          SENTINEL_TOKEN: ${{ secrets.SENTINEL_TOKEN }}
+        # Exits 1 if findings are found — PR is blocked
+        # Remove the next two lines to make the check advisory (non-blocking)
+        # continue-on-error: true

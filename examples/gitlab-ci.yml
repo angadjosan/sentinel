@@ -1,0 +1,21 @@
+# Add this to your .gitlab-ci.yml
+# Runs Sentinel on every merge request diff.
+#
+# Prerequisites:
+#   1. Self-host the Sentinel backend or use a hosted instance
+#   2. Set SENTINEL_API_URL and SENTINEL_TOKEN as CI/CD variables
+
+sentinel:
+  stage: test
+  image: node:20-slim
+  only:
+    - merge_requests
+  before_script:
+    - npm install -g @sentinel/cli
+  script:
+    - sentinel init --api-url $SENTINEL_API_URL
+    - sentinel source --base $CI_MERGE_REQUEST_DIFF_BASE_SHA
+  variables:
+    SENTINEL_TOKEN: $SENTINEL_TOKEN
+  # Remove 'allow_failure: false' line to make advisory (non-blocking)
+  allow_failure: false
