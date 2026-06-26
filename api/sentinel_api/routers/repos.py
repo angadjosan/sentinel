@@ -6,8 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Graph, Repo, Run
-from sentinel_worker.scan import bootstrap_repo, review_plan, scan_diff
+from sentinel_worker.models import Repo, Run
 from sentinel_worker.task_queue import enqueue_task
 
 from ..auth import Principal, current_principal
@@ -21,7 +20,6 @@ from ..schemas import (
     RepoResponse,
     RunResponse,
     SourceRequest,
-    SourceResponse,
 )
 
 router = APIRouter(prefix="/repos", tags=["repos"])

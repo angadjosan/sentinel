@@ -35,7 +35,6 @@ class DjangoAdapter(FrameworkAdapter):
             path = "/" + raw_path.strip("/")
             if path == "/":
                 path = "/"
-            view_name = m.group(2) if m.group(2) else "view"
             route_id = f"route:{file_path}:ANY {path}"
 
             # Look at surrounding lines for auth decorators

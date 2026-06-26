@@ -243,7 +243,6 @@ class LayeredGraphQuery:
     @classmethod
     async def for_graph(cls, db: AsyncSession, graph_id: str) -> "LayeredGraphQuery":
         """Build a layered query for a graph by walking its parent chain."""
-        from sqlalchemy import select as sa_select
         from .models import Graph
 
         chain: list[str] = []

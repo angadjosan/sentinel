@@ -46,7 +46,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ./api -e ./worker
+      - run: pip install -e "./api[test]" -e "./worker[test]"
       - run: pytest api/tests/ -v
         env:
           DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@localhost:5432/sentinel
@@ -62,7 +62,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ./api -e ./worker
+      - run: pip install -e "./api[test]" -e "./worker[test]"
       - run: pytest worker/tests/ -v
         env:
           SENTINEL_JWT_SECRET: test-secret

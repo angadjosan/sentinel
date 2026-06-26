@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .construction import SourceFile, build_source_graph
 from .enrichment import enrich_graph_nodes
 from .graph_query import GraphQuery
-from .languages import language_for
 from .models import Edge, Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
 from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
@@ -94,7 +93,7 @@ async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: st
 
 
 async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str], *, account_id: str | None = None, _llm=None) -> Run:
-    from .sast import get_llm_for_graph, LLMNotConfiguredError
+    from .sast import get_llm_for_graph
     from .enrichment import validate_enrichment_labels
     graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="init", status="running")
@@ -155,7 +154,7 @@ async def execute_source_scan(
     paths: list[str] | None = None,
     _llm=None,  # injectable for tests; production resolves from account config
 ) -> int:
-    from .sast import run_sast, get_llm_for_graph, LLMNotConfiguredError
+    from .sast import run_sast, get_llm_for_graph
 
     if run.status != "running":
         run.status = "running"
@@ -278,8 +277,7 @@ async def review_plan(
     _llm=None,
     max_passes: int | None = None,
 ) -> tuple[Run, list[Finding]]:
-    from .sast import run_sast, get_llm_for_graph, LLMNotConfiguredError
-    from pathlib import Path
+    from .sast import run_sast, get_llm_for_graph
 
     graph = await get_or_create_graph(db, repo_name, account_id=account_id)
     run = Run(graph_id=graph.id, kind="plan", status="running", trace=trace_event("plan.started", with_retry=with_retry))
@@ -292,9 +290,6 @@ async def review_plan(
     llm = _llm
     if llm is None:
         llm = await get_llm_for_graph(graph.id, db)
-
-    system_prompt_path = Path(__file__).parent / "prompts" / "sast.txt"
-    system = system_prompt_path.read_text()
 
     graph_query = GraphQuery(db=db, graph_id=graph.id)
     bootstrap_context = await sast_bootstrap([], graph_query)

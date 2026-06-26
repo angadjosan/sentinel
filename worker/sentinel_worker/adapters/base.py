@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 AUTH_MIDDLEWARE_PATTERNS = ['auth', 'authenticate', 'authorize', 'jwt', 'session', 'passport', 'login_required', 'permission_classes', 'before_action']
 

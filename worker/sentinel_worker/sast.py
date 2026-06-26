@@ -9,7 +9,6 @@ from .tools import TOOLS, dispatch_tool
 from .models import Finding, Account, Graph
 from .security import compute_fingerprint
 from .graph_query import GraphQuery
-from .scan import trace_event
 
 log = structlog.get_logger(__name__)
 

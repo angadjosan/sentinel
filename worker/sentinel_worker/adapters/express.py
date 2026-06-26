@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from .base import AUTH_MIDDLEWARE_PATTERNS, EdgeRecord, FrameworkAdapter, NodeRecord
+from .base import EdgeRecord, FrameworkAdapter, NodeRecord
 
 EXPRESS_ROUTE_PATTERN = re.compile(
     r'(?:app|router)\.(get|post|put|delete|patch|all)\s*\(\s*["\']([^"\']+)["\']'
