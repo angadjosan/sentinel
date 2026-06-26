@@ -9,7 +9,7 @@ const PID_DIR = join(SENTINEL_DIR, "pids");
 const LOG_DIR = join(SENTINEL_DIR, "logs");
 const WORKER_CONN_FILE = join(SENTINEL_DIR, "worker-conn.json");
 
-const WORKER_IMAGE = "ghcr.io/angadjosan/sentinel-worker:latest";
+const WORKER_IMAGE = "ghcr.io/sentineldev/sentinel-worker:latest";
 const WORKER_CONTAINER_NAME = "sentinel-worker";
 
 function ensureDirs(): void {

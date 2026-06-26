@@ -64,7 +64,7 @@ Users install the CLI via curl and run `sentinel auth login`. At login, the CLI 
 
 The worker image is published to GHCR on each release tag:
 ```
-ghcr.io/angadjosan/sentinel-worker:latest
+ghcr.io/sentineldev/sentinel-worker:latest
 ```
 
 ## Smoke Test

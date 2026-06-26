@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="angadjosan/sentinel"
+REPO="sentineldev/sentinel"
 INSTALL_DIR="${SENTINEL_INSTALL_DIR:-$HOME/.local/bin}"
 BIN="$INSTALL_DIR/sentinel"
 

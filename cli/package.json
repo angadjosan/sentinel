@@ -33,9 +33,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/angadjosan/sentinel"
+    "url": "https://github.com/sentineldev/sentinel"
   },
-  "homepage": "https://github.com/angadjosan/sentinel#readme",
+  "homepage": "https://github.com/sentineldev/sentinel#readme",
   "engines": {
     "node": ">=18.0.0"
   },

@@ -62,5 +62,5 @@ jobs:
           file: worker/Dockerfile
           push: true
           tags: |
-            ghcr.io/angadjosan/sentinel-worker:latest
-            ghcr.io/angadjosan/sentinel-worker:${{ github.ref_name }}
+            ghcr.io/sentineldev/sentinel-worker:latest
+            ghcr.io/sentineldev/sentinel-worker:${{ github.ref_name }}

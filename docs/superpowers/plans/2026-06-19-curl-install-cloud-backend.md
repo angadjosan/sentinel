@@ -14,7 +14,7 @@
 
 1. **Cloud never runs heavy work.** The inline endpoints `/source`, `/init`, `/plan`, `/pentest` in `api/src/sentinel_api/main.py` currently import and run `scan_diff`/`run_pentest`/`review_plan` in-process. On Vercel serverless these would time out, cost money, and defeat the "heavy work local" goal. **All heavy operations become enqueue-only** in the cloud; the local worker processes the queue.
 
-2. **Worker runs locally via Docker.** Replace `cli/src/backend/ensure.ts`'s `uvicorn`/`python3` spawning with a `docker run` of a published worker image (`ghcr.io/angadjosan/sentinel-worker`). Docker is the only local prerequisite for scanning/pentest. The CLI passes the user's LLM key and the Neon connection (obtained at login) into the container via env.
+2. **Worker runs locally via Docker.** Replace `cli/src/backend/ensure.ts`'s `uvicorn`/`python3` spawning with a `docker run` of a published worker image (`ghcr.io/sentineldev/sentinel-worker`). Docker is the only local prerequisite for scanning/pentest. The CLI passes the user's LLM key and the Neon connection (obtained at login) into the container via env.
 
 3. **SSE → polling.** The `/runs/{id}/events` SSE endpoint uses Postgres `LISTEN/NOTIFY` (asyncpg), which does not work over Neon's pooled connection or serverless. The CLI's `runEvents` is changed to **poll** `/runs/{id}` for status + trace deltas until the run reaches a terminal state. No server LISTEN/NOTIFY needed.
 
@@ -115,13 +115,13 @@ import { workerDockerArgs } from "../src/backend/ensure.js";
 
 test("workerDockerArgs wires Neon + LLM env into the container", () => {
   const argv = workerDockerArgs({
-    image: "ghcr.io/angadjosan/sentinel-worker:latest",
+    image: "ghcr.io/sentineldev/sentinel-worker:latest",
     databaseUrl: "postgresql+asyncpg://u:p@ep.neon.tech/db",
     accountId: "acct_123",
     anthropicKey: "sk-ant-xxx",
   });
   assert.ok(argv.includes("--rm"));
-  assert.ok(argv.includes("ghcr.io/angadjosan/sentinel-worker:latest"));
+  assert.ok(argv.includes("ghcr.io/sentineldev/sentinel-worker:latest"));
   assert.ok(argv.some((a) => a.startsWith("DATABASE_URL=")));
   assert.ok(argv.some((a) => a === "SENTINEL_ACCOUNT_ID=acct_123"));
   assert.ok(argv.some((a) => a === "ANTHROPIC_API_KEY=sk-ant-xxx"));
@@ -394,7 +394,7 @@ Expected: FAIL — `install.sh` does not exist.
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="angadjosan/sentinel"
+REPO="sentineldev/sentinel"
 INSTALL_DIR="${SENTINEL_INSTALL_DIR:-$HOME/.local/bin}"
 BIN="$INSTALL_DIR/sentinel"
 
@@ -689,8 +689,8 @@ Expected: prints `ok`.
           file: worker/Dockerfile
           push: true
           tags: |
-            ghcr.io/angadjosan/sentinel-worker:latest
-            ghcr.io/angadjosan/sentinel-worker:${{ github.ref_name }}
+            ghcr.io/sentineldev/sentinel-worker:latest
+            ghcr.io/sentineldev/sentinel-worker:${{ github.ref_name }}
 ```
 
 - [ ] **Step 4: Commit**
@@ -787,7 +787,7 @@ git commit -m "feat: deploy API to Vercel serverless + Neon, document deploy"
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/angadjosan/sentinel/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sentineldev/sentinel/main/install.sh | bash
 ```
 
 Then:
@@ -809,7 +809,7 @@ sentinel config set api-key sk-ant-...
 
 - [ ] **Step 3: Verify the curl command shape matches `install.sh`'s `REPO` + branch.**
 
-Run: `grep -n "raw.githubusercontent.com/angadjosan/sentinel" README.md`
+Run: `grep -n "raw.githubusercontent.com/sentineldev/sentinel" README.md`
 Expected: one match, branch `main`.
 
 - [ ] **Step 4: Commit**
