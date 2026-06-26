@@ -39,8 +39,8 @@ async def enqueue_task(db: AsyncSession, *, repo_name: str, kind: str, payload: 
     return task
 
 
-async def claim_next_task(db: AsyncSession, *, worker_id: str, kinds: list[str] | None = None) -> ClaimedTask | None:
-    task = await db.scalar(_claimable_task_stmt(kinds))
+async def claim_next_task(db: AsyncSession, *, worker_id: str, kinds: list[str] | None = None, account_id: str | None = None) -> ClaimedTask | None:
+    task = await db.scalar(_claimable_task_stmt(kinds, account_id=account_id))
     if task is None:
         return None
     task.status = "claimed"
@@ -142,8 +142,10 @@ async def _get_task(db: AsyncSession, task_id: str) -> Task:
     return task
 
 
-def _claimable_task_stmt(kinds: list[str] | None = None) -> Select[tuple[Task]]:
+def _claimable_task_stmt(kinds: list[str] | None = None, account_id: str | None = None) -> Select[tuple[Task]]:
     stmt = select(Task).where(Task.status == "queued").order_by(Task.created_at.asc()).limit(1)
     if kinds:
         stmt = stmt.where(Task.kind.in_(kinds))
+    if account_id:
+        stmt = stmt.where(Task.account_id == account_id)
     return stmt.with_for_update(skip_locked=True)

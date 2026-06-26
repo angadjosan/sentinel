@@ -10,3 +10,4 @@ sentinel.dev.db
 .env.*
 !.env.example
 sentinel.config.json
+cli/binaries/

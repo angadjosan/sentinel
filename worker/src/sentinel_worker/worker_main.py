@@ -14,7 +14,7 @@ from .runner import run_one_task
 log = structlog.get_logger()
 
 
-async def run_worker(*, worker_id: str, poll_interval: float = 2.0, stop: asyncio.Event | None = None) -> None:
+async def run_worker(*, worker_id: str, poll_interval: float = 2.0, stop: asyncio.Event | None = None, account_id: str | None = None) -> None:
     engine = create_engine()
     sessionmaker = create_sessionmaker(engine)
     await apply_migrations(engine)
@@ -23,7 +23,7 @@ async def run_worker(*, worker_id: str, poll_interval: float = 2.0, stop: asynci
         while not stop_event.is_set():
             async with sessionmaker() as session:
                 async with session.begin():
-                    task_id = await run_one_task(session, worker_id=worker_id)
+                    task_id = await run_one_task(session, worker_id=worker_id, account_id=account_id)
             if task_id:
                 log.info("worker.task_processed", worker_id=worker_id, task_id=task_id)
                 continue
@@ -38,6 +38,7 @@ async def run_worker(*, worker_id: str, poll_interval: float = 2.0, stop: asynci
 def main() -> None:
     worker_id = os.getenv("SENTINEL_WORKER_ID", f"worker-{os.getpid()}")
     poll_interval = float(os.getenv("SENTINEL_WORKER_POLL_INTERVAL", "2"))
+    account_id = os.getenv("SENTINEL_ACCOUNT_ID")
     stop = asyncio.Event()
 
     def request_stop() -> None:
@@ -50,7 +51,7 @@ def main() -> None:
             loop.add_signal_handler(sig, request_stop)
         except NotImplementedError:
             pass
-    loop.run_until_complete(run_worker(worker_id=worker_id, poll_interval=poll_interval, stop=stop))
+    loop.run_until_complete(run_worker(worker_id=worker_id, poll_interval=poll_interval, stop=stop, account_id=account_id))
 
 
 if __name__ == "__main__":

@@ -1,42 +1,47 @@
 {
-  "name": "@sentinel/cli",
+  "name": "sentinel-sec",
   "version": "0.1.0",
-  "description": "LLM-powered application security agent — finds real vulnerabilities, not just pattern matches",
+  "description": "AI-powered application security scanner — scan diffs, review plans, and run pentests from the CLI",
   "type": "module",
   "bin": {
     "sentinel": "dist/index.js"
   },
   "files": [
-    "dist/**/*"
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/api",
+    "dist/auth",
+    "dist/backend",
+    "dist/config",
+    "dist/diff"
   ],
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
-    "test": "node --test dist/tests/*.test.js"
-  },
-  "publishConfig": {
-    "access": "public"
+    "build:binaries": "bun build.ts",
+    "test": "node --test dist/tests/*.test.js",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "security",
     "appsec",
     "sast",
-    "vulnerability-scanner",
-    "llm",
-    "ai-security"
+    "pentest",
+    "scanner",
+    "cli",
+    "sentinel"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/sentinel"
+    "url": "https://github.com/angadjosan/sentinel"
+  },
+  "homepage": "https://github.com/angadjosan/sentinel#readme",
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^13.1.0",
-    "eventsource": "^2.0.2",
     "zod": "^3.23.8"
   },
   "optionalDependencies": {

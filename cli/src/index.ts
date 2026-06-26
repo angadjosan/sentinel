@@ -5,303 +5,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 import chalk from "chalk";
 import { Command } from "commander";
 
-import { type Finding, type Run, SentinelApiClient } from "./api/client.js";
-import { readApiKey, writeApiKey } from "./auth/keychain.js";
-import { type SentinelConfig, ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
-import { git, currentDiff, lsFiles } from "./diff/git.js";
+import { SentinelApiClient } from "./api/client.js";
+import { writeApiKey } from "./auth/keychain.js";
+import { writeWorkerConn } from "./backend/ensure.js";
+import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
+import { currentDiff, lsFiles } from "./diff/git.js";
+import { ensureBackend, startBackend, stopBackend, backendStatus } from "./backend/ensure.js";
 
 const program = new Command();
 
 program.name("sentinel").description("Cloud-backed application security scanner").version("0.1.0");
-
-program.action(async () => {
-  await showGreeting();
-});
-
-// ── Spinner ──────────────────────────────────────────────────────────────────
-
-const activeSpinners = new Set<Spinner>();
-
-class Spinner {
-  private timer: ReturnType<typeof setInterval> | null = null;
-  private frame = 0;
-  private readonly frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  private _text: string;
-  private readonly isTTY: boolean;
-
-  constructor(text: string) {
-    this._text = text;
-    this.isTTY = Boolean(process.stdout.isTTY);
-    activeSpinners.add(this);
-    if (this.isTTY) {
-      this.timer = setInterval(() => {
-        process.stdout.write(`\r  ${chalk.cyan(this.frames[this.frame++ % this.frames.length])}  ${this._text}  `);
-      }, 80);
-    } else {
-      process.stderr.write(`  ${text}\n`);
-    }
-  }
-
-  update(text: string) {
-    this._text = text;
-    if (!this.isTTY) process.stderr.write(`  ${text}\n`);
-  }
-
-  succeed(text: string) {
-    this.stop();
-    console.log(`  ${chalk.green("✓")}  ${text}`);
-  }
-
-  fail(text: string) {
-    this.stop();
-    console.log(`  ${chalk.red("✗")}  ${chalk.bold(text)}`);
-  }
-
-  stop() {
-    if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    if (this.isTTY) process.stdout.write("\r\x1b[K");
-    activeSpinners.delete(this);
-  }
-}
-
-// ── Display helpers ───────────────────────────────────────────────────────────
-
-const SEVERITY_COLORS: Record<string, (s: string) => string> = {
-  critical: (s) => chalk.bgRed.white.bold(s),
-  high:     (s) => chalk.bgRedBright.black.bold(s),
-  medium:   (s) => chalk.bgYellow.black.bold(s),
-  low:      (s) => chalk.bgBlue.white(s),
-  info:     (s) => chalk.bgGray.white(s),
-};
-
-function severityBadge(severity: string): string {
-  const fn = SEVERITY_COLORS[severity.toLowerCase()] ?? ((s: string) => chalk.bgGray.white(s));
-  return fn(` ${severity.toUpperCase()} `);
-}
-
-function severityColor(severity: string): (s: string) => string {
-  if (severity === "critical" || severity === "high") return chalk.red;
-  if (severity === "medium") return chalk.yellow;
-  return chalk.blue;
-}
-
-function printFinding(finding: Finding, index?: number): void {
-  const num = index !== undefined ? chalk.dim(`${index + 1}. `) : "   ";
-  const loc = finding.file
-    ? chalk.dim(`  ${finding.file}${finding.line_start ? `:${finding.line_start}` : ""}`)
-    : "";
-  const confirmed = finding.confirmed ? chalk.green(" [CONFIRMED]") : "";
-  console.log(`\n  ${num}${severityBadge(finding.severity)}${confirmed}  ${chalk.bold(finding.title)}${loc}`);
-  console.log(`       ${chalk.dim(finding.vuln_type)}  ·  ${chalk.dim(finding.id.slice(0, 8))}`);
-  console.log(`       ${severityColor(finding.severity)(finding.description)}`);
-  if (finding.remediation) {
-    console.log(`       ${chalk.cyan("→")} ${finding.remediation}`);
-  }
-}
-
-function printFindings(findings: Finding[]): void {
-  if (findings.length === 0) return;
-  for (let i = 0; i < findings.length; i++) printFinding(findings[i], i);
-}
-
-function findingSummary(findings: Finding[]): string {
-  if (findings.length === 0) return chalk.green("No issues found");
-  const counts: Record<string, number> = {};
-  for (const f of findings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
-  const parts: string[] = [];
-  for (const sev of ["critical", "high", "medium", "low", "info"]) {
-    if (counts[sev]) parts.push(severityColor(sev)(`${counts[sev]} ${sev}`));
-  }
-  return `${chalk.bold(findings.length)} issue${findings.length !== 1 ? "s" : ""}  ·  ${parts.join("  ·  ")}`;
-}
-
-function formatTable(headers: string[], rows: string[][]): void {
-  if (rows.length === 0) return;
-  const allRows = [headers, ...rows];
-  const widths = headers.map((_, i) => Math.max(...allRows.map((r) => (r[i] ?? "").length)));
-  const rule = chalk.dim(widths.map((w) => "─".repeat(w)).join("  "));
-  console.log(`\n  ${headers.map((h, i) => chalk.dim(h.padEnd(widths[i]))).join("  ")}`);
-  console.log(`  ${rule}`);
-  for (const row of rows) {
-    console.log(`  ${row.map((cell, i) => (cell ?? "").padEnd(widths[i])).join("  ")}`);
-  }
-}
-
-function formatElapsed(startMs: number): string {
-  return `${((Date.now() - startMs) / 1000).toFixed(1)}s`;
-}
-
-function fmtDate(iso: string): string {
-  return iso.replace("T", " ").slice(0, 19);
-}
-
-function diffFileCount(diff: string): number {
-  return (diff.match(/^diff --git /gm) ?? []).length;
-}
-
-// ── Error handler ─────────────────────────────────────────────────────────────
-
-function die(error: unknown): never {
-  for (const s of activeSpinners) s.stop();
-  activeSpinners.clear();
-
-  const msg = error instanceof Error ? error.message : String(error);
-  let apiUrl = "http://localhost:8000";
-  try { apiUrl = loadConfig().apiUrl; } catch { /* ignore */ }
-
-  console.error("");
-
-  const httpStatus = msg.match(/^(\d{3})\s/)?.[1];
-
-  if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("Failed to fetch") || msg.includes("ETIMEDOUT") || msg.includes("UND_ERR_CONNECT_TIMEOUT")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Cannot connect to the Sentinel API")}`);
-    console.error(`     URL:   ${chalk.dim(apiUrl)}`);
-    console.error(`     Fix:   ${chalk.white("docker compose up -d")}`);
-    console.error(`     Check: ${chalk.white(`curl ${apiUrl}/health`)}`);
-  } else if (msg.includes("401") || msg.toLowerCase().includes("unauthorized")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Not authenticated")}`);
-    console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
-  } else if (httpStatus === "403") {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Permission denied")}`);
-    console.error(`     Your token may not have access to this resource.`);
-    console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
-  } else if (httpStatus === "404") {
-    const resource = /finding/i.test(msg) ? "finding" : /run/i.test(msg) ? "run" : "resource";
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold(`${resource.charAt(0).toUpperCase() + resource.slice(1)} not found`)}`);
-    if (resource === "finding") console.error(`     Hint:  ${chalk.white("sentinel list")}  ${chalk.dim("to see valid finding IDs")}`);
-    else if (resource === "run") console.error(`     Hint:  ${chalk.white("sentinel runs list")}  ${chalk.dim("to see valid run IDs")}`);
-  } else if (httpStatus === "422") {
-    let detail = msg.replace(/^422[^:]*:\s*/, "").trim();
-    try {
-      const parsed = JSON.parse(detail) as { detail?: string };
-      detail = parsed.detail ?? detail;
-    } catch { /* keep raw */ }
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Invalid request")}`);
-    console.error(`     ${chalk.dim(detail)}`);
-  } else if (httpStatus === "500" || msg.includes("Internal Server Error")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Server error — the API crashed processing your request")}`);
-    console.error(`     Check: ${chalk.white("docker compose logs api --tail 50")}`);
-  } else if (msg.includes("LLM authentication failed")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("LLM API key is invalid or missing")}`);
-    console.error(`     Fix:   ${chalk.white("sentinel config set api-key <your-key>")}`);
-  } else if (msg.includes("LLM not configured")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("LLM provider not configured")}`);
-    console.error(`     Ollama:    ${chalk.white("sentinel config set provider local")}`);
-    console.error(`     Anthropic: ${chalk.white("sentinel config set provider anthropic && sentinel config set api-key <key>")}`);
-  } else if (msg.includes("sentinel.config.json not found")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Repository not initialized")}`);
-    console.error(`     Fix:   ${chalk.white("sentinel init")}`);
-  } else if (msg.includes("Not a git repository")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Not a git repository")}`);
-    console.error(`     Fix:   ${chalk.white("git init && git add . && git commit -m 'initial commit'")}`);
-  } else if (msg.includes("Cannot diff HEAD~1") || msg.includes("no commits yet")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Cannot diff — no prior commit")}`);
-    console.error(`     ${chalk.dim(msg)}`);
-    console.error(`     Use:   ${chalk.white("sentinel source --base <ref>")}`);
-  } else if (msg.includes("Git error:")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Git error")}`);
-    console.error(`     ${chalk.dim(msg.replace("Git error: ", ""))}`);
-  } else if (msg.includes("device code expired")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Authorization timed out")}`);
-    console.error(`     Fix:   ${chalk.white("sentinel auth login")}`);
-  } else if (msg.includes("Unsupported config key") || msg.includes("Unsupported firecracker config key")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold(msg)}`);
-    console.error(`     Valid keys: apiUrl, repoName, provider, model, boot, healthcheck, api_endpoint`);
-  } else if (msg.includes("shell metacharacters")) {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold("Unsafe command in config")}`);
-    console.error(`     ${chalk.dim(msg)}`);
-  } else {
-    console.error(`  ${chalk.red("✗")}  ${chalk.bold(msg)}`);
-  }
-
-  console.error(`\n  ${chalk.dim("Run")} ${chalk.white("sentinel doctor")} ${chalk.dim("to diagnose common setup issues.")}`);
-  console.error("");
-  process.exit(2);
-}
-
-// ── Greeting ─────────────────────────────────────────────────────────────────
-
-async function showGreeting(): Promise<void> {
-  const eyeFrames = [
-    ["        ██████████        ","      ██          ██      ","    ██              ██    ","   ██  ████          ██   ","  ██  ██████          ██  ","  ██  ████            ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██              ██    ","   ██                ██   ","  ██                  ██  ","  ██  ████            ██  ","   ██ ██████         ██   ","    ██████          ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██              ██    ","   ██      ████    ██   ","  ██      ██████    ██  ","  ██      ████      ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██              ██    ","   ██          ████  ██   ","  ██          ██████  ██  ","  ██            ████  ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██        ████  ██    ","   ██        ██████  ██   ","  ██          ████    ██  ","  ██                  ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██    ████      ██    ","   ██    ██████      ██   ","  ██      ████      ██  ","  ██                  ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-    ["        ██████████        ","      ██          ██      ","    ██              ██    ","   ██      ████    ██   ","  ██      ██████    ██  ","  ██      ████      ██  ","   ██                ██   ","    ██              ██    ","      ██          ██      ","        ██████████        "],
-  ];
-
-  const sequence = [0, 1, 2, 3, 4, 5, 2, 0, 3, 5, 4, 2, 6];
-  const frameHeight = eyeFrames[0].length;
-  process.stdout.write("\n");
-
-  for (let i = 0; i < sequence.length; i++) {
-    const frame = eyeFrames[sequence[i]];
-    const isLast = i === sequence.length - 1;
-    const delay = isLast ? 0 : (i >= sequence.length - 3 ? 180 : 120);
-    if (i > 0) process.stdout.write(`\x1b[${frameHeight}A`);
-    for (const line of frame) process.stdout.write(`    ${chalk.cyan(line)}\n`);
-    if (!isLast) await sleep(delay);
-  }
-
-  process.stdout.write("\n");
-  console.log(chalk.bold.white("  ╔══════════════════════════════════════════════════════╗"));
-  console.log(chalk.bold.white("  ║") + chalk.bold.cyan("          S E N T I N E L   v0.1.0                   ") + chalk.bold.white("║"));
-  console.log(chalk.bold.white("  ║") + chalk.dim("      Application Security Agent for your code        ") + chalk.bold.white("║"));
-  console.log(chalk.bold.white("  ╚══════════════════════════════════════════════════════╝"));
-  console.log();
-  console.log(chalk.bold.underline("  USAGE"));
-  console.log();
-  console.log(`    ${chalk.white("$")} ${chalk.green("sentinel")} ${chalk.yellow("<command>")} ${chalk.dim("[options]")}`);
-  console.log();
-  console.log(chalk.bold.underline("  COMMANDS"));
-  console.log();
-
-  const commands: Array<[string, string, string]> = [
-    ["Setup", "", ""],
-    ["", "init", "Initialize Sentinel for the current repository"],
-    ["", "auth login", "Authenticate with browser-based device code"],
-    ["", "config show", "Display current configuration"],
-    ["", "config set <key> <val>", "Update a config value"],
-    ["Scanning", "", ""],
-    ["", "source [paths...]", "Scan the current git diff for vulnerabilities"],
-    ["", "scan [paths...]", "Full scan: SAST analysis + automated pentesting"],
-    ["", "plan <file|text>", "Review a plan or design doc for security issues"],
-    ["", "pentest [target]", "Manually pentest a specific finding"],
-    ["Findings", "", ""],
-    ["", "list", "List all findings with optional filters"],
-    ["", "pull <id>", "Fetch remediation context for a finding"],
-    ["", "suppress <id>", "Suppress a finding (with approval workflow)"],
-    ["Runs", "", ""],
-    ["", "runs list", "List all scan run traces"],
-    ["", "runs show <id>", "Show run details with token summary"],
-    ["", "runs watch <id>", "Stream live run events"],
-    ["", "runs cancel <id>", "Cancel an in-progress run"],
-  ];
-
-  for (const [section, cmd, desc] of commands) {
-    if (section && !cmd) {
-      console.log(`  ${chalk.bold.cyan(section)}`);
-    } else {
-      console.log(`    ${chalk.green(cmd.padEnd(26))} ${chalk.dim(desc)}`);
-    }
-  }
-
-  console.log();
-  console.log(chalk.bold.underline("  QUICK START"));
-  console.log();
-  console.log(`    ${chalk.dim("1.")} ${chalk.white("sentinel init")}${chalk.dim("                    # set up repo + build code graph")}`);
-  console.log(`    ${chalk.dim("2.")} ${chalk.white("sentinel config set provider local")}${chalk.dim("  # use Ollama (already default)")}`);
-  console.log(`    ${chalk.dim("3.")} ${chalk.white("sentinel source")}${chalk.dim("                  # scan your latest changes")}`);
-  console.log(`    ${chalk.dim("4.")} ${chalk.white("sentinel list")}${chalk.dim("                    # review findings")}`);
-  console.log(`    ${chalk.dim("5.")} ${chalk.white("sentinel pull <id>")}${chalk.dim("               # get fix guidance")}`);
-  console.log();
-  console.log(`  ${chalk.dim("Run")} ${chalk.white("sentinel <command> --help")} ${chalk.dim("for detailed usage of any command.")}`);
-  console.log();
-}
-
-// ── Commands ──────────────────────────────────────────────────────────────────
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
@@ -310,31 +23,32 @@ auth
   .option("--poll-interval <seconds>", "Polling interval while waiting for approval", "2")
   .action(async (options) => {
     const config = loadConfig();
+    await ensureBackend(config.apiUrl);
     const client = new SentinelApiClient(config);
-
-    const spin = new Spinner("Starting device authorization...");
     const started = await client.startDeviceAuth();
-    spin.succeed("Device authorization started");
-
     const verificationUrl = absoluteUrl(config.apiUrl, started.verification_url);
-    console.log(`\n     Verify at:  ${chalk.cyan(verificationUrl)}`);
-    console.log(`     Code:       ${chalk.bold.white(started.user_code)}\n`);
-
     const pollIntervalMs = Math.max(250, Math.floor(Number(options.pollInterval) * 1000));
-    if (!Number.isFinite(pollIntervalMs)) throw new Error("poll interval must be a number of seconds");
+    if (!Number.isFinite(pollIntervalMs)) {
+      throw new Error("poll interval must be a number of seconds");
+    }
 
-    const spin2 = new Spinner("Waiting for approval...  (dev mode auto-approves)");
+    console.log(`Verification URL: ${verificationUrl}`);
+    console.log(`User code:        ${started.user_code}`);
+    console.log(`Polling for approval (dev mode auto-approves)...`);
+
     const deadline = Date.now() + started.expires_in * 1000;
     while (Date.now() < deadline) {
       const token = await client.deviceAuthToken(started.device_code);
       if (token.status === "approved") {
         await writeApiKey(config, token.access_token);
-        spin2.succeed(`Logged in  ${chalk.dim(`·  account: ${token.account_id}`)}`);
+        if (token.database_url) {
+          writeWorkerConn({ databaseUrl: token.database_url, accountId: token.account_id });
+        }
+        console.log(`logged in as ${token.user_id} for account ${token.account_id}`);
         return;
       }
       await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
-    spin2.fail("Authorization timed out");
     throw new Error("device code expired before approval");
   });
 
@@ -347,24 +61,23 @@ program
     const root = findRepoRoot();
     const path = configPath(root);
     const repoName = options.repoName ?? basename(root);
-
     if (!existsSync(path)) {
-      writeConfig(ConfigSchema.parse({ apiUrl: options.apiUrl, repoName, provider: "local", model: "ollama" }), root);
-      console.log(`  ${chalk.dim("→")}  Config written to ${chalk.dim(path)}`);
+      writeConfig(ConfigSchema.parse({ apiUrl: options.apiUrl, repoName, provider: "local", model: "llama3.2" }), root);
+      console.log(`wrote ${path}`);
     }
-
+    const config = loadConfig(root);
+    await ensureBackend(config.apiUrl);
     const files: Record<string, string> = {};
-    const allFiles = lsFiles().filter((f) => f !== "sentinel.config.json");
-    for (const file of allFiles) {
-      try { files[file] = readFileSync(join(root, file), "utf8"); } catch { /* skip binary */ }
+    for (const file of lsFiles()) {
+      if (file === "sentinel.config.json") continue;
+      try {
+        files[file] = readFileSync(join(root, file), "utf8");
+      } catch {
+        // Binary or unreadable tracked files are ignored by the bootstrap snapshot.
+      }
     }
-
-    const spin = new Spinner(`Uploading ${Object.keys(files).length} files and building code graph...`);
-    const t = Date.now();
-    const run = await new SentinelApiClient(loadConfig(root)).init(files);
-    spin.succeed(`Repository initialized  ${chalk.dim(`·  ${formatElapsed(t)}`)}`);
-    console.log(`\n     Repo:  ${chalk.bold(repoName)}`);
-    console.log(`     Run:   ${chalk.dim(run.id)}\n`);
+    const run = await new SentinelApiClient(config).init(files);
+    console.log(`initialized ${repoName}; run ${run.id}`);
   });
 
 program
@@ -373,57 +86,56 @@ program
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
-  .option("--queue", "Queue scan for cloud worker instead of running synchronously")
-  .option("--dry-run", "Preview what would be scanned without running the scan")
+  .option("--queue", "Queue scan for async worker (fire and forget)")
   .action(async (paths: string[], options) => {
-    validateConfigForScan(loadConfig());
-    const { diff, label } = currentDiff({ staged: options.staged, base: options.base, paths });
-    const fileCount = diffFileCount(diff);
-
-    if (options.dryRun) {
-      console.log(`\n  ${chalk.bold("Dry run")}  ·  ${chalk.dim(label)}\n`);
-      const lines = diff.split("\n").filter((l) => l.startsWith("diff --git "));
-      if (lines.length === 0) {
-        console.log(`  ${chalk.dim("Empty diff — nothing to scan.")}\n`);
-        return;
-      }
-      console.log(`  ${chalk.bold(lines.length)} file${lines.length !== 1 ? "s" : ""} would be scanned:\n`);
-      for (const line of lines) {
-        const match = line.match(/diff --git a\/.+ b\/(.+)/);
-        if (match) console.log(`    ${chalk.dim("·")}  ${match[1]}`);
-      }
-      console.log();
-      return;
-    }
-
-    const runContext = process.env.CI ? "ci" : "local";
-    const client = new SentinelApiClient();
+    const config = loadConfig();
+    validateConfigForScan(config);
+    await ensureBackend(config.apiUrl);
+    const diff = currentDiff({ staged: options.staged, base: options.base, paths });
+    const client = new SentinelApiClient(config);
     const scope = { baseRef: options.base, paths };
+    const runContext = process.env.CI ? "ci" : "local";
 
     if (options.queue) {
-      const spin = new Spinner("Queuing scan...");
       const queued = await client.enqueueSource(diff, runContext, scope);
-      spin.succeed(`Scan queued`);
-      console.log(`\n     Task:  ${chalk.dim(queued.task_id)}`);
-      console.log(`     Run:   ${chalk.dim(queued.run.id)}\n`);
+      console.log(`queued task ${queued.task_id}; run ${queued.run.id}`);
       return;
     }
 
-    console.log(`\n  Scanning ${chalk.bold(label)}${fileCount ? chalk.dim(`  ·  ${fileCount} file${fileCount !== 1 ? "s" : ""}`) : ""}\n`);
-    const spin = new Spinner("Analyzing...");
-    const t = Date.now();
-    const result = await client.source(diff, runContext, scope);
-    spin.succeed(`Scan complete  ${chalk.dim(`·  ${formatElapsed(t)}`)}  ·  ${findingSummary(result.findings)}`);
+    // Default: enqueue + stream findings live
+    const queued = await client.enqueueSource(diff, runContext, scope);
+    console.log(`run ${queued.run.id} started`);
 
-    printFindings(result.findings);
-
-    if (result.findings.length === 0) {
-      console.log(`\n  ${chalk.green("✓")}  ${chalk.bold("No issues found")}\n`);
-    } else {
-      console.log(`\n  ${findingSummary(result.findings)}\n`);
+    let findingCount = 0;
+    const deadline = Date.now() + 120_000; // 2-min overall cap
+    try {
+      for await (const event of client.runEvents(queued.run.id, 120_000)) {
+        try {
+          const parsed = JSON.parse(event) as Record<string, unknown>;
+          if (parsed.vuln_type) {
+            findingCount++;
+            console.log(`${chalk.red(((parsed.severity as string) || "unknown").toUpperCase())} ${parsed.vuln_type} ${parsed.id ?? ""}`);
+            console.log(`  ${parsed.title ?? ""}`);
+            if (parsed.remediation) console.log(`  fix: ${parsed.remediation}`);
+          }
+          const kind = parsed.kind as string | undefined;
+          if (kind === "run.completed" || kind === "complete" || kind === "scan.completed" ||
+              parsed.status === "failed" || parsed.status === "cancelled") {
+            if (typeof parsed.finding_count === "number") findingCount = parsed.finding_count;
+            break;
+          }
+        } catch { /* non-JSON trace lines */ }
+        if (Date.now() > deadline) break;
+      }
+    } catch {
+      // Stream interrupted — fall back to polling the run
+      try {
+        const run = await client.run(queued.run.id);
+        findingCount = run.finding_count;
+      } catch { /* ignore secondary error */ }
     }
-
-    process.exitCode = result.findings.length > 0 ? 1 : 0;
+    console.log(`run ${queued.run.id} completed with ${findingCount} finding(s)`);
+    process.exitCode = findingCount > 0 ? 1 : 0;
   });
 
 program
@@ -434,59 +146,53 @@ program
   .option("--base <ref>", "Diff against this base ref")
   .option("--no-pentest", "Skip pentest")
   .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
-  .option("--dry-run", "Preview what would be scanned without running the scan")
   .action(async (paths: string[], options) => {
     validateConfigForScan(loadConfig());
-    const client = new SentinelApiClient();
-    const { diff, label } = currentDiff({ staged: options.staged, base: options.base, paths });
-    const fileCount = diffFileCount(diff);
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const client = new SentinelApiClient(config);
+    const diff = currentDiff({ staged: options.staged, base: options.base, paths });
+    const scope = { baseRef: options.base, paths };
+    const runContext = process.env.CI ? "ci" : "local";
 
-    if (options.dryRun) {
-      console.log(`\n  ${chalk.bold("Dry run")}  ·  ${chalk.dim(label)}\n`);
-      const lines = diff.split("\n").filter((l) => l.startsWith("diff --git "));
-      if (lines.length === 0) {
-        console.log(`  ${chalk.dim("Empty diff — nothing to scan.")}\n`);
-        return;
+    const queued = await client.enqueueSource(diff, runContext, scope);
+    console.log(`run ${queued.run.id} started`);
+
+    let findingCount = 0;
+    const allFindings: Array<{ id: string }> = [];
+    const deadline = Date.now() + 120_000;
+    try {
+      for await (const event of client.runEvents(queued.run.id, 120_000)) {
+        try {
+          const parsed = JSON.parse(event) as Record<string, unknown>;
+          if (parsed.vuln_type && typeof parsed.id === "string") {
+            findingCount++;
+            allFindings.push({ id: parsed.id });
+            console.log(`${chalk.red(((parsed.severity as string) || "unknown").toUpperCase())} ${parsed.vuln_type} ${parsed.id}`);
+            console.log(`  ${parsed.title ?? ""}`);
+          }
+          const kind = parsed.kind as string | undefined;
+          if (kind === "run.completed" || kind === "complete" || kind === "scan.completed" ||
+              parsed.status === "failed" || parsed.status === "cancelled") {
+            if (typeof parsed.finding_count === "number") findingCount = parsed.finding_count;
+            break;
+          }
+        } catch { /* non-JSON */ }
+        if (Date.now() > deadline) break;
       }
-      console.log(`  ${chalk.bold(lines.length)} file${lines.length !== 1 ? "s" : ""} would be scanned:\n`);
-      for (const line of lines) {
-        const match = line.match(/diff --git a\/.+ b\/(.+)/);
-        if (match) console.log(`    ${chalk.dim("·")}  ${match[1]}`);
-      }
-      console.log();
-      return;
-    }
+    } catch { /* stream interrupted */ }
 
-    console.log(`\n  Scanning ${chalk.bold(label)}${fileCount ? chalk.dim(`  ·  ${fileCount} file${fileCount !== 1 ? "s" : ""}`) : ""}\n`);
-
-    const spin = new Spinner("Analyzing...");
-    const t = Date.now();
-    const result = await client.source(diff, process.env.CI ? "ci" : "local", { baseRef: options.base, paths });
-    spin.succeed(`Analysis complete  ${chalk.dim(`·  ${formatElapsed(t)}`)}  ·  ${result.findings.length} finding${result.findings.length !== 1 ? "s" : ""}`);
-
-    let findings = result.findings;
-
-    if (options.pentest && findings.length > 0) {
+    if (options.pentest && allFindings.length > 0) {
       const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
-      const spin2 = new Spinner(`Pentesting ${findings.length} finding${findings.length !== 1 ? "s" : ""}...`);
-      const t2 = Date.now();
-      const pentestResults = await runLimited(findings, concurrency, (f) => client.pentest({ findingId: f.id }));
-      spin2.succeed(`Pentest complete  ${chalk.dim(`·  ${formatElapsed(t2)}`)}`);
-      for (const updated of pentestResults) {
-        const i = findings.findIndex((f) => f.id === updated.id);
-        if (i >= 0) findings[i] = updated;
+      const pentestResults = await runLimited(allFindings, concurrency, async (finding) =>
+        client.pentest({ findingId: finding.id })
+      );
+      for (const f of pentestResults) {
+        console.log(`pentest ${f.id}: ${f.status} confirmed=${f.confirmed}`);
       }
     }
-
-    printFindings(findings);
-
-    if (findings.length === 0) {
-      console.log(`\n  ${chalk.green("✓")}  ${chalk.bold("No issues found")}\n`);
-    } else {
-      console.log(`\n  ${findingSummary(findings)}\n`);
-    }
-
-    process.exitCode = findings.length > 0 ? 1 : 0;
+    console.log(`scan ${queued.run.id}: ${findingCount} finding(s)`);
+    process.exitCode = findingCount > 0 ? 1 : 0;
   });
 
 program
@@ -495,29 +201,14 @@ program
   .option("--status <status>", "Filter by finding status")
   .option("--severity <severity>", "Filter by severity")
   .action(async (options) => {
-    const findings = await new SentinelApiClient().findings({ status: options.status, severity: options.severity });
-
-    if (findings.length === 0) {
-      console.log(`\n  ${chalk.green("✓")}  No findings\n`);
-      return;
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const findings = await new SentinelApiClient(config).findings({ status: options.status, severity: options.severity });
+    console.log("ID\tSTATUS\tSEVERITY\tTYPE\tFILE\tUPDATED\tTITLE");
+    for (const finding of findings) {
+      const file = finding.file ? `${finding.file}${finding.line_start ? `:${finding.line_start}` : ""}` : "n/a";
+      console.log(`${finding.id}\t${finding.status}\t${finding.severity}\t${finding.vuln_type}\t${file}\t${finding.updated_at}\t${finding.title}`);
     }
-
-    const counts: Record<string, number> = {};
-    for (const f of findings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
-    const summary = Object.entries(counts).map(([sev, n]) => severityColor(sev)(`${n} ${sev}`)).join("  ·  ");
-    console.log(`\n  ${chalk.bold(findings.length)} findings  ·  ${summary}`);
-
-    formatTable(
-      ["SEVERITY", "TYPE", "FILE", "TITLE", "ID"],
-      findings.map((f) => [
-        f.severity.toUpperCase(),
-        f.vuln_type,
-        f.file ? `${f.file}${f.line_start ? `:${f.line_start}` : ""}` : "—",
-        f.title.length > 48 ? f.title.slice(0, 45) + "..." : f.title,
-        f.id.slice(0, 8),
-      ])
-    );
-    console.log();
   });
 
 program
@@ -525,32 +216,18 @@ program
   .description("Fetch remediation context for a finding")
   .argument("<id>", "Finding ID")
   .action(async (id: string) => {
-    const result = await new SentinelApiClient().pull(id);
-    const f = result.finding;
-    const loc = f.file ? `${f.file}${f.line_start ? `:${f.line_start}` : ""}` : null;
-
-    console.log(`\n  ${severityBadge(f.severity)}  ${chalk.bold(f.title)}`);
-    if (loc) console.log(`     ${chalk.dim(loc)}`);
-    console.log(`     ${chalk.dim(f.vuln_type)}  ·  ${chalk.dim(f.id)}`);
-    console.log();
-    console.log(`  ${f.description}`);
-
-    if (result.remediation_plan.length > 0) {
-      console.log(`\n  ${chalk.bold("Remediation")}`);
-      for (let i = 0; i < result.remediation_plan.length; i++) {
-        console.log(`    ${chalk.dim(`${i + 1}.`)} ${result.remediation_plan[i]}`);
-      }
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const result = await new SentinelApiClient(config).pull(id);
+    console.log(`${result.finding.severity.toUpperCase()} ${result.finding.vuln_type}: ${result.finding.title}`);
+    console.log(result.finding.description);
+    console.log("\nRemediation plan:");
+    for (const item of result.remediation_plan) {
+      console.log(`- ${item}`);
     }
-
     if (result.node) {
-      const node = result.node as Record<string, unknown>;
-      console.log(`\n  ${chalk.bold("Graph node")}`);
-      console.log(`    ${chalk.dim(String(node.kind ?? ""))}  ${chalk.bold(String(node.name ?? ""))}  ${chalk.dim(node.file ? `${node.file}${node.line_start ? `:${node.line_start}` : ""}` : "")}`);
-      if (node.is_entry_point) console.log(`    ${chalk.yellow("entry point")}`);
-      if (node.is_sink) console.log(`    ${chalk.red("sink")}`);
-      if (node.intent) console.log(`    ${chalk.dim("intent:")} ${String(node.intent)}`);
+      console.log(`\nGraph node: ${JSON.stringify(result.node, null, 2)}`);
     }
-    console.log();
   });
 
 program
@@ -567,25 +244,24 @@ program
       content = await new Promise<string>((resolve) => {
         let data = "";
         process.stdin.setEncoding("utf8");
-        process.stdin.on("data", (chunk) => { data += chunk; });
+        process.stdin.on("data", (chunk) => {
+          data += chunk;
+        });
         process.stdin.on("end", () => resolve(data));
       });
     }
-    if (!content.trim()) throw new Error("Provide a plan file, inline plan text, or stdin content.");
-
-    const spin = new Spinner("Reviewing plan for security issues...");
-    const t = Date.now();
-    const result = await new SentinelApiClient().plan(content, Boolean(options.withRetry));
-    spin.succeed(`Review complete  ${chalk.dim(`·  ${formatElapsed(t)}`)}  ·  ${findingSummary(result.findings)}`);
-
-    printFindings(result.findings);
-
-    if (result.findings.length === 0) {
-      console.log(`\n  ${chalk.green("✓")}  ${chalk.bold("No issues found")}\n`);
-    } else {
-      console.log(`\n  ${findingSummary(result.findings)}\n`);
+    if (!content.trim()) {
+      throw new Error("Provide a plan file, inline plan text, or stdin content.");
     }
-
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const result = await new SentinelApiClient(config).plan(content, Boolean(options.withRetry));
+    for (const finding of result.findings) {
+      console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type}: ${finding.title}`);
+      console.log(`  ${finding.description}`);
+      console.log(`  fix: ${finding.remediation}`);
+    }
+    console.log(`plan run ${result.run.id} completed with ${result.findings.length} issue(s)`);
     process.exitCode = result.findings.length > 0 ? 1 : 0;
   });
 
@@ -597,20 +273,12 @@ program
   .option("--behavioral-proof <kind>", "Behavioral proof kind")
   .option("--proof-detail <text>", "Behavioral proof detail", "")
   .action(async (targetParts: string[], options) => {
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
     const target = parsePentestTarget(targetParts);
-    const spin = new Spinner("Running pentest...");
-    const finding = await new SentinelApiClient().pentest(target, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
-    spin.stop();
-
-    if (finding.confirmed) {
-      console.log(`  ${chalk.green("✓")}  ${chalk.bold.green("Confirmed")}  ${severityBadge(finding.severity)}  ${finding.title}`);
-      console.log(`     ${chalk.dim(finding.id)}`);
-      if (finding.evidence) console.log(`\n     ${chalk.dim("Evidence:")} ${finding.evidence}`);
-    } else {
-      console.log(`  ${chalk.dim("○")}  ${chalk.bold("Not confirmed")}  ${severityBadge(finding.severity)}  ${finding.title}`);
-      console.log(`     ${chalk.dim(finding.id)}`);
-    }
-    console.log();
+    const finding = await new SentinelApiClient(config).pentest(target, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
+    console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
+    if (finding.evidence) console.log(finding.evidence);
   });
 
 const suppress = program.command("suppress").description("Suppress or remove suppressions");
@@ -618,244 +286,101 @@ suppress
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Suppression reason")
   .action(async (id: string, options) => {
-    const finding = await new SentinelApiClient().suppress(id, options.reason);
-    console.log(`\n  ${chalk.green("✓")}  Finding ${chalk.dim(id.slice(0, 8))} suppressed  ${chalk.dim(`·  ${finding.status}`)}\n`);
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const finding = await new SentinelApiClient(config).suppress(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
   });
 suppress
   .command("remove")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Unsuppression reason")
   .action(async (id: string, options) => {
-    const finding = await new SentinelApiClient().unsuppress(id, options.reason);
-    console.log(`\n  ${chalk.green("✓")}  Suppression removed  ${chalk.dim(`·  ${finding.status}`)}\n`);
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const finding = await new SentinelApiClient(config).unsuppress(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
   });
 suppress
   .command("approve")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Approval reason")
   .action(async (id: string, options) => {
-    const finding = await new SentinelApiClient().approveSuppression(id, options.reason);
-    console.log(`\n  ${chalk.green("✓")}  Suppression approved  ${chalk.dim(`·  ${finding.status}`)}\n`);
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const finding = await new SentinelApiClient(config).approveSuppression(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
   });
 suppress
   .command("reject")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Rejection reason")
   .action(async (id: string, options) => {
-    const finding = await new SentinelApiClient().rejectSuppression(id, options.reason);
-    console.log(`\n  ${chalk.green("✓")}  Suppression rejected  ${chalk.dim(`·  ${finding.status}`)}\n`);
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const finding = await new SentinelApiClient(config).rejectSuppression(id, options.reason);
+    console.log(`${finding.id}\t${finding.status}`);
   });
 
 const runs = program.command("runs").description("Manage run traces");
 runs
   .command("list")
   .action(async () => {
-    const rows = await new SentinelApiClient().runs();
-    if (rows.length === 0) {
-      console.log(`\n  ${chalk.dim("No runs yet.")}\n`);
-      return;
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const rows = await new SentinelApiClient(config).runs();
+    console.log("ID\tKIND\tSTATUS\tFINDINGS\tTOKENS\tMODEL\tCREATED");
+    for (const run of rows) {
+      console.log(`${run.id}\t${run.kind}\t${run.status}\t${run.finding_count}\t${run.token_spend}\t${run.model_used ?? "n/a"}\t${run.created_at}`);
     }
-    console.log(`\n  ${chalk.bold(rows.length)} run${rows.length !== 1 ? "s" : ""}`);
-    formatTable(
-      ["ID", "KIND", "STATUS", "FINDINGS", "TOKENS", "MODEL", "CREATED"],
-      rows.map((r) => [
-        r.id.slice(0, 8),
-        r.kind,
-        r.status === "completed" ? chalk.green(r.status) : r.status === "failed" ? chalk.red(r.status) : chalk.yellow(r.status),
-        String(r.finding_count),
-        r.token_spend ? r.token_spend.toLocaleString() : "—",
-        r.model_used ?? "—",
-        fmtDate(r.created_at),
-      ])
-    );
-    console.log();
   });
 runs
   .command("show")
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
-    const run = await new SentinelApiClient().run(id);
-    const trace = await new SentinelApiClient().trace(id);
-
-    console.log(`\n  ${chalk.bold(`Run ${run.id.slice(0, 8)}`)}  ${chalk.dim(`·  ${run.kind}  ·  ${run.status}`)}`);
-    if (run.completed_at) {
-      const dur = (new Date(run.completed_at).getTime() - new Date(run.created_at).getTime()) / 1000;
-      console.log(`  ${chalk.dim(`Created: ${fmtDate(run.created_at)}  ·  Duration: ${dur.toFixed(1)}s`)}`);
-    }
-    if (run.model_used) console.log(`  ${chalk.dim(`Model: ${run.model_used}`)}`);
-
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const trace = await new SentinelApiClient(config).trace(id);
+    console.log(trace);
     const summary = summarizeTokens(trace);
     if (summary.totalInput + summary.totalOutput > 0) {
-      console.log();
-      formatTable(
-        ["Component", "Input", "Output", "Total"],
-        [
-          ...summary.rows.map((r) => [r.component, r.input.toLocaleString(), r.output.toLocaleString(), (r.input + r.output).toLocaleString()]),
-          ["Total", summary.totalInput.toLocaleString(), summary.totalOutput.toLocaleString(), (summary.totalInput + summary.totalOutput).toLocaleString()],
-        ]
-      );
+      console.log("\n--- Token Summary ---");
+      for (const row of summary.rows) {
+        console.log(`  ${row.component}: ${row.input.toLocaleString()} in + ${row.output.toLocaleString()} out = ${(row.input + row.output).toLocaleString()}`);
+      }
+      console.log(`  Total: ${summary.totalInput.toLocaleString()} in + ${summary.totalOutput.toLocaleString()} out = ${(summary.totalInput + summary.totalOutput).toLocaleString()}`);
     }
-    console.log();
   });
 runs
   .command("watch")
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
-    console.log(`\n  ${chalk.dim(`Watching run ${id.slice(0, 8)}...`)}\n`);
-    const client = new SentinelApiClient();
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const client = new SentinelApiClient(config);
     for await (const event of client.runEvents(id)) {
+      console.log(event);
       try {
-        const parsed = JSON.parse(event) as { kind?: string; status?: string; message?: string; [key: string]: unknown };
-        const icon = parsed.kind?.includes("error") || parsed.status === "failed" ? chalk.red("✗") : chalk.dim("·");
-        const text = parsed.message ?? parsed.kind ?? event;
-        console.log(`  ${icon}  ${chalk.dim(text)}`);
-        if (parsed.kind === "complete" || parsed.status === "failed" || parsed.status === "cancelled") break;
+        const parsed = JSON.parse(event) as { kind?: string; status?: string };
+        if (parsed.kind === "run.completed" || parsed.kind === "complete" || parsed.status === "failed" || parsed.status === "cancelled") break;
       } catch {
-        console.log(`  ${chalk.dim("·")}  ${chalk.dim(event)}`);
+        // Non-JSON trace lines are still useful to display.
       }
     }
-    console.log();
   });
 runs
   .command("cancel")
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
-    const run = await new SentinelApiClient().cancelRun(id);
-    console.log(`\n  ${chalk.green("✓")}  Run ${chalk.dim(run.id.slice(0, 8))} cancelled\n`);
-  });
-
-program
-  .command("doctor")
-  .description("Check that Sentinel is correctly set up in this repository")
-  .action(async () => {
-    type CheckResult = { label: string; ok: boolean; warn: boolean; detail: string };
-    const results: CheckResult[] = [];
-
-    function check(label: string, status: "ok" | "warn" | "fail", detail: string) {
-      results.push({ label, ok: status !== "fail", warn: status === "warn", detail });
-    }
-
-    // 1. Git repository
-    try {
-      git(["rev-parse", "--git-dir"]);
-      check("Git repository", "ok", "found");
-    } catch {
-      check("Git repository", "fail", "Not a git repository — run `git init && git commit`");
-    }
-
-    // 2. Config file
-    let config: SentinelConfig | null = null;
-    try {
-      config = loadConfig();
-      check("sentinel.config.json", "ok", `repo: ${config.repoName}  ·  api: ${config.apiUrl}`);
-    } catch {
-      check("sentinel.config.json", "fail", "Not found — run `sentinel init`");
-    }
-
-    // 3. API reachable
-    if (config) {
-      try {
-        const res = await fetch(`${config.apiUrl}/health`, { signal: AbortSignal.timeout(5000) });
-        if (res.ok) {
-          check("API reachable", "ok", config.apiUrl);
-        } else {
-          check("API reachable", "fail", `${config.apiUrl} returned ${res.status}`);
-        }
-      } catch {
-        check("API reachable", "fail", `Cannot reach ${config.apiUrl} — run \`docker compose up -d\``);
-      }
-    }
-
-    // 4. Authentication
-    if (config) {
-      let token: string | undefined;
-      try { token = await readApiKey(config); } catch { /* ignore */ }
-      if (!token) {
-        check("Authenticated", "fail", "No token — run `sentinel auth login`");
-      } else {
-        try {
-          await new SentinelApiClient(config).runs();
-          check("Authenticated", "ok", "token valid");
-        } catch (e) {
-          const m = e instanceof Error ? e.message : String(e);
-          if (m.includes("401")) {
-            check("Authenticated", "fail", "Token rejected — run `sentinel auth login`");
-          } else {
-            check("Authenticated", "warn", "Token present but could not verify (API may be down)");
-          }
-        }
-      }
-    }
-
-    // 5. LLM / Ollama
-    if (config) {
-      if (config.provider === "local") {
-        const ollamaUrl = config.api_endpoint ?? "http://localhost:11434";
-        try {
-          const res = await fetch(`${ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(5000) });
-          if (res.ok) {
-            const body = (await res.json()) as { models?: Array<{ name: string }> };
-            const modelList = body.models?.map((m) => m.name).join(", ") || "none pulled yet";
-            check("Ollama reachable", "ok", `${ollamaUrl}  ·  models: ${modelList}`);
-            if (!body.models?.length) {
-              check("Ollama model", "fail", `No model pulled — run \`ollama pull ${config.model || "llama3.2"}\``);
-            } else {
-              const modelName = config.model === "ollama" ? "" : config.model;
-              const found = body.models.some((m) => m.name === modelName || m.name.startsWith(`${modelName}:`));
-              if (modelName && !found) {
-                check("Ollama model", "warn", `Model "${modelName}" not found locally — run \`ollama pull ${modelName}\``);
-              } else {
-                check("Ollama model", "ok", modelName || body.models[0].name);
-              }
-            }
-          } else {
-            check("Ollama reachable", "fail", `${ollamaUrl} returned ${res.status} — is Ollama running?`);
-          }
-        } catch {
-          check("Ollama reachable", "fail", `Cannot reach ${ollamaUrl} — start Ollama or set \`sentinel config set api_endpoint <url>\``);
-        }
-      } else {
-        const providerLabel = config.provider === "anthropic" ? "Anthropic" : config.provider === "openai" ? "OpenAI" : config.provider;
-        check(`LLM provider`, "ok", `${providerLabel}  ·  model: ${config.model}`);
-      }
-    }
-
-    // 6. Node.js version
-    const major = parseInt(process.version.slice(1), 10);
-    if (major >= 20) {
-      check("Node.js", "ok", process.version);
-    } else {
-      check("Node.js", "fail", `${process.version} is too old — requires v20 or later`);
-    }
-
-    // Display results
-    console.log(`\n  ${chalk.bold("sentinel doctor")}\n`);
-    let anyFail = false;
-    for (const r of results) {
-      const icon = r.ok && !r.warn ? chalk.green("✓") : r.warn ? chalk.yellow("⚠") : chalk.red("✗");
-      const label = chalk.bold(r.label.padEnd(24));
-      console.log(`  ${icon}  ${label}  ${chalk.dim(r.detail)}`);
-      if (!r.ok) anyFail = true;
-    }
-    console.log();
-    if (anyFail) {
-      console.log(`  ${chalk.bold("Issues found.")}  Fix the items marked ${chalk.red("✗")} above, then re-run ${chalk.white("sentinel doctor")}.\n`);
-      process.exitCode = 2;
-    } else {
-      console.log(`  ${chalk.green("✓")}  ${chalk.bold("Everything looks good")}\n`);
-    }
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const run = await new SentinelApiClient(config).cancelRun(id);
+    console.log(`${run.id}\t${run.status}`);
   });
 
 const config = program.command("config").description("Manage local Sentinel config");
 config.command("show").action(() => {
-  const cfg = loadConfig();
-  console.log(`\n  ${chalk.bold("Configuration")}  ${chalk.dim(`·  ${cfg.repoName}`)}\n`);
-  console.log(`  Provider:  ${chalk.bold(cfg.provider === "local" ? "local (Ollama)" : cfg.provider)}`);
-  console.log(`  Model:     ${chalk.bold(cfg.model)}`);
-  console.log(`  API URL:   ${chalk.bold(cfg.apiUrl)}`);
-  if (cfg.boot) console.log(`  Boot:      ${chalk.dim(cfg.boot)}`);
-  if (cfg.healthcheck) console.log(`  Health:    ${chalk.dim(cfg.healthcheck)}`);
-  console.log();
+  console.log(JSON.stringify(loadConfig(), null, 2));
 });
 config
   .command("set")
@@ -867,9 +392,10 @@ config
     const client = new SentinelApiClient();
 
     if (key === "api-key") {
-      const spin = new Spinner("Storing API key on server...");
+      await ensureBackend(loadConfig(root).apiUrl);
+      // Push the LLM provider API key to the server so the worker can use it.
       await client.patchConfig({ api_key: value });
-      spin.succeed("API key stored on server");
+      console.log("api-key stored on server");
       return;
     }
 
@@ -879,30 +405,70 @@ config
     if (key.startsWith("firecracker.")) {
       setFirecrackerConfigValue(current, key.slice("firecracker.".length), value);
       writeConfig(ConfigSchema.parse(current), root);
-      console.log(`\n  ${chalk.green("✓")}  ${chalk.bold(key)} set\n`);
+      console.log(`set ${key}`);
       return;
     }
-    if (!allowed.has(key)) throw new Error(`Unsupported config key ${key}`);
-
+    if (!allowed.has(key)) {
+      throw new Error(`Unsupported config key ${key}`);
+    }
     current[key] = value;
     writeConfig(ConfigSchema.parse(current), root);
 
     if (serverSyncKeys.has(key)) {
+      await ensureBackend(loadConfig(root).apiUrl);
       const patch: Record<string, string | null> = {};
       patch[key] = value;
-      const spin = new Spinner(`Syncing ${key} to server...`);
       await client.patchConfig(patch as { provider?: string; model?: string; api_endpoint?: string | null });
-      spin.succeed(`${chalk.bold(key)} set  ${chalk.dim("·  synced to server")}`);
+      console.log(`set ${key} (local + server)`);
     } else {
-      console.log(`\n  ${chalk.green("✓")}  ${chalk.bold(key)} set\n`);
+      console.log(`set ${key}`);
     }
   });
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
+// Backend lifecycle commands
+program
+  .command("up")
+  .description("Start the Sentinel backend (API + worker)")
+  .action(async () => {
+    const config = loadConfig();
+    await startBackend(config.apiUrl);
+    console.log("Sentinel backend started.");
+  });
 
-program.parseAsync().catch(die);
+program
+  .command("down")
+  .description("Stop the Sentinel backend")
+  .action(async () => {
+    await stopBackend();
+    console.log("Sentinel backend stopped.");
+  });
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
+program
+  .command("status")
+  .description("Show Sentinel backend status")
+  .action(async () => {
+    const config = loadConfig();
+    const s = await backendStatus(config.apiUrl);
+    console.log(`API:     ${s.api}`);
+    console.log(`Worker:  ${s.worker}`);
+    console.log(`Healthy: ${s.healthy ? "yes" : "no"}`);
+  });
+
+program.parseAsync().catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(chalk.red(`Error: ${message}`));
+  if (process.env.DEBUG && error instanceof Error && error.stack) {
+    console.error(error.stack);
+  }
+  if (error instanceof Error && (error as NodeJS.ErrnoException).cause) {
+    const cause = (error as NodeJS.ErrnoException).cause as any;
+    const causeStr = cause?.code ?? String(cause);
+    if (causeStr !== message) {
+      console.error(chalk.dim(`Cause: ${causeStr}`));
+    }
+  }
+  process.exitCode = 2;
+});
 
 function summarizeTokens(trace: string): { rows: Array<{ component: string; input: number; output: number }>; totalInput: number; totalOutput: number } {
   const totals = new Map<string, { input: number; output: number }>();
@@ -915,10 +481,16 @@ function summarizeTokens(trace: string): { rows: Array<{ component: string; inpu
       current.input += event.input_tokens ?? 0;
       current.output += event.output_tokens ?? 0;
       totals.set(event.component, current);
-    } catch { continue; }
+    } catch {
+      continue;
+    }
   }
   const rows = Array.from(totals.entries()).map(([component, counts]) => ({ component, input: counts.input, output: counts.output }));
-  return { rows, totalInput: rows.reduce((s, r) => s + r.input, 0), totalOutput: rows.reduce((s, r) => s + r.output, 0) };
+  return {
+    rows,
+    totalInput: rows.reduce((sum, row) => sum + row.input, 0),
+    totalOutput: rows.reduce((sum, row) => sum + row.output, 0)
+  };
 }
 
 function absoluteUrl(apiUrl: string, pathOrUrl: string): string {
@@ -930,7 +502,8 @@ async function runLimited<T, R>(items: T[], concurrency: number, task: (item: T)
   let nextIndex = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (nextIndex < items.length) {
-      const index = nextIndex++;
+      const index = nextIndex;
+      nextIndex += 1;
       results[index] = await task(items[index]);
     }
   });
@@ -940,14 +513,18 @@ async function runLimited<T, R>(items: T[], concurrency: number, task: (item: T)
 
 function parsePositiveInt(value: string, label: string): number {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
   return parsed;
 }
 
 function parsePentestTarget(parts: string[]): { findingId?: string; description?: string } {
   const target = parts.join(" ").trim();
   if (!target) return {};
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target)) return { findingId: target };
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target)) {
+    return { findingId: target };
+  }
   return { description: target };
 }
 
@@ -959,7 +536,18 @@ function setFirecrackerConfigValue(config: Record<string, unknown>, key: string,
     current[key] = Number(value);
   } else if (key === "guest_runner_argv") {
     current[key] = value.split(/\s+/).filter(Boolean);
-  } else if (["kernel_image","rootfs_image","api_socket","firecracker_bin","boot_args","network_interface_id","host_dev_name","guest_mac"].includes(key)) {
+  } else if (
+    [
+      "kernel_image",
+      "rootfs_image",
+      "api_socket",
+      "firecracker_bin",
+      "boot_args",
+      "network_interface_id",
+      "host_dev_name",
+      "guest_mac"
+    ].includes(key)
+  ) {
     current[key] = value;
   } else {
     throw new Error(`Unsupported firecracker config key ${key}`);

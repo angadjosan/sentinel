@@ -1,0 +1,7 @@
+src/
+tests/
+dist/tests/
+binaries/
+build.ts
+tsconfig.json
+*.tsbuildinfo

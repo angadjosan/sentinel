@@ -43,6 +43,43 @@ sentinel auth login
 sentinel scan
 ```
 
+## Install
+
+```bash
+npm install -g sentinel-sec
+```
+
+Then:
+
+```bash
+sentinel auth login     # browser device-code login
+cd your-repo && sentinel init
+sentinel source         # scan your diff
+```
+
+Scans and pentests run locally (Docker required); findings sync to the hosted backend and dashboard. Bring your own model key:
+
+```bash
+sentinel config set api-key sk-ant-...
+```
+
+**Pin in your project** (recommended for CI):
+
+```bash
+npm install --save-dev sentinel-sec
+```
+
+```yaml
+# .github/workflows/pr.yml
+- run: npx sentinel source
+```
+
+**Alternative — curl install** (for non-Node projects):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/angadjosan/sentinel/main/install.sh | bash
+```
+
 ---
 
 ## How it works

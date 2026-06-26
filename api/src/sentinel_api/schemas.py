@@ -68,6 +68,7 @@ class DeviceTokenResponse(BaseModel):
     access_token: str
     account_id: str
     user_id: str
+    database_url: str | None = None
 
 
 class DeviceApproveRequest(BaseModel):

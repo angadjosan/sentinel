@@ -101,27 +101,19 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
     sources: list[SourceFile] = []
     for path, content in files.items():
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
         sources.append(SourceFile(path=path, content=content, is_new=False))
     await build_source_graph(db, graph.id, sources)
+    llm = _llm
+    if llm is None:
+        llm = await get_llm_for_graph(graph.id, db)
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
+    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
     await enforce_source_retention_for_account(db, graph.account_id)
-
-    # Run enrichment in background — don't block init on LLM calls
-    async def _bg_enrich():
-        try:
-            llm = _llm
-            if llm is None:
-                llm = await get_llm_for_graph(graph.id, db)
-            await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
-            await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
-        except Exception as exc:
-            log.warning("init.enrichment_failed", error=str(exc))
-
-    asyncio.ensure_future(_bg_enrich())
-
     run.status = "completed"
     run.completed_at = now()
     run.trace = "\n".join(part for part in [run.trace, trace_event("init.completed", file_count=len(files))] if part)
@@ -145,7 +137,8 @@ async def scan_diff(
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
     await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context, base_ref=base_ref, paths=paths or [], _llm=_llm)
     return run
 
@@ -215,42 +208,53 @@ async def execute_source_scan(
         )
     ))
 
-    # ── Resolve LLM early so SAST can start ──────────────────────────────
+    findings = 0
+
+    # ── SCA (feed-based, not LLM) ──────────────────────────────────────────
+    sca_count = 0
+    for f in files:
+        sca_count += await scan_dependencies(db, graph.id, repo.id, run.id, f.path, f.content)
+    findings += sca_count
+    log.info("scan.sca.completed", run_id=run.id, sca_finding_count=sca_count)
+
+    # ── Secret scan (entropy + regex, not LLM) ────────────────────────────
+    secret_count = 0
+    for f in files:
+        secret_count += await _run_secret_scan(db, graph.id, repo.id, run.id, f, suppressed_fps)
+    findings += secret_count
+    log.info("scan.secrets.completed", run_id=run.id, secret_finding_count=secret_count)
+
+    # ── SAST (LLM-only) ───────────────────────────────────────────────────
     llm = _llm
     if llm is None:
-        llm = await get_llm_for_graph(graph.id, db)
+        llm = await get_llm_for_graph(graph.id, db)  # raises LLMNotConfiguredError if unconfigured
 
-    # ── Run SCA + secrets in parallel with SAST ───────────────────────────
-    async def _sca_batch() -> int:
-        count = 0
-        for f in files:
-            count += await scan_dependencies(db, graph.id, repo.id, run.id, f.path, f.content)
-        return count
-
-    async def _secrets_batch() -> int:
-        count = 0
-        for f in files:
-            count += await _run_secret_scan(db, graph.id, repo.id, run.id, f, suppressed_fps)
-        return count
-
-    async def _sast() -> list:
-        return await run_sast(
-            diff=diff,
-            bootstrap_context=bootstrap_context,
-            run_id=run.id,
-            suppressed_fps=suppressed_fps,
-            graph=graph,
-            repo_id=str(repo.id),
-            db=db,
-            llm=llm,
+    try:
+        sast_findings = await asyncio.wait_for(
+            run_sast(
+                diff=diff,
+                bootstrap_context=bootstrap_context,
+                run_id=run.id,
+                suppressed_fps=suppressed_fps,
+                graph=graph,
+                repo_id=str(repo.id),
+                db=db,
+                llm=llm,
+            ),
+            timeout=15.0,
         )
+    except asyncio.TimeoutError:
+        log.warning("sast_timeout", run_id=run.id)
+        sast_findings = []
+    findings += len(sast_findings)
+    log.info("scan.sast.completed", run_id=run.id, sast_finding_count=len(sast_findings))
 
-    sca_count, secret_count, sast_findings = await asyncio.gather(
-        _sca_batch(), _secrets_batch(), _sast()
-    )
-    findings = sca_count + secret_count + len(sast_findings)
-    log.info("scan.parallel.completed", run_id=run.id, sca=sca_count, secrets=secret_count, sast=len(sast_findings))
-
+    # Graph enrichment runs only on the async worker path (run_context != "local"),
+    # not inline on synchronous /source requests, to keep response latency bounded.
+    if run_context != "local":
+        await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
+        from .enrichment import validate_enrichment_labels
+        await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -272,6 +276,7 @@ async def review_plan(
     with_retry: bool = False,
     account_id: str | None = None,
     _llm=None,
+    max_passes: int | None = None,
 ) -> tuple[Run, list[Finding]]:
     from .sast import run_sast, get_llm_for_graph, LLMNotConfiguredError
     from pathlib import Path
@@ -281,7 +286,8 @@ async def review_plan(
     db.add(run)
     await db.flush()
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
-    assert repo is not None
+    if repo is None:
+        raise ValueError(f"repo not found for graph {graph.id}")
 
     llm = _llm
     if llm is None:
@@ -297,7 +303,9 @@ async def review_plan(
         select(Finding.fingerprint).where(Finding.graph_id == graph.id, Finding.suppressed.is_(True))
     ))
 
-    max_passes = 3 if with_retry else 1
+    # Default to 1 pass on the synchronous path; caller can override via max_passes
+    # (worker uses 3 passes when with_retry=True to find more issues asynchronously)
+    max_passes = max_passes if max_passes is not None else (3 if with_retry else 1)
     seen_fps: set[str] = set()
     trace_lines = [run.trace]
 

@@ -2,44 +2,28 @@ import { execFileSync } from "node:child_process";
 
 export function git(args: string[]): string {
   try {
-    return execFileSync("git", args, { encoding: "utf8" });
-  } catch (err) {
-    const raw = err instanceof Error ? err.message : String(err);
-    const detail = raw.replace(/\n/g, " ").trim();
-    if (detail.includes("not a git repository")) {
-      throw new Error("Not a git repository. Run `git init && git add . && git commit -m 'initial commit'` first.");
+    return execFileSync("git", args, {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024, // 64 MB for large diffs
+    }).trimEnd();
+  } catch (error: any) {
+    if (error.code === "ENOENT") {
+      throw new Error("git is not installed or not on PATH.");
     }
-    if (detail.includes("unknown revision") && args.some((a) => a.includes("HEAD~"))) {
-      throw new Error(
-        "Cannot diff HEAD~1 — this repo may have only one commit. " +
-        "Use `sentinel source --base <ref>` or make at least one more commit."
-      );
+    const stderr: string = error.stderr ?? "";
+    if (stderr.includes("not a git repository")) {
+      throw new Error("Not a git repository. Run sentinel commands from inside your repo.");
     }
-    if (detail.includes("does not have any commits")) {
-      throw new Error("This repository has no commits yet. Make an initial commit before running a scan.");
-    }
-    throw new Error(`Git error: ${detail}`);
+    throw error;
   }
 }
 
-export type DiffResult = { diff: string; label: string };
-
-export function currentDiff(options: { staged?: boolean; base?: string; paths?: string[] } = {}): DiffResult {
-  const pathArgs = options.paths?.length ? ["--", ...options.paths] : [];
-
-  if (options.staged) {
-    return { diff: git(["diff", "--staged", ...pathArgs]), label: "staged changes" };
-  }
-  if (options.base) {
-    return { diff: git(["diff", `${options.base}..HEAD`, ...pathArgs]), label: `${options.base}..HEAD` };
-  }
-
-  // Default: all uncommitted changes (staged + unstaged) vs HEAD.
-  const uncommitted = git(["diff", "HEAD", ...pathArgs]);
-  if (uncommitted.trim()) return { diff: uncommitted, label: "uncommitted changes" };
-
-  // Working tree is clean — scan the most recent commit instead.
-  return { diff: git(["diff", "HEAD~1..HEAD", ...pathArgs]), label: "HEAD~1..HEAD  (working tree is clean)" };
+export function currentDiff(options: { staged?: boolean; base?: string; paths?: string[] } = {}): string {
+  const args = ["diff"];
+  if (options.staged) args.push("--staged");
+  if (options.base) args.push(`${options.base}..HEAD`);
+  if (options.paths?.length) args.push("--", ...options.paths);
+  return git(args);
 }
 
 export function lsFiles(): string[] {

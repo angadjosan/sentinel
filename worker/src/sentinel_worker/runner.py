@@ -7,8 +7,8 @@ from .scan import execute_source_scan, review_plan, trace_event
 from .task_queue import ClaimedTask, claim_next_task, complete_task, fail_task
 
 
-async def run_one_task(db: AsyncSession, *, worker_id: str, _llm=None) -> str | None:
-    claimed = await claim_next_task(db, worker_id=worker_id)
+async def run_one_task(db: AsyncSession, *, worker_id: str, account_id: str | None = None, _llm=None) -> str | None:
+    claimed = await claim_next_task(db, worker_id=worker_id, account_id=account_id)
     if claimed is None:
         return None
     try:
@@ -46,10 +46,21 @@ async def execute_claimed_task(db: AsyncSession, claimed: ClaimedTask, *, _llm=N
             repo_name=repo.name,
             content=str(claimed.payload.get("content", "")),
             with_retry=bool(claimed.payload.get("with_retry", False)),
+            account_id=graph.account_id,
             _llm=_llm,
         )
         run.status = plan_run.status
         run.completed_at = plan_run.completed_at
         run.trace = "\n".join([run.trace or "", plan_run.trace, trace_event("plan.forwarded", finding_count=len(findings))]).strip()
+        return
+    if task.kind == "init":
+        from .scan import bootstrap_repo
+        await bootstrap_repo(
+            db,
+            repo_name=repo.name,
+            files=claimed.payload.get("files", {}),
+            account_id=graph.account_id,
+            _llm=_llm,
+        )
         return
     raise ValueError(f"unsupported task kind: {task.kind}")

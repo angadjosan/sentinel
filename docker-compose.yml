@@ -7,8 +7,7 @@ services:
       POSTGRES_DB: sentinel
     ports:
       - "5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
       interval: 5s
@@ -20,10 +19,17 @@ services:
       dockerfile: api/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
-      SENTINEL_JWT_SECRET: dev-secret
-      SENTINEL_DEV_MODE: "1"
+      SENTINEL_JWT_SECRET: "${SENTINEL_JWT_SECRET:-dev-secret-not-for-production}"
+      SENTINEL_DEV_MODE: "${SENTINEL_DEV_MODE:-1}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}"
     ports:
       - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,6 +42,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
       SENTINEL_WORKER_ID: local-worker
       SENTINEL_WORKER_POLL_INTERVAL: "1"
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,8 +55,7 @@ services:
       SENTINEL_API_INTERNAL_URL: http://api:8000
     ports:
       - "3000:3000"
+    restart: unless-stopped
     depends_on:
-      - api
-
-volumes:
-  pgdata:
+      api:
+        condition: service_healthy
