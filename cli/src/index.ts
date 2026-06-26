@@ -7,8 +7,10 @@ import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
 import { writeApiKey } from "./auth/keychain.js";
+import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff, lsFiles } from "./diff/git.js";
+import { ensureBackend, startBackend, stopBackend, backendStatus } from "./backend/ensure.js";
 
 const program = new Command();
 
@@ -21,6 +23,7 @@ auth
   .option("--poll-interval <seconds>", "Polling interval while waiting for approval", "2")
   .action(async (options) => {
     const config = loadConfig();
+    await ensureBackend(config.apiUrl);
     const client = new SentinelApiClient(config);
     const started = await client.startDeviceAuth();
     const verificationUrl = absoluteUrl(config.apiUrl, started.verification_url);
@@ -38,6 +41,9 @@ auth
       const token = await client.deviceAuthToken(started.device_code);
       if (token.status === "approved") {
         await writeApiKey(config, token.access_token);
+        if (token.database_url) {
+          writeWorkerConn({ databaseUrl: token.database_url, accountId: token.account_id });
+        }
         console.log(`logged in as ${token.user_id} for account ${token.account_id}`);
         return;
       }
@@ -60,7 +66,7 @@ program
       console.log(`wrote ${path}`);
     }
     const config = loadConfig(root);
-
+    await ensureBackend(config.apiUrl);
     const files: Record<string, string> = {};
     for (const file of lsFiles()) {
       if (file === "sentinel.config.json") continue;
@@ -84,7 +90,7 @@ program
   .action(async (paths: string[], options) => {
     const config = loadConfig();
     validateConfigForScan(config);
-
+    await ensureBackend(config.apiUrl);
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
     const client = new SentinelApiClient(config);
     const scope = { baseRef: options.base, paths };
@@ -143,7 +149,7 @@ program
   .action(async (paths: string[], options) => {
     validateConfigForScan(loadConfig());
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const client = new SentinelApiClient(config);
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
     const scope = { baseRef: options.base, paths };
@@ -196,7 +202,7 @@ program
   .option("--severity <severity>", "Filter by severity")
   .action(async (options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const findings = await new SentinelApiClient(config).findings({ status: options.status, severity: options.severity });
     console.log("ID\tSTATUS\tSEVERITY\tTYPE\tFILE\tUPDATED\tTITLE");
     for (const finding of findings) {
@@ -211,7 +217,7 @@ program
   .argument("<id>", "Finding ID")
   .action(async (id: string) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const result = await new SentinelApiClient(config).pull(id);
     console.log(`${result.finding.severity.toUpperCase()} ${result.finding.vuln_type}: ${result.finding.title}`);
     console.log(result.finding.description);
@@ -248,7 +254,7 @@ program
       throw new Error("Provide a plan file, inline plan text, or stdin content.");
     }
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const result = await new SentinelApiClient(config).plan(content, Boolean(options.withRetry));
     for (const finding of result.findings) {
       console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type}: ${finding.title}`);
@@ -268,7 +274,7 @@ program
   .option("--proof-detail <text>", "Behavioral proof detail", "")
   .action(async (targetParts: string[], options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const target = parsePentestTarget(targetParts);
     const finding = await new SentinelApiClient(config).pentest(target, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
     console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
@@ -281,7 +287,7 @@ suppress
   .requiredOption("--reason <reason>", "Suppression reason")
   .action(async (id: string, options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const finding = await new SentinelApiClient(config).suppress(id, options.reason);
     console.log(`${finding.id}\t${finding.status}`);
   });
@@ -291,7 +297,7 @@ suppress
   .requiredOption("--reason <reason>", "Unsuppression reason")
   .action(async (id: string, options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const finding = await new SentinelApiClient(config).unsuppress(id, options.reason);
     console.log(`${finding.id}\t${finding.status}`);
   });
@@ -301,7 +307,7 @@ suppress
   .requiredOption("--reason <reason>", "Approval reason")
   .action(async (id: string, options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const finding = await new SentinelApiClient(config).approveSuppression(id, options.reason);
     console.log(`${finding.id}\t${finding.status}`);
   });
@@ -311,7 +317,7 @@ suppress
   .requiredOption("--reason <reason>", "Rejection reason")
   .action(async (id: string, options) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const finding = await new SentinelApiClient(config).rejectSuppression(id, options.reason);
     console.log(`${finding.id}\t${finding.status}`);
   });
@@ -321,7 +327,7 @@ runs
   .command("list")
   .action(async () => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const rows = await new SentinelApiClient(config).runs();
     console.log("ID\tKIND\tSTATUS\tFINDINGS\tTOKENS\tMODEL\tCREATED");
     for (const run of rows) {
@@ -333,7 +339,7 @@ runs
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const trace = await new SentinelApiClient(config).trace(id);
     console.log(trace);
     const summary = summarizeTokens(trace);
@@ -350,7 +356,7 @@ runs
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const client = new SentinelApiClient(config);
     for await (const event of client.runEvents(id)) {
       console.log(event);
@@ -367,7 +373,7 @@ runs
   .argument("<id>", "Run ID")
   .action(async (id: string) => {
     const config = loadConfig();
-
+    await ensureBackend(config.apiUrl);
     const run = await new SentinelApiClient(config).cancelRun(id);
     console.log(`${run.id}\t${run.status}`);
   });
@@ -386,6 +392,8 @@ config
     const client = new SentinelApiClient();
 
     if (key === "api-key") {
+      await ensureBackend(loadConfig(root).apiUrl);
+      // Push the LLM provider API key to the server so the worker can use it.
       await client.patchConfig({ api_key: value });
       console.log("api-key stored on server");
       return;
@@ -407,6 +415,7 @@ config
     writeConfig(ConfigSchema.parse(current), root);
 
     if (serverSyncKeys.has(key)) {
+      await ensureBackend(loadConfig(root).apiUrl);
       const patch: Record<string, string | null> = {};
       patch[key] = value;
       await client.patchConfig(patch as { provider?: string; model?: string; api_endpoint?: string | null });
@@ -414,6 +423,35 @@ config
     } else {
       console.log(`set ${key}`);
     }
+  });
+
+// Backend lifecycle commands
+program
+  .command("up")
+  .description("Start the Sentinel backend (API + worker)")
+  .action(async () => {
+    const config = loadConfig();
+    await startBackend(config.apiUrl);
+    console.log("Sentinel backend started.");
+  });
+
+program
+  .command("down")
+  .description("Stop the Sentinel backend")
+  .action(async () => {
+    await stopBackend();
+    console.log("Sentinel backend stopped.");
+  });
+
+program
+  .command("status")
+  .description("Show Sentinel backend status")
+  .action(async () => {
+    const config = loadConfig();
+    const s = await backendStatus(config.apiUrl);
+    console.log(`API:     ${s.api}`);
+    console.log(`Worker:  ${s.worker}`);
+    console.log(`Healthy: ${s.healthy ? "yes" : "no"}`);
   });
 
 program.parseAsync().catch((error) => {
