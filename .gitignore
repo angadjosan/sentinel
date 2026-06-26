@@ -12,3 +12,4 @@ sentinel_dev.db
 !.env.example
 sentinel.config.json
 cli/binaries/
+.DS_Store
