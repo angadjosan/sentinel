@@ -109,11 +109,12 @@ export class SentinelApiClient {
     }
   }
 
-  init(files: Record<string, string>) {
-    return this.request<Run>("/init", {
+  async init(files: Record<string, string>): Promise<Run> {
+    const result = await this.request<{ task_id: string; run: Run }>("/init", {
       method: "POST",
       body: JSON.stringify({ repo_name: this.config.repoName, files }),
     });
+    return result.run;
   }
 
   startDeviceAuth() {

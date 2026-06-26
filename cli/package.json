@@ -4,16 +4,10 @@
   "description": "AI-powered application security scanner — scan diffs, review plans, and run pentests from the CLI",
   "type": "module",
   "bin": {
-    "sentinel": "dist/index.js"
+    "sentinel": "dist/src/index.js"
   },
   "files": [
-    "dist/index.js",
-    "dist/index.js.map",
-    "dist/api",
-    "dist/auth",
-    "dist/backend",
-    "dist/config",
-    "dist/diff"
+    "dist/src"
   ],
   "scripts": {
     "build": "tsc",
