@@ -16,8 +16,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install ruff mypy -e ./api -e ./worker
-      - run: ruff check api/src worker/src
-      - run: mypy api/src worker/src --ignore-missing-imports
+      - run: ruff check api/sentinel_api worker/sentinel_worker
+      - run: mypy api/sentinel_api worker/sentinel_worker --ignore-missing-imports
 
   typescript:
     name: TypeScript (tsc)
