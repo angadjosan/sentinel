@@ -1,4 +1,4 @@
-"""Initial schema — create all tables.
+"""Initial schema.
 
 Revision ID: 0001_initial_schema
 Revises:
@@ -9,7 +9,6 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-# revision identifiers, used by Alembic
 revision = "0001_initial_schema"
 down_revision = None
 branch_labels = None
@@ -17,7 +16,6 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # accounts
     op.create_table(
         "accounts",
         sa.Column("id", sa.String(), primary_key=True),
@@ -26,12 +24,12 @@ def upgrade() -> None:
         sa.Column("monthly_token_budget", sa.Integer(), nullable=True),
         sa.Column("provider", sa.String(), nullable=False, server_default="local"),
         sa.Column("model", sa.String(), nullable=False, server_default="ollama"),
+        sa.Column("api_key", sa.Text(), nullable=True),
         sa.Column("api_endpoint", sa.String(), nullable=True),
         sa.Column("source_retention_days", sa.Integer(), nullable=False, server_default="365"),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # users
     op.create_table(
         "users",
         sa.Column("id", sa.String(), primary_key=True),
@@ -41,7 +39,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # device_auth_sessions
     op.create_table(
         "device_auth_sessions",
         sa.Column("device_code", sa.String(), primary_key=True),
@@ -55,7 +52,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # repos
     op.create_table(
         "repos",
         sa.Column("id", sa.String(), primary_key=True),
@@ -65,7 +61,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # graphs
     op.create_table(
         "graphs",
         sa.Column("id", sa.String(), primary_key=True),
@@ -81,7 +76,6 @@ def upgrade() -> None:
         sa.Column("merged_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    # nodes
     op.create_table(
         "nodes",
         sa.Column("id", sa.String(), primary_key=True),
@@ -107,7 +101,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # edges
     op.create_table(
         "edges",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -123,7 +116,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # runs
     op.create_table(
         "runs",
         sa.Column("id", sa.String(), primary_key=True),
@@ -141,7 +133,6 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    # run_traces
     op.create_table(
         "run_traces",
         sa.Column("run_id", sa.String(), sa.ForeignKey("runs.id"), primary_key=True),
@@ -149,7 +140,6 @@ def upgrade() -> None:
         sa.Column("chunk", sa.Text(), nullable=False),
     )
 
-    # tasks
     op.create_table(
         "tasks",
         sa.Column("id", sa.String(), primary_key=True),
@@ -168,7 +158,6 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
     )
 
-    # findings
     op.create_table(
         "findings",
         sa.Column("id", sa.String(), primary_key=True),
@@ -192,7 +181,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # suppression_audit
     op.create_table(
         "suppression_audit",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -203,7 +191,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # token_spend_by_component
     op.create_table(
         "token_spend_by_component",
         sa.Column("run_id", sa.String(), sa.ForeignKey("runs.id"), primary_key=True),
@@ -214,7 +201,6 @@ def upgrade() -> None:
         sa.Column("output_tokens", sa.Integer(), nullable=False, server_default="0"),
     )
 
-    # source_files
     op.create_table(
         "source_files",
         sa.Column("repo_id", sa.String(), sa.ForeignKey("repos.id"), primary_key=True),
@@ -227,7 +213,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # advisory_cache
     op.create_table(
         "advisory_cache",
         sa.Column("package", sa.String(), primary_key=True),
@@ -238,7 +223,6 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
     )
 
-    # trace_access_log
     op.create_table(
         "trace_access_log",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -247,8 +231,45 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 
+    op.create_index("idx_nodes_graph_kind", "nodes", ["graph_id", "kind"])
+    op.create_index("idx_nodes_graph_file", "nodes", ["graph_id", "file"])
+    op.create_index("idx_edges_src", "edges", ["graph_id", "src", "kind"])
+    op.create_index("idx_edges_dst", "edges", ["graph_id", "dst", "kind"])
+    op.create_index("idx_findings_graph", "findings", ["graph_id", "status"])
+    op.create_index("idx_runs_graph", "runs", ["graph_id", "kind", "status"])
+
+    op.execute("""
+        CREATE OR REPLACE FUNCTION create_tenant_schema(p_account_id TEXT)
+        RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE
+            schema_name TEXT := 'tenant_' || replace(p_account_id, '-', '_');
+        BEGIN
+            EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', schema_name);
+        END;
+        $$;
+    """)
+
+    op.execute("""
+        CREATE OR REPLACE FUNCTION set_tenant_search_path(p_account_id TEXT)
+        RETURNS void LANGUAGE plpgsql AS $$
+        DECLARE
+            schema_name TEXT := 'tenant_' || replace(p_account_id, '-', '_');
+        BEGIN
+            PERFORM set_config('search_path', schema_name || ',public', true);
+        END;
+        $$;
+    """)
+
 
 def downgrade() -> None:
+    op.execute("DROP FUNCTION IF EXISTS set_tenant_search_path(TEXT)")
+    op.execute("DROP FUNCTION IF EXISTS create_tenant_schema(TEXT)")
+    op.drop_index("idx_runs_graph")
+    op.drop_index("idx_findings_graph")
+    op.drop_index("idx_edges_dst")
+    op.drop_index("idx_edges_src")
+    op.drop_index("idx_nodes_graph_file")
+    op.drop_index("idx_nodes_graph_kind")
     op.drop_table("trace_access_log")
     op.drop_table("advisory_cache")
     op.drop_table("source_files")

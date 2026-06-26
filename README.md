@@ -74,12 +74,6 @@ npm install --save-dev sentinel-sec
 - run: npx sentinel source
 ```
 
-**Alternative — curl install** (for non-Node projects):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/sentineldev/sentinel/main/install.sh | bash
-```
-
 ---
 
 ## How it works
