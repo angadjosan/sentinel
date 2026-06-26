@@ -70,4 +70,4 @@ async def enforce_source_retention_for_account(db: AsyncSession, account_id: str
             SourceFileSnapshot.created_at < cutoff,
         )
     )
-    return int(result.rowcount or 0)  # type: ignore[union-attr]
+    return int(result.rowcount or 0)  # type: ignore[attr-defined]
