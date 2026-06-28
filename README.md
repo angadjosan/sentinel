@@ -46,7 +46,7 @@ sentinel scan
 ## Install
 
 ```bash
-npm install -g sentinel-sec
+npm install -g sentineldev
 ```
 
 Then:
@@ -66,7 +66,7 @@ sentinel config set api-key sk-ant-...
 **Pin in your project** (recommended for CI):
 
 ```bash
-npm install --save-dev sentinel-sec
+npm install --save-dev sentineldev
 ```
 
 ```yaml

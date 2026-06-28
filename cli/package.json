@@ -1,6 +1,6 @@
 {
-  "name": "sentinel-sec",
-  "version": "0.1.0",
+  "name": "sentineldev",
+  "version": "0.2.0",
   "description": "AI-powered application security scanner — scan diffs, review plans, and run pentests from the CLI",
   "type": "module",
   "bin": {
