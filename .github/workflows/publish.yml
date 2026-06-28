@@ -25,6 +25,6 @@ jobs:
           cache-dependency-path: cli/package-lock.json
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance
+      - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
