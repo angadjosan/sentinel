@@ -31,7 +31,7 @@ export const ConfigSchema = z.object({
   $schema: z.string().optional(),
   repo_id: z.string().optional(),
   api_endpoint: z.string().url().optional(),
-  apiUrl: z.string().url().default("https://sentinel-api.vercel.app"),
+  apiUrl: z.string().url().default("https://sentinel-sable-phi.vercel.app"),
   repoName: z.string().min(1),
   provider: z.string().default("local"),
   model: z.string().default("llama3.2"),

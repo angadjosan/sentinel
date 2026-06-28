@@ -61,7 +61,14 @@ log = structlog.get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_schema()
+    try:
+        await init_schema()
+    except Exception as exc:
+        # Migrations may fail on Neon's pooled endpoint in serverless cold starts.
+        # The hosted worker runs migrations on boot and owns schema management;
+        # log the error but don't crash the API — existing schema is sufficient.
+        import structlog as _sl
+        _sl.get_logger().warning("schema.init.skipped", error=str(exc))
     yield
 
 

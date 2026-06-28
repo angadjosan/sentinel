@@ -13,3 +13,5 @@ sentinel_dev.db
 sentinel.config.json
 cli/binaries/
 .DS_Store
+.vercel
+.env*

@@ -59,7 +59,21 @@ def _is_postgres(engine: AsyncEngine) -> bool:
 
 
 def create_engine(url: str | None = None) -> AsyncEngine:
-    return create_async_engine(url or database_url(), future=True)
+    resolved = url or database_url()
+    connect_args: dict = {}
+    kwargs: dict = {}
+    if "postgresql" in resolved:
+        # PgBouncer (Neon's pooled endpoint) doesn't support asyncpg prepared statements.
+        connect_args["statement_cache_size"] = 0
+        if os.getenv("VERCEL"):
+            # Serverless: Neon closes idle connections in seconds, so don't pool —
+            # each request gets a fresh connection and closes it immediately.
+            from sqlalchemy.pool import NullPool  # noqa: PLC0415
+            kwargs["poolclass"] = NullPool
+        else:
+            # Persistent worker: pre-ping to detect stale connections.
+            kwargs["pool_pre_ping"] = True
+    return create_async_engine(resolved, future=True, connect_args=connect_args, **kwargs)
 
 
 def create_sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

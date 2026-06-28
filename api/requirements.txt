@@ -1,9 +1,9 @@
-fastapi>=0.111,<1
+# pip resolves file: paths from CWD (project root), not from this file's location.
+# Vercel runs pip from /vercel/path0/ (project root), so file:api and file:worker work.
+sentinel-api @ file:api
+sentinel-worker @ file:worker
+# Remaining deps not declared in pyproject.toml files (pinned for Vercel):
 uvicorn[standard]>=0.30,<1
-pydantic>=2,<3
-python-jose[cryptography]>=3.3,<4
-sqlalchemy>=2,<3
 asyncpg>=0.29,<1
 aiosqlite>=0.20,<1
-structlog>=25,<26
 prometheus-client>=0.20,<1
