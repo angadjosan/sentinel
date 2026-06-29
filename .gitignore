@@ -17,3 +17,4 @@ cli/binaries/
 .DS_Store
 .vercel
 .env*
+build/
