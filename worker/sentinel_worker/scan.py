@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -228,6 +229,13 @@ async def execute_source_scan(
     if llm is None:
         llm = await get_llm_for_graph(graph.id, db)  # raises LLMNotConfiguredError if unconfigured
 
+    # SAST latency is bounded so synchronous /source requests stay responsive.
+    # Cloud-worker and CI (standalone) paths need a longer budget for real LLM
+    # tool-use loops, so the ceiling is overridable via env.
+    try:
+        sast_timeout = float(os.getenv("SENTINEL_SAST_TIMEOUT_SECONDS", "15"))
+    except ValueError:
+        sast_timeout = 15.0
     try:
         sast_findings = await asyncio.wait_for(
             run_sast(
@@ -240,7 +248,7 @@ async def execute_source_scan(
                 db=db,
                 llm=llm,
             ),
-            timeout=15.0,
+            timeout=sast_timeout,
         )
     except asyncio.TimeoutError:
         log.warning("sast_timeout", run_id=run.id)

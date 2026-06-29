@@ -19,6 +19,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.graph_merge import merge_graph
+from sentinel_worker.scan import get_or_create_graph, trace_event
+from sentinel_worker.security import compute_fingerprint
 from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import read_run_trace
@@ -37,6 +39,8 @@ from .schemas import (
     FindingResponse,
     GraphResponse,
     GraphMergeRequest,
+    IngestRequest,
+    IngestResponse,
     InitRequest,
     NodeResponse,
     PentestRequest,
@@ -445,6 +449,64 @@ async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), princip
     if run is None:
         raise HTTPException(status_code=500, detail="run record not found after enqueue")
     return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
+
+
+@app.post("/findings/ingest", response_model=IngestResponse)
+async def ingest_findings(payload: IngestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> IngestResponse:
+    """Ingest pre-computed findings from a CI-native scan.
+
+    The scanner runs inside the user's CI and POSTs ONLY the finding metadata —
+    no source code or diffs are uploaded or stored. Findings are deduplicated by
+    a canonical fingerprint so re-ingesting the same finding across CI runs
+    reopens/updates the existing row rather than creating duplicates.
+    """
+    graph = await get_or_create_graph(db, payload.repo_name, account_id=_graph_account_id(principal))
+    repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
+    if repo is None:
+        raise HTTPException(status_code=500, detail="repo not found for graph")
+
+    run = Run(
+        graph_id=graph.id,
+        kind="ingest",
+        status="completed",
+        base_ref=payload.base_ref,
+        head_commit=payload.commit_sha,
+        completed_at=now(),
+        trace=trace_event("ingest.completed", finding_count=len(payload.findings), run_context=payload.run_context),
+    )
+    db.add(run)
+    await db.flush()
+
+    created = 0
+    updated = 0
+    for incoming in payload.findings:
+        fingerprint = compute_fingerprint(repo.id, incoming.node_id or incoming.file or "unknown", incoming.vuln_type)
+        existing = await db.scalar(select(Finding).where(Finding.fingerprint == fingerprint))
+        if existing is not None:
+            existing.run_id = run.id
+            existing.updated_at = now()
+            if not existing.suppressed:
+                existing.status = "open"
+            updated += 1
+        else:
+            db.add(
+                Finding(
+                    graph_id=graph.id,
+                    node_id=incoming.node_id,
+                    run_id=run.id,
+                    vuln_type=incoming.vuln_type,
+                    severity=incoming.severity,
+                    title=incoming.title,
+                    description=incoming.description,
+                    remediation=incoming.remediation,
+                    evidence=incoming.evidence,
+                    fingerprint=fingerprint,
+                    status="open",
+                )
+            )
+            created += 1
+
+    return IngestResponse(run_id=run.id, created=created, updated=updated, total=created + updated)
 
 
 @app.get("/findings", response_model=list[FindingResponse])

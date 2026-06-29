@@ -24,6 +24,33 @@ class PlanRequest(BaseModel):
     with_retry: bool = False
 
 
+class IngestFinding(BaseModel):
+    vuln_type: str = Field(min_length=1)
+    severity: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    description: str
+    remediation: str = ""
+    node_id: str | None = None
+    file: str | None = None
+    line: int | None = None
+    evidence: str | None = None
+
+
+class IngestRequest(BaseModel):
+    repo_name: str = Field(min_length=1)
+    run_context: str = "ci"
+    commit_sha: str | None = None
+    base_ref: str | None = None
+    findings: list[IngestFinding] = Field(default_factory=list)
+
+
+class IngestResponse(BaseModel):
+    run_id: str
+    created: int
+    updated: int
+    total: int
+
+
 class FirecrackerRequest(BaseModel):
     enabled: bool = False
     kernel_image: str | None = None
