@@ -276,6 +276,104 @@ sentinel source --queue
 
 ---
 
+## GitHub Action (CI-native scanning)
+
+Sentinel ships a composite GitHub Action that runs the **entire** scan inside your
+own CI runner. The pipeline (diff → tree-sitter graph → SCA + secret scan + SAST)
+executes locally against an ephemeral SQLite database, so **your source code never
+leaves the runner**. Only finding metadata is produced: a SARIF report (uploaded to
+GitHub code scanning) and, optionally, findings POSTed to your Sentinel cloud via
+`ingest-url`. No Docker image or published package is required — the action installs
+the scanner straight from its own checkout.
+
+### Required permissions
+
+The action uploads SARIF to GitHub code scanning, which needs `security-events: write`.
+A GitHub Action cannot grant itself permissions, so set them in your workflow:
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+```
+
+(Set `upload-sarif: false` if you don't want code-scanning uploads — then only
+`contents: read` is needed.)
+
+### Usage — zero-config (secrets + SCA only, no API key)
+
+```yaml
+name: Sentinel
+on: pull_request
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  sentinel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: angadjosan/sentinel@v0.0.1
+        with:
+          provider: mock      # secrets + dependency (SCA) scan, no LLM
+          fail-on: high
+```
+
+### Usage — full LLM-powered scan
+
+```yaml
+name: Sentinel
+on: pull_request
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  sentinel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: angadjosan/sentinel@v0.0.1
+        with:
+          provider: anthropic
+          model: claude-sonnet-4-6
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          fail-on: high
+          # Optional: ship findings (never source) to your Sentinel cloud
+          # ingest-url: ${{ secrets.SENTINEL_API_URL }}
+          # ingest-token: ${{ secrets.SENTINEL_TOKEN }}
+```
+
+Always check out with `fetch-depth: 0` so the action can compute an accurate PR diff
+against the base branch.
+
+### Inputs
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `repo-name` | `${{ github.repository }}` | Logical repo name recorded with findings. |
+| `provider` | `mock` | `anthropic` \| `openai` \| `local` \| `mock`. `mock` = secrets + SCA only (no LLM). |
+| `model` | `""` | Model name; empty uses the provider default. |
+| `api-key` | `""` | LLM API key (passed via env; never logged). |
+| `llm-endpoint` | `""` | Custom LLM endpoint, e.g. an Ollama URL for `provider: local`. |
+| `base-ref` | `""` | Base ref for the diff. Empty auto-detects: PR base sha, push `before`, else `origin/<default-branch>`. |
+| `fail-on` | `high` | Fail the job at/above this severity: `info`\|`low`\|`medium`\|`high`\|`critical`\|`none`. |
+| `sarif` | `sentinel.sarif` | Path for the SARIF 2.1.0 report. |
+| `upload-sarif` | `true` | Upload SARIF to GitHub code scanning (needs `security-events: write`). |
+| `ingest-url` | `""` | Sentinel cloud base URL. Findings (not source) POSTed to `{url}/findings/ingest`. |
+| `ingest-token` | `""` | Bearer token for `ingest-url` (passed via env; never logged). |
+| `python-version` | `3.12` | Python used to run the scanner (3.12+). |
+| `working-directory` | `.` | Path to the git checkout to scan. |
+
+The action exits non-zero (failing the PR check) when findings reach the `fail-on`
+threshold; the SARIF upload still runs first so results appear in the Security tab.
+See [`examples/github-actions.yml`](examples/github-actions.yml) for a complete workflow.
+
+---
+
 ## Using a cloud LLM
 
 If you'd prefer not to run a local model, Sentinel supports Anthropic and OpenAI:
