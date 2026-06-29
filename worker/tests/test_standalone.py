@@ -5,6 +5,7 @@ any network or LLM dependency, plus the output formatting and CLI wiring.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -35,6 +36,22 @@ CLEAN_DIFF = """diff --git a/readme.md b/readme.md
  hello
 +world
 """
+
+
+# ── packaging: prompt templates must ship with the package ─────────────────
+def test_prompt_templates_present():
+    """Prompts are loaded at runtime via Path(__file__).parent/'prompts'.
+
+    They must be declared as package-data in pyproject.toml, otherwise a
+    non-editable install (pip install ./worker, as in the GitHub Action) omits
+    them and the scan crashes with FileNotFoundError. This guards that the
+    files exist where the loaders expect them.
+    """
+    import sentinel_worker
+
+    prompts = Path(sentinel_worker.__file__).parent / "prompts"
+    for name in ("sast.txt", "pentest.txt", "remediation.txt", "enrich.txt"):
+        assert (prompts / name).is_file(), f"missing prompt template: {name}"
 
 
 # ── severity / threshold logic ─────────────────────────────────────────────
