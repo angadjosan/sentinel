@@ -1,14 +1,22 @@
-# Add this to .github/workflows/sentinel.yml in your repo
-# It runs Sentinel on every pull request and blocks merge if findings are returned.
+# Sentinel Security Scan — GitHub Actions
 #
-# Prerequisites:
-#   1. Self-host the Sentinel backend (see README) or use a hosted instance
-#   2. Set SENTINEL_API_URL and SENTINEL_TOKEN as repository secrets
+# Drop this into .github/workflows/sentinel.yml in your repo.
+# It scans every pull request IN YOUR CI: your source code never leaves the
+# runner. Only finding metadata is emitted (SARIF, uploaded to GitHub code
+# scanning) and — optionally — POSTed to your Sentinel cloud via ingest-url.
+#
+# Required permissions:
+#   contents: read          (to check out and diff the code)
+#   security-events: write  (to upload SARIF to the Security tab)
 
 name: Sentinel Security Scan
 
 on:
   pull_request:
+
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
   sentinel:
@@ -17,24 +25,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # fetch-depth: 0 gives the action the base branch history it needs
+          # to compute an accurate PR diff.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      # ── LLM-powered scan (Anthropic) ──────────────────────────────────
+      - name: Sentinel scan
+        uses: angadjosan/sentinel@v0.1.0
         with:
-          node-version: "20"
+          provider: anthropic
+          model: claude-sonnet-4-6
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          fail-on: high
+          # Optional: ship findings (not source) to your Sentinel cloud.
+          # ingest-url: ${{ secrets.SENTINEL_API_URL }}
+          # ingest-token: ${{ secrets.SENTINEL_TOKEN }}
 
-      - name: Install Sentinel CLI
-        run: npm install -g @sentinel/cli
-
-      - name: Initialize repo (first run only — cached after)
-        run: sentinel init --api-url ${{ secrets.SENTINEL_API_URL }}
-        env:
-          SENTINEL_TOKEN: ${{ secrets.SENTINEL_TOKEN }}
-
-      - name: Scan PR diff
-        run: sentinel source --base ${{ github.event.pull_request.base.sha }}
-        env:
-          SENTINEL_TOKEN: ${{ secrets.SENTINEL_TOKEN }}
-        # Exits 1 if findings are found — PR is blocked
-        # Remove the next two lines to make the check advisory (non-blocking)
-        # continue-on-error: true
+      # ── Zero-config alternative (no API key, no LLM) ──────────────────
+      # provider: mock runs the secrets + SCA (dependency) scanners only.
+      # Uncomment this and remove the step above to try Sentinel with no setup.
+      #
+      # - name: Sentinel scan (secrets + SCA only)
+      #   uses: angadjosan/sentinel@v0.1.0
+      #   with:
+      #     provider: mock
+      #     fail-on: high

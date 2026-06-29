@@ -1,6 +1,6 @@
 {
   "name": "sentineldev",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "AI-powered application security scanner — scan diffs, review plans, and run pentests from the CLI",
   "type": "module",
   "bin": {
@@ -26,9 +26,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sentineldev/sentinel"
+    "url": "git+https://github.com/angadjosan/sentinel.git"
   },
-  "homepage": "https://github.com/sentineldev/sentinel#readme",
+  "bugs": {
+    "url": "https://github.com/angadjosan/sentinel/issues"
+  },
+  "homepage": "https://github.com/angadjosan/sentinel#readme",
   "engines": {
     "node": ">=18.0.0"
   },

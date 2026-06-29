@@ -387,6 +387,19 @@ class SentinelLLMClient:
     ) -> AsyncIterator[ToolCallEvent]:
         _assert_no_repo_content_in_system(system)
 
+        if self._is_mock_mode():
+            # Mock provider performs no LLM-driven SAST: it yields no findings.
+            # This enables deterministic, no-network scans (secrets + SCA only),
+            # used by CI smoke tests and the `mock` provider in standalone mode.
+            if db is not None and run_id is not None:
+                await record_token_event(
+                    db,
+                    run_id,
+                    component,
+                    LLMCallResult(content="", input_tokens=0, output_tokens=0, model=self.model, provider="mock"),
+                )
+            return
+
         if self.provider_name == "anthropic":
             async for event in self._anthropic_agentic_loop(
                 system=system,

@@ -1,0 +1,213 @@
+name: "Sentinel Security Scan"
+description: >-
+  Sentinel scans your pull requests in your own CI — your source code never
+  leaves the runner. Only finding metadata (SARIF/JSON) is emitted and,
+  optionally, POSTed to your Sentinel cloud. Uploads results to GitHub code
+  scanning.
+author: "Sentinel"
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  repo-name:
+    description: "Logical repo name (owner/repo) recorded with findings."
+    required: false
+    default: ${{ github.repository }}
+  provider:
+    description: "LLM provider: anthropic | openai | local | mock. 'mock' runs secrets + SCA only (no LLM, no key required)."
+    required: false
+    default: "mock"
+  model:
+    description: "Model name (e.g. claude-sonnet-4-6, gpt-4o). Empty = provider default."
+    required: false
+    default: ""
+  api-key:
+    description: "LLM API key for the chosen provider. Leave empty for 'mock'/'local'."
+    required: false
+    default: ""
+  llm-endpoint:
+    description: "Custom LLM endpoint URL (e.g. an Ollama server for provider 'local')."
+    required: false
+    default: ""
+  base-ref:
+    description: >-
+      Base git ref/SHA for the diff. Empty = auto-detect from the event
+      (PR base sha, push 'before' sha, or origin/<default-branch>).
+    required: false
+    default: ""
+  fail-on:
+    description: "Fail the job if any finding is at/above this severity: info|low|medium|high|critical|none."
+    required: false
+    default: "high"
+  sarif:
+    description: "Path to write the SARIF 2.1.0 report."
+    required: false
+    default: "sentinel.sarif"
+  upload-sarif:
+    description: "Upload the SARIF report to GitHub code scanning (requires security-events: write)."
+    required: false
+    default: "true"
+  ingest-url:
+    description: "Sentinel cloud API base URL. If set, findings (NOT source) are POSTed to {url}/findings/ingest."
+    required: false
+    default: ""
+  ingest-token:
+    description: "Bearer token for --ingest-url."
+    required: false
+    default: ""
+  python-version:
+    description: "Python version used to run the scanner (requires 3.12+)."
+    required: false
+    default: "3.12"
+  working-directory:
+    description: "Path to the git checkout to scan."
+    required: false
+    default: "."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Sentinel scanner
+      shell: bash
+      run: |
+        echo "Installing Sentinel scanner from ${GITHUB_ACTION_PATH}/worker"
+        python -m pip install --upgrade pip
+        pip install "${GITHUB_ACTION_PATH}/worker"
+
+    - name: Resolve diff range
+      id: range
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+        EVENT_NAME: ${{ github.event_name }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PUSH_BEFORE_SHA: ${{ github.event.before }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+
+        # ── Resolve HEAD ──────────────────────────────────────────────
+        # On pull_request events, actions/checkout checks out a synthetic
+        # merge commit by default, so prefer the explicit PR head SHA.
+        if [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "pull_request_target" ]; then
+          HEAD="${PR_HEAD_SHA}"
+        else
+          HEAD="$(git rev-parse HEAD)"
+        fi
+
+        # ── Resolve BASE ──────────────────────────────────────────────
+        if [ -n "${INPUT_BASE_REF}" ]; then
+          BASE="${INPUT_BASE_REF}"
+        elif [ "${EVENT_NAME}" = "pull_request" ] || [ "${EVENT_NAME}" = "pull_request_target" ]; then
+          BASE="${PR_BASE_SHA}"
+        elif [ -n "${PUSH_BEFORE_SHA}" ] && [ "${PUSH_BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+          BASE="${PUSH_BEFORE_SHA}"
+        elif [ -n "${DEFAULT_BRANCH}" ]; then
+          BASE="origin/${DEFAULT_BRANCH}"
+        else
+          BASE="origin/main"
+        fi
+
+        # ── Ensure the base commit is fetched (shallow checkouts) ─────
+        # Best-effort: standalone.py falls back gracefully if this fails.
+        if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+          echo "Base '${BASE}' not present locally; fetching (best-effort)."
+          git fetch --no-tags --depth=1 origin "${BASE}" 2>/dev/null \
+            || git fetch --no-tags origin "${BASE}" 2>/dev/null \
+            || echo "warning: could not fetch base '${BASE}'; scanner will fall back."
+        fi
+
+        echo "Resolved BASE=${BASE}"
+        echo "Resolved HEAD=${HEAD}"
+        {
+          echo "BASE=${BASE}"
+          echo "HEAD=${HEAD}"
+        } >> "$GITHUB_ENV"
+
+    - name: Run Sentinel scan
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        # Secrets are passed via env (never interpolated into the command line).
+        SENTINEL_LLM_API_KEY: ${{ inputs.api-key }}
+        SENTINEL_TOKEN: ${{ inputs.ingest-token }}
+        INPUT_REPO_NAME: ${{ inputs.repo-name }}
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_LLM_ENDPOINT: ${{ inputs.llm-endpoint }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_INGEST_URL: ${{ inputs.ingest-url }}
+      run: |
+        set -uo pipefail
+
+        ARGS=(
+          --repo-name "${INPUT_REPO_NAME}"
+          --base "${BASE}"
+          --head "${HEAD}"
+          --repo-dir "."
+          --provider "${INPUT_PROVIDER}"
+          --fail-on "${INPUT_FAIL_ON}"
+          --sarif "${INPUT_SARIF}"
+          --run-context "ci"
+        )
+        [ -n "${INPUT_MODEL}" ]        && ARGS+=( --model "${INPUT_MODEL}" )
+        [ -n "${INPUT_LLM_ENDPOINT}" ] && ARGS+=( --llm-endpoint "${INPUT_LLM_ENDPOINT}" )
+        [ -n "${INPUT_INGEST_URL}" ]   && ARGS+=( --ingest-url "${INPUT_INGEST_URL}" )
+
+        # api-key and ingest-token flow through env (SENTINEL_LLM_API_KEY /
+        # SENTINEL_TOKEN) so they are never printed. Echo a redacted command.
+        echo "+ sentinel-scan ${ARGS[*]}"
+
+        sentinel-scan "${ARGS[@]}"
+        CODE=$?
+        echo "scan-exit-code=${CODE}" >> "$GITHUB_OUTPUT"
+        echo "Sentinel scan exited with code ${CODE}."
+        # Do not fail here — let the SARIF upload run first. Gating happens later.
+        exit 0
+
+    - name: Check SARIF exists
+      id: sarif_check
+      if: ${{ inputs.upload-sarif == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        if [ -f "${{ inputs.sarif }}" ]; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "No SARIF file at '${{ inputs.sarif }}'; skipping upload."
+        fi
+
+    - name: Upload SARIF to GitHub code scanning
+      if: ${{ inputs.upload-sarif == 'true' && steps.sarif_check.outputs.exists == 'true' }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.working-directory }}/${{ inputs.sarif }}
+        category: sentinel
+
+    - name: Enforce fail-on gating
+      shell: bash
+      run: |
+        set -euo pipefail
+        CODE="${{ steps.scan.outputs.scan-exit-code }}"
+        if [ "${CODE}" = "0" ]; then
+          echo "Sentinel: scan passed (no findings at/above fail-on threshold)."
+          exit 0
+        elif [ "${CODE}" = "1" ]; then
+          echo "Sentinel: findings at/above '${{ inputs.fail-on }}' — failing the job."
+          exit 1
+        else
+          echo "Sentinel: scanner errored (exit ${CODE}) — failing the job."
+          exit "${CODE}"
+        fi
