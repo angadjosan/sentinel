@@ -315,7 +315,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: angadjosan/sentinel@v0.0.1
+      - uses: angadjosan/sentinel@v0.1.0
         with:
           provider: mock      # secrets + dependency (SCA) scan, no LLM
           fail-on: high
@@ -336,7 +336,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: angadjosan/sentinel@v0.0.1
+      - uses: angadjosan/sentinel@v0.1.0
         with:
           provider: anthropic
           model: claude-sonnet-4-6

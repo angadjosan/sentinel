@@ -248,7 +248,7 @@ async def _scan(
 
 
 # ── Output formats ─────────────────────────────────────────────────────────
-def to_sarif(result: ScanResult, tool_version: str = "0.0.1") -> dict:
+def to_sarif(result: ScanResult, tool_version: str = "0.1.0") -> dict:
     rules: dict[str, dict] = {}
     sarif_results: list[dict] = []
     for f in result.findings:

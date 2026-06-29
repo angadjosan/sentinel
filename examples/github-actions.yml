@@ -31,7 +31,7 @@ jobs:
 
       # ── LLM-powered scan (Anthropic) ──────────────────────────────────
       - name: Sentinel scan
-        uses: angadjosan/sentinel@v0.0.1
+        uses: angadjosan/sentinel@v0.1.0
         with:
           provider: anthropic
           model: claude-sonnet-4-6
@@ -46,7 +46,7 @@ jobs:
       # Uncomment this and remove the step above to try Sentinel with no setup.
       #
       # - name: Sentinel scan (secrets + SCA only)
-      #   uses: angadjosan/sentinel@v0.0.1
+      #   uses: angadjosan/sentinel@v0.1.0
       #   with:
       #     provider: mock
       #     fail-on: high
