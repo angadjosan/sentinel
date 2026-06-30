@@ -219,15 +219,15 @@ export async function backendStatus(
 
 export async function ensureBackend(apiUrl: string): Promise<void> {
   if (!isLocalhost(apiUrl)) {
-    // Remote (cloud) backend: verify reachability, then ensure local worker is up
-    if (!(await isHealthy(apiUrl, 4000))) {
-      throw new Error(
-        `Cannot reach Sentinel cloud backend at ${apiUrl}. ` +
-          `Check your network or run \`sentinel config set apiUrl <url>\`.`
-      );
+    // Remote (cloud) backend: just verify reachability. The hosted worker on Railway
+    // handles task processing — no local Docker container needed.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (await isHealthy(apiUrl, 8000)) return;
     }
-    await ensureWorkerContainer();
-    return;
+    throw new Error(
+      `Cannot reach Sentinel cloud backend at ${apiUrl}. ` +
+        `Check your network or run \`sentinel config set apiUrl <url>\`.`
+    );
   }
   // Localhost path: spawn API + worker via Python (self-hosted dev)
   if (await isHealthy(apiUrl)) return;
