@@ -1153,9 +1153,15 @@ def edge_response(edge: Edge) -> EdgeResponse:
 
 
 async def _dev_actor(db: AsyncSession) -> User:
+    # Prefer the first existing user/account rather than always creating a new dev one.
+    # This ensures auto-approve reuses the real account (with its provider/api_key config).
+    existing_user = await db.scalar(select(User).order_by(User.created_at).limit(1))
+    if existing_user is not None:
+        return existing_user
+    # No users yet — create the dev account on first boot.
     account = await db.scalar(select(Account).where(Account.name == "dev"))
     if account is None:
-        account = Account(name="dev")
+        account = Account(name="dev", provider="anthropic", model="claude-sonnet-4-6")
         db.add(account)
         await db.flush()
     user = await db.scalar(select(User).where(User.email == "dev@sentinel.local"))
