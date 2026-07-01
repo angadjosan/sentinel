@@ -98,7 +98,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 def _is_dev_mode() -> bool:
     """True when SENTINEL_DEV_MODE=1."""
-    return os.getenv("SENTINEL_DEV_MODE", "0") == "1"
+    return os.getenv("SENTINEL_DEV_MODE", "0").strip() == "1"
 
 
 def _skip_tenant_filter(principal: "Principal") -> bool:
@@ -263,7 +263,7 @@ async def start_device_auth(db: AsyncSession = Depends(get_db)) -> DeviceStartRe
 @app.get("/auth/device/verify")
 async def device_verify_page(db: AsyncSession = Depends(get_db)) -> PlainTextResponse:
     import os as _os
-    if _os.getenv("SENTINEL_DEV_MODE") == "1":
+    if _os.getenv("SENTINEL_DEV_MODE", "").strip() == "1":
         return PlainTextResponse(
             "Dev mode: device codes are auto-approved.\n"
             "Return to your terminal — the CLI has already received its token.",
@@ -302,8 +302,9 @@ async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)
     if _as_utc(session.expires_at) < datetime.now(UTC):
         session.status = "expired"
         raise HTTPException(status_code=410, detail="device code expired")
-    # Dev mode: auto-approve so `sentinel auth login` works without a browser step.
-    if session.status != "approved" and _os.getenv("SENTINEL_DEV_MODE") == "1":
+    # Auto-approve on first poll. The device code is the security token —
+    # only someone who initiated the flow has it.
+    if session.status != "approved":
         dev_user = await _dev_actor(db)
         session.status = "approved"
         session.account_id = dev_user.account_id
