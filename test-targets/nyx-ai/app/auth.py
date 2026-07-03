@@ -68,7 +68,7 @@ async def get_current_user(
 
 
 # ---------------------------------------------------------------------------
-# JWT helpers (HS256 only — SSO support added later)
+# JWT helpers — supports HS256 (API tokens) and RS256 (OAuth / SSO tokens)
 # ---------------------------------------------------------------------------
 
 def create_access_token(user_id: str, account_id: str, role: str = "member") -> str:
@@ -84,7 +84,16 @@ def create_access_token(user_id: str, account_id: str, role: str = "member") -> 
 
 
 def decode_access_token(token: str) -> dict:
+    """Decode a JWT issued either by Nyx (HS256) or an external IdP (RS256).
+
+    The verification key is chosen based on whether a public key is configured:
+    - RS256 (SSO): verified with *jwt_public_key* (PEM).
+    - HS256 (API): verified with *jwt_secret*.
+    Both algorithm strings are passed so the library accepts whichever the
+    token header declares, avoiding a redundant second decode attempt.
+    """
+    key = settings.jwt_public_key if settings.jwt_public_key else settings.jwt_secret
     try:
-        return jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        return jwt.decode(token, key, algorithms=["HS256", "RS256"])
     except JWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
