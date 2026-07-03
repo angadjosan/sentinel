@@ -1,4 +1,4 @@
-import { mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -143,10 +143,24 @@ async function ensureWorkerContainer(): Promise<void> {
 
 // ── Legacy localhost spawning (kept for self-hosted local dev) ─────────────────
 
+function resolveVenvPython(): string {
+  // Prefer explicit override, then walk up from cwd looking for a .venv.
+  if (process.env.SENTINEL_PYTHON) return process.env.SENTINEL_PYTHON;
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, ".venv", "bin", "python3");
+    if (existsSync(candidate)) return candidate;
+    const parent = join(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "python3"; // fall back to PATH
+}
+
 export async function startBackend(apiUrl: string): Promise<void> {
   ensureDirs();
   const port = new URL(apiUrl).port || "8000";
-  const pythonBin = process.env.SENTINEL_PYTHON ?? "python3";
+  const pythonBin = resolveVenvPython();
 
   if (!readPid("api")) {
     const fd = openSync(join(LOG_DIR, "api.log"), "a");
