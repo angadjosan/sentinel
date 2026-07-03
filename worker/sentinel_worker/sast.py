@@ -98,6 +98,7 @@ async def run_sast(
 
 
 async def get_llm_for_graph(graph_id: str, db: AsyncSession) -> SentinelLLMClient:
+    import os as _os
     graph = await db.get(Graph, graph_id)
     if graph is None:
         raise LLMNotConfiguredError(f"Graph {graph_id!r} not found")
@@ -107,10 +108,15 @@ async def get_llm_for_graph(graph_id: str, db: AsyncSession) -> SentinelLLMClien
             f"Account for graph {graph_id!r} has no provider/model configured. "
             "Run `sentinel config set provider <anthropic|openai|local>` and `sentinel config set model <name>`."
         )
-    api_key = getattr(account, "api_key", None)
-    if not api_key and account.provider != "local":
+    api_key = getattr(account, "api_key", None) or ""
+    # Fall back to standard provider env vars so the key doesn't have to live in the DB.
+    if not api_key and account.provider == "anthropic":
+        api_key = _os.getenv("ANTHROPIC_API_KEY", "")
+    elif not api_key and account.provider == "openai":
+        api_key = _os.getenv("OPENAI_API_KEY", "")
+    if not api_key and account.provider not in ("local", "mock"):
         raise LLMNotConfiguredError(
             f"Account for graph {graph_id!r} has no API key. "
-            "Run `sentinel config set api-key <key>`."
+            "Run `sentinel config set api-key <key>` or set the ANTHROPIC_API_KEY / OPENAI_API_KEY env var."
         )
-    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key or "")
+    return SentinelLLMClient(provider=account.provider, model=account.model, api_key=api_key)

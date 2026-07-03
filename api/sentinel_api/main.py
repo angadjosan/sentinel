@@ -305,10 +305,33 @@ async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)
     # Auto-approve on first poll. The device code is the security token —
     # only someone who initiated the flow has it.
     if session.status != "approved":
-        dev_user = await _dev_actor(db)
+        if _is_dev_mode():
+            # Local dev: reuse the single dev account so config/findings persist
+            # across restarts without re-login.
+            dev_user = await _dev_actor(db)
+            session.account_id = dev_user.account_id
+            session.user_id = dev_user.id
+        else:
+            # Cloud: create a fresh account + user for this device session so
+            # every login gets its own isolated account and API key.
+            from sentinel_worker.models import Account as _Account, User as _User
+            new_account = _Account(
+                name=f"user-{session.device_code[:8]}",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+            )
+            db.add(new_account)
+            await db.flush()
+            new_user = _User(
+                account_id=new_account.id,
+                email=f"device-{session.device_code[:16]}@sentinel.local",
+                role="admin",
+            )
+            db.add(new_user)
+            await db.flush()
+            session.account_id = new_account.id
+            session.user_id = new_user.id
         session.status = "approved"
-        session.account_id = dev_user.account_id
-        session.user_id = dev_user.id
         session.role = "admin"
         session.approved_at = now()
     if session.status != "approved" or not session.account_id or not session.user_id:
