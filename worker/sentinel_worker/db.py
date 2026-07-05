@@ -6,6 +6,7 @@ import re
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import structlog
 from sqlalchemy import text
@@ -42,8 +43,24 @@ def reset_account_context(token: contextvars.Token) -> None:
     _current_account_id.reset(token)
 
 
+def _normalize_postgres_url(url: str) -> str:
+    """Rewrite libpq-style Postgres URLs (e.g. from Neon) for SQLAlchemy + asyncpg.
+
+    asyncpg's connect() rejects libpq query params like `sslmode`/`channel_binding`
+    with a TypeError, so they're dropped here; SSL is still enforced via connect_args.
+    """
+    parts = urlsplit(url)
+    scheme = "postgresql+asyncpg"
+    query = parse_qs(parts.query)
+    query.pop("sslmode", None)
+    query.pop("channel_binding", None)
+    return urlunsplit((scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+
+
 def database_url() -> str:
     if url := os.getenv("DATABASE_URL"):
+        if url.startswith(("postgresql://", "postgres://")):
+            return _normalize_postgres_url(url)
         return url
     dev_db = Path(os.getenv("SENTINEL_DEV_DB", str(Path.home() / ".sentinel" / "sentinel.dev.db")))
     try:
@@ -65,6 +82,7 @@ def create_engine(url: str | None = None) -> AsyncEngine:
     if "postgresql" in resolved:
         # PgBouncer (Neon's pooled endpoint) doesn't support asyncpg prepared statements.
         connect_args["statement_cache_size"] = 0
+        connect_args["ssl"] = "require"
         if os.getenv("VERCEL"):
             # Serverless: Neon closes idle connections in seconds, so don't pool —
             # each request gets a fresh connection and closes it immediately.
