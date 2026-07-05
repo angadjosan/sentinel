@@ -10,13 +10,17 @@ if os.path.isdir(os.path.join(_worker_dev, "sentinel_worker")):
     except ImportError:
         sys.path.insert(0, os.path.normpath(_worker_dev))
 
+app = None  # placeholder so the builder statically detects a top-level `app`
+
 try:
-    from sentinel_api.main import app  # noqa: F401
+    from sentinel_api.main import app  # noqa: F401,F811
 except Exception:
     import traceback
 
     _tb = traceback.format_exc()
 
-    async def app(scope, receive, send):  # noqa: F811 - temporary diagnostic fallback
+    async def _diagnostic_app(scope, receive, send):
         await send({"type": "http.response.start", "status": 500, "headers": [[b"content-type", b"text/plain"]]})
         await send({"type": "http.response.body", "body": _tb.encode()})
+
+    app = _diagnostic_app
