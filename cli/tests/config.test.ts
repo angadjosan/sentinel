@@ -32,9 +32,9 @@ test("scan config validation rejects shell metacharacters", () => {
   assert.throws(() => validateConfigForScan(config), /shell metacharacters/);
 });
 
-test("apiUrl defaults to the hosted backend", () => {
+test("apiUrl defaults to localhost", () => {
   const cfg = ConfigSchema.parse({ repoName: "demo" });
-  assert.equal(cfg.apiUrl, "https://sentinel-sable-phi.vercel.app");
+  assert.equal(cfg.apiUrl, "http://localhost:8000");
 });
 
 test("loadConfig maps spec api_endpoint to apiUrl", () => {

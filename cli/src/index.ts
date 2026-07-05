@@ -55,7 +55,7 @@ auth
 program
   .command("init")
   .description("Initialize Sentinel for this repository")
-  .option("--api-url <url>", "Sentinel API URL", "https://sentinel-sable-phi.vercel.app")
+  .option("--api-url <url>", "Sentinel API URL", "http://localhost:8000")
   .option("--repo-name <name>", "Repository name")
   .action(async (options) => {
     const root = findRepoRoot();
