@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
@@ -26,7 +28,7 @@ from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next
 from sentinel_worker.trace_store import read_run_trace
 
 from .auth import Principal, create_token, current_principal, require_admin
-from .deps import get_db, init_schema
+from .deps import get_db, get_tenant_db, init_schema
 from .routers.repos import router as repos_router
 from .schemas import (
     AccountConfigPatch,
@@ -240,6 +242,71 @@ async def health() -> dict[str, str]:
 @app.get("/metrics")
 async def metrics(principal: Principal = Depends(require_admin)) -> PlainTextResponse:
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
+
+
+def _github_install_account_id(installation_id: int) -> str:
+    """Deterministic account id per GitHub App installation, stable across webhook deliveries.
+
+    Using uuid5 (rather than a DB lookup-by-name) gives a valid-UUID account id so Postgres
+    tenant-schema routing (see sentinel_worker.db._schema_name) applies to GitHub App scans too.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"sentinel-github-app-installation:{installation_id}"))
+
+
+@app.post("/webhook/github")
+async def github_webhook(request: Request) -> dict[str, bool]:
+    """Receives GitHub App webhooks, enqueues a scan for opened/updated PRs, and posts a pending Check Run.
+
+    No CLI, no workflow file, no config — installing the App is enough. See non-code/shipping.md.
+    """
+    from sentinel_worker.github_app import (
+        GitHubAppNotConfiguredError,
+        create_check_run,
+        fetch_pr_diff,
+        get_installation_token,
+        verify_webhook_signature,
+        webhook_secret,
+    )
+
+    body = await request.body()
+    try:
+        secret = webhook_secret()
+    except GitHubAppNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not verify_webhook_signature(secret, request.headers.get("x-hub-signature-256"), body):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    payload = json.loads(body)
+    event = request.headers.get("x-github-event")
+
+    if event == "pull_request" and payload.get("action") in ("opened", "synchronize"):
+        pr = payload["pull_request"]
+        installation_id = payload["installation"]["id"]
+        repo_full_name = payload["repository"]["full_name"]
+        head_sha = pr["head"]["sha"]
+
+        token = await get_installation_token(installation_id)
+        check_run_id = await create_check_run(token, repo_full_name, head_sha)
+        diff = await fetch_pr_diff(token, repo_full_name, pr["number"])
+
+        account_id = _github_install_account_id(installation_id)
+        async with contextlib.asynccontextmanager(get_tenant_db)(account_id) as db:
+            await enqueue_task(
+                db,
+                repo_name=repo_full_name,
+                kind="source",
+                payload={
+                    "diff": diff,
+                    "run_context": "ci",
+                    "check_run_id": check_run_id,
+                    "installation_id": installation_id,
+                    "repo": repo_full_name,
+                    "sha": head_sha,
+                },
+                account_id=account_id,
+            )
+
+    return {"ok": True}
 
 
 @app.post("/auth/device", response_model=DeviceStartResponse)
