@@ -1,0 +1,37 @@
+name: Deploy to Vercel
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  VERCEL_ORG_ID: team_1JTwO6b6HwTLm4Fl39QkRxCm
+
+jobs:
+  deploy-api:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_PROJECT_ID: prj_FGvFTnD8Re61d8RSBC7zHZcE5Fd2
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install -g vercel
+      - run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - run: vercel deploy --prod --yes --token="$VERCEL_TOKEN"
+
+  deploy-dashboard:
+    name: Deploy dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    env:
+      VERCEL_PROJECT_ID: prj_9lJlkFSBwk3baxg2ZkD24uXp6XoJ
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm install -g vercel
+      - run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - run: vercel deploy --prod --yes --token="$VERCEL_TOKEN"
