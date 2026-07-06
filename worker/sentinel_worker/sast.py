@@ -59,7 +59,7 @@ async def run_sast(
         system=system,
         user=user_content,
         tools=TOOLS,
-        max_iterations=5,
+        max_iterations=15,
         tool_dispatcher=tool_dispatcher,
         run_id=run_id,
         component="sast",
