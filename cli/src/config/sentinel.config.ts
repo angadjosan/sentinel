@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
 const SAFE_COMMAND_RE = /^[A-Za-z0-9_./:@%+=,\-\s]+$/;
@@ -32,7 +32,7 @@ export const ConfigSchema = z.object({
   repo_id: z.string().optional(),
   api_endpoint: z.string().url().optional(),
   apiUrl: z.string().url().default("https://sentinel-steel-xi.vercel.app"),
-  repoName: z.string().min(1),
+  repoName: z.string().min(1).default("unnamed-repo"),
   provider: z.string().default("local"),
   model: z.string().default("llama3.2"),
   boot: z.string().optional(),
@@ -79,7 +79,8 @@ export function configPath(root = findRepoRoot()): string {
 export function loadConfig(root = findRepoRoot()): SentinelConfig {
   const path = configPath(root);
   if (!existsSync(path)) {
-    throw new Error("sentinel.config.json not found. Run `sentinel init` first.");
+    // No config file — use defaults so sentinel works on any repo without init.
+    return ConfigSchema.parse({ repoName: basename(root) });
   }
   const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   return ConfigSchema.parse(raw.api_endpoint && !raw.apiUrl ? { ...raw, apiUrl: raw.api_endpoint } : raw);
