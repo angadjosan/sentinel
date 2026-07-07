@@ -153,6 +153,9 @@ async def execute_source_scan(
     run_context: str = "local",
     base_ref: str | None = None,
     paths: list[str] | None = None,
+    check_run_id: int | None = None,
+    installation_id: int | None = None,
+    gh_repo: str | None = None,
     _llm=None,  # injectable for tests; production resolves from account config
 ) -> int:
     from .sast import run_sast, get_llm_for_graph
@@ -272,7 +275,30 @@ async def execute_source_scan(
         trace_event("scan.completed", finding_count=findings),
     ])
     await offload_trace_if_large(db, run)
+    if check_run_id is not None and installation_id is not None and gh_repo:
+        await _report_github_check_run(db, run=run, gh_repo=gh_repo, installation_id=installation_id, check_run_id=check_run_id)
     return findings
+
+
+async def _report_github_check_run(db: AsyncSession, *, run: Run, gh_repo: str, installation_id: int, check_run_id: int) -> None:
+    """Best-effort: post scan results back to the GitHub Check Run created by the webhook.
+
+    A failure here (GitHub API hiccup, revoked installation, etc.) must not fail the scan itself —
+    the findings are already persisted and visible in the dashboard regardless.
+    """
+    from .github_app import complete_check_run, get_installation_token
+
+    try:
+        rows = list(await db.scalars(select(Finding).where(Finding.run_id == run.id)))
+        findings_payload = [
+            {"severity": f.severity, "vuln_type": f.vuln_type, "title": f.title}
+            for f in rows
+            if not f.suppressed
+        ]
+        token = await get_installation_token(installation_id)
+        await complete_check_run(token, gh_repo, check_run_id, findings_payload)
+    except Exception as exc:
+        log.warning("github_app.check_run.report_failed", run_id=run.id, check_run_id=check_run_id, error=str(exc))
 
 
 async def review_plan(

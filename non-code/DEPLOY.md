@@ -30,6 +30,9 @@ Set these environment variables in Vercel (Settings → Environment Variables):
 | `SENTINEL_JWT_SECRET` | Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `SENTINEL_DEV_MODE` | `0` |
 | `CORS_ORIGINS` | `https://your-dashboard.vercel.app` |
+| `GITHUB_APP_ID` | Only if using the GitHub App integration — see `non-code/shipping.md` |
+| `GITHUB_APP_PRIVATE_KEY` | Only if using the GitHub App integration — see `non-code/shipping.md` |
+| `GITHUB_APP_WEBHOOK_SECRET` | Only if using the GitHub App integration — see `non-code/shipping.md` |
 
 After deploying, copy the production URL (e.g. `https://sentinel-api-xxx.vercel.app`).
 

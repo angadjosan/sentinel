@@ -41,6 +41,9 @@ async def execute_claimed_task(db: AsyncSession, claimed: ClaimedTask, *, _llm=N
             run_context=str(claimed.payload.get("run_context", "worker")),
             base_ref=claimed.payload.get("base_ref") if isinstance(claimed.payload.get("base_ref"), str) else None,
             paths=[str(p) for p in claimed.payload.get("paths", [])] if isinstance(claimed.payload.get("paths"), list) else [],
+            check_run_id=claimed.payload.get("check_run_id"),
+            installation_id=claimed.payload.get("installation_id"),
+            gh_repo=claimed.payload.get("repo") if isinstance(claimed.payload.get("repo"), str) else None,
             _llm=_llm,
         )
         return
