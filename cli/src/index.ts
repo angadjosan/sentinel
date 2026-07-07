@@ -6,7 +6,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
-import { writeApiKey } from "./auth/keychain.js";
+import { clearApiKey, writeCredential } from "./auth/keychain.js";
 import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff, lsFiles } from "./diff/git.js";
@@ -40,7 +40,7 @@ auth
     while (Date.now() < deadline) {
       const token = await client.deviceAuthToken(started.device_code);
       if (token.status === "approved") {
-        await writeApiKey(config, token.access_token);
+        await writeCredential(config, { accessToken: token.access_token, refreshToken: token.refresh_token });
         if (token.database_url) {
           writeWorkerConn({ databaseUrl: token.database_url, accountId: token.account_id });
         }
@@ -50,6 +50,31 @@ auth
       await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
     }
     throw new Error("device code expired before approval");
+  });
+
+auth
+  .command("logout")
+  .description("Log out and revoke the stored credential")
+  .action(async () => {
+    const config = loadConfig();
+    try {
+      await ensureBackend(config.apiUrl);
+      await new SentinelApiClient(config).logout();
+    } catch {
+      // Best-effort server-side revocation — always clear the local credential.
+    }
+    await clearApiKey(config);
+    console.log("logged out");
+  });
+
+auth
+  .command("whoami")
+  .description("Show the currently authenticated user")
+  .action(async () => {
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const identity = await new SentinelApiClient(config).whoami();
+    console.log(`${identity.email}  (${identity.role}) — account ${identity.account_name}`);
   });
 
 program
