@@ -20,6 +20,14 @@ function accountName(config: SentinelConfig): string {
   return config.apiUrl;
 }
 
+// Namespaced separately from accountName: this is the LLM provider key (used
+// locally by the scan engine), not the Sentinel auth token above. It never
+// leaves this machine — see engine/localEngine.ts, which passes it to the
+// local Python engine via env, and non-code/README.md's local-AI-calls model.
+function llmAccountName(config: SentinelConfig): string {
+  return `llm:${config.apiUrl}:${config.repoName}`;
+}
+
 // ── File-based fallback ───────────────────────────────────────────────────────
 // Used when the system keychain (keytar) is unavailable or its native bindings
 // are not functional. Tokens are stored in ~/.sentinel/keychain.json (mode 600).
@@ -138,5 +146,38 @@ export async function clearApiKey(config: SentinelConfig): Promise<void> {
   }
   const data = readFallback();
   delete data[fallbackKey(SERVICE, key)];
+  writeFallback(data);
+}
+
+// ── LLM provider key (local-only; never sent to the Sentinel cloud) ────────
+
+export async function readLlmApiKey(config: SentinelConfig): Promise<string | undefined> {
+  if (process.env.SENTINEL_LLM_API_KEY) return process.env.SENTINEL_LLM_API_KEY;
+  const key = llmAccountName(config);
+  try {
+    const keytar = await loadKeytar();
+    if (keytar) {
+      const value = await keytar.getPassword(SERVICE, key);
+      if (value) return value;
+    }
+  } catch {
+    // fall through to file fallback
+  }
+  return readFallback()[fallbackKey(SERVICE, key)] ?? undefined;
+}
+
+export async function writeLlmApiKey(config: SentinelConfig, apiKey: string): Promise<void> {
+  const key = llmAccountName(config);
+  try {
+    const keytar = await loadKeytar();
+    if (keytar) {
+      await keytar.setPassword(SERVICE, key, apiKey);
+      return;
+    }
+  } catch {
+    // fall through to file fallback
+  }
+  const data = readFallback();
+  data[fallbackKey(SERVICE, key)] = apiKey;
   writeFallback(data);
 }

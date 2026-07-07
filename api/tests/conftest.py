@@ -117,6 +117,63 @@ def _isolated_db(monkeypatch, tmp_path):
     monkeypatch.setattr(deps, "SessionLocal", fresh_sm)
 
 
+def seed_finding(
+    client,
+    *,
+    repo_name: str,
+    vuln_type: str = "sqli",
+    severity: str = "high",
+    file: str = "app.js",
+    node_id: str | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    evidence: str | None = None,
+    headers: dict | None = None,
+) -> dict:
+    """Seed a finding via POST /graph/upsert + POST /findings/ingest — the
+    supported way to get a finding into the test DB now that /source and
+    /plan (which took diffs and plan content) have been removed.
+
+    Pushes a matching graph node first, same as a real local scan
+    (local_engine.push_results_to_cloud always pushes the graph delta before
+    ingesting findings) — without it, finding_response's file/line stay null
+    because they're resolved via a join to the node, not stored on Finding.
+    Returns the ingest response: {run_id, created, updated, total, finding_ids}.
+    """
+    node_id = node_id or f"fn:{file}:sink"
+    graph_resp = client.post(
+        "/graph/upsert",
+        json={
+            "repo_name": repo_name,
+            "graph_kind": "main",
+            "nodes": [{"id": node_id, "kind": "FUNCTION", "name": "sink", "file": file, "line_start": 1, "is_sink": True}],
+            "edges": [],
+        },
+        headers=headers or {},
+    )
+    assert graph_resp.status_code == 200, graph_resp.text
+
+    payload = {
+        "repo_name": repo_name,
+        "run_context": "local",
+        "findings": [
+            {
+                "vuln_type": vuln_type,
+                "severity": severity,
+                "title": title or vuln_type.replace("_", " ").title(),
+                "description": description or f"{vuln_type} finding seeded for a test",
+                "remediation": "Use parameterized queries / escape inputs.",
+                "node_id": node_id,
+                "file": file,
+                "evidence": evidence,
+            }
+        ],
+    }
+    resp = client.post("/findings/ingest", json=payload, headers=headers or {})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
 def process_tasks(n: int = 1) -> None:
     """Run n queued worker tasks inline using the test's patched DB and mock LLM.
 

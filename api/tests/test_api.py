@@ -2,10 +2,8 @@ from fastapi.testclient import TestClient
 from uuid import uuid4
 
 from sentinel_api.main import app
-from sentinel_api.deps import SessionLocal
-from sentinel_worker.models import TraceAccessLog
 
-from .conftest import process_tasks
+from .conftest import seed_finding
 
 
 def test_health_endpoint():
@@ -15,23 +13,11 @@ def test_health_endpoint():
     assert response.json() == {"status": "ok"}
 
 
-def test_source_endpoint_emits_finding(tmp_path, monkeypatch):
+def test_ingest_creates_completed_run_and_finding(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'sentinel.db'}")
     with TestClient(app) as client:
-        response = client.post(
-            "/source",
-            json={
-                "repo_name": "repo",
-                "diff": "+++ b/app.js\n+app.get('/u', (req,res)=> db.query(`select * from users where id=${req.query.id}`))",
-                "run_context": "local",
-            },
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["run"]["status"] == "queued"
-        run_id = body["run"]["id"]
-
-        process_tasks(1)
+        ingested = seed_finding(client, repo_name="repo", vuln_type="sqli", file="app.js")
+        run_id = ingested["run_id"]
 
         run_detail = client.get(f"/runs/{run_id}")
         assert run_detail.status_code == 200
@@ -53,18 +39,8 @@ def test_source_endpoint_emits_finding(tmp_path, monkeypatch):
 def test_runs_include_listing_metadata():
     repo = f"run-metadata-{uuid4().hex}"
     with TestClient(app) as client:
-        source = client.post(
-            "/source",
-            json={
-                "repo_name": repo,
-                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
-                "run_context": "local",
-            },
-        )
-        assert source.status_code == 200
-        run_id = source.json()["run"]["id"]
-
-        process_tasks(1)
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli", file="app.js")
+        run_id = ingested["run_id"]
 
         listed = client.get("/runs")
         detail = client.get(f"/runs/{run_id}")
@@ -78,26 +54,15 @@ def test_runs_include_listing_metadata():
     assert detail.json()["finding_count"] == 1
 
 
-def test_plan_pull_graph_and_cancel_flow():
+def test_pull_graph_and_cancel_flow():
+    repo = f"pull-graph-{uuid4().hex}"
     with TestClient(app) as client:
-        plan = client.post(
-            "/plan",
-            json={
-                "repo_name": "repo",
-                "content": "Add handler that calls exec(`convert ${req.query.file}`)",
-                "with_retry": True,
-            },
+        ingested = seed_finding(
+            client, repo_name=repo, vuln_type="cmdi",
+            description="Add handler that calls exec(`convert ${req.query.file}`)",
         )
-        assert plan.status_code == 200
-        body = plan.json()
-        assert body["run"]["status"] == "queued"
-        run_id = body["run"]["id"]
-
-        process_tasks(1)
-
-        findings = client.get("/findings")
-        assert findings.status_code == 200
-        finding_id = findings.json()[0]["id"]
+        run_id = ingested["run_id"]
+        finding_id = ingested["finding_ids"][0]
 
         pull = client.get(f"/findings/{finding_id}/pull")
         assert pull.status_code == 200
@@ -112,6 +77,8 @@ def test_plan_pull_graph_and_cancel_flow():
         assert "nodes" in finding_graph.json()
         assert "edges" in finding_graph.json()
 
+        # The ingest run already completed; cancelling it is a no-op that
+        # reports its (terminal) status rather than erroring.
         cancel = client.delete(f"/runs/{run_id}")
         assert cancel.status_code == 200
         assert cancel.json()["status"] == "completed"
@@ -122,18 +89,10 @@ def test_findings_can_filter_by_repo_name():
     repo_a = f"filter-a-{suffix}"
     repo_b = f"filter-b-{suffix}"
     with TestClient(app) as client:
-        first = client.post(
-            "/plan",
-            json={"repo_name": repo_a, "content": "exec(`run ${req.query.x}`)", "with_retry": False},
-        )
-        second = client.post(
-            "/plan",
-            json={"repo_name": repo_b, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
-        )
-        assert first.status_code == 200
-        assert second.status_code == 200
-
-        process_tasks(2)
+        # Distinct node ids: different repos producing the same deterministic
+        # node id is a real (if narrower) collision case too — see graph_upsert.
+        seed_finding(client, repo_name=repo_a, vuln_type="cmdi", node_id=f"fn:{repo_a}/app.js:sink")
+        seed_finding(client, repo_name=repo_b, vuln_type="sqli", node_id=f"fn:{repo_b}/app.js:sink")
 
         response = client.get(f"/findings?repo_name={repo_b}")
     assert response.status_code == 200
@@ -145,17 +104,8 @@ def test_findings_can_filter_by_repo_name():
 def test_findings_can_filter_by_status_and_severity():
     repo = f"finding-filters-{uuid4().hex}"
     with TestClient(app) as client:
-        created = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
-        )
-        assert created.status_code == 200
-
-        process_tasks(1)
-
-        findings = client.get(f"/findings?repo_name={repo}")
-        assert findings.status_code == 200
-        finding_id = findings.json()[0]["id"]
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli", severity="high")
+        finding_id = ingested["finding_ids"][0]
 
         suppressed = client.patch(f"/findings/{finding_id}/suppress", json={"reason": "filter regression"})
         assert suppressed.status_code == 200
@@ -172,12 +122,16 @@ def test_findings_can_filter_by_status_and_severity():
     assert critical_rows.json() == []
 
 
-def test_source_enqueue_claim_complete_and_cancel():
+def test_pentest_task_claim_complete_and_cancel():
+    """Generic task-queue lifecycle (claim/complete/fail/cancel), exercised via
+    /pentest enqueue now that /source/enqueue is gone — the task machinery
+    itself is not scan-specific."""
+    repo = f"queue-{uuid4().hex}"
     with TestClient(app) as client:
-        enqueued = client.post(
-            "/source/enqueue",
-            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('x')", "run_context": "local"},
-        )
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli")
+        finding_id = ingested["finding_ids"][0]
+
+        enqueued = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
         assert enqueued.status_code == 200
         task_id = enqueued.json()["task_id"]
         run_id = enqueued.json()["run"]["id"]
@@ -194,19 +148,13 @@ def test_source_enqueue_claim_complete_and_cancel():
         assert run.status_code == 200
         assert run.json()["status"] == "completed"
 
-        second = client.post(
-            "/source/enqueue",
-            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('y')", "run_context": "local"},
-        )
+        second = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
         second_task = second.json()["task_id"]
         cancelled = client.post(f"/tasks/{second_task}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
 
-        third = client.post(
-            "/source/enqueue",
-            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('z')", "run_context": "local"},
-        )
+        third = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
         third_task = third.json()["task_id"]
         third_run = third.json()["run"]["id"]
         cancelled_run = client.delete(f"/runs/{third_run}")
@@ -222,10 +170,7 @@ def test_source_enqueue_claim_complete_and_cancel():
         assert "run.cancelled" in cancelled_trace.text
         assert "late completion" not in cancelled_trace.text
 
-        fourth = client.post(
-            "/source/enqueue",
-            json={"repo_name": f"queue-{uuid4().hex}", "diff": "+++ b/app.js\n+console.log('delete-cancel')", "run_context": "local"},
-        )
+        fourth = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
         fourth_run = fourth.json()["run"]["id"]
         delete_cancelled = client.delete(f"/runs/{fourth_run}")
         assert delete_cancelled.status_code == 200
@@ -235,13 +180,7 @@ def test_source_enqueue_claim_complete_and_cancel():
 def test_analytics_endpoints_return_operational_metrics():
     repo = f"analytics-{uuid4().hex}"
     with TestClient(app) as client:
-        plan = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "db.query(`select ${req.query.x}`)", "with_retry": False},
-        )
-        assert plan.status_code == 200
-
-        process_tasks(1)
+        seed_finding(client, repo_name=repo, vuln_type="sqli", severity="high")
 
         trends = client.get("/analytics/finding-trends")
         latency = client.get("/analytics/scan-latency")
@@ -261,21 +200,7 @@ def test_analytics_endpoints_return_operational_metrics():
 def test_pentest_selects_open_target_and_writes_confirmed_edge():
     repo = f"pentest-{uuid4().hex}"
     with TestClient(app) as client:
-        source = client.post(
-            "/source",
-            json={
-                "repo_name": repo,
-                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
-                "run_context": "local",
-            },
-        )
-        assert source.status_code == 200
-
-        process_tasks(1)
-
-        findings = client.get(f"/findings?repo_name={repo}")
-        assert findings.status_code == 200
-        finding_id = findings.json()[0]["id"]
+        seed_finding(client, repo_name=repo, vuln_type="sqli", severity="high")
 
         confirmed = client.post(
             "/pentest",
@@ -287,7 +212,7 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
         )
         assert confirmed.status_code == 200
         body = confirmed.json()
-        # pentest is now enqueued — verify task is queued
+        # pentest is enqueued — verify task is queued
         assert body["run"]["status"] == "queued"
         assert body["task_id"]
 
@@ -299,24 +224,17 @@ def test_pentest_selects_open_target_and_writes_confirmed_edge():
 def test_pentest_description_selects_matching_open_target():
     repo = f"pentest-description-{uuid4().hex}"
     with TestClient(app) as client:
-        sqli = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
+        seed_finding(
+            client, repo_name=repo, vuln_type="sqli", title="SQL Injection",
+            description="Taint path confirmed from user-controlled input to sqli sink.",
         )
-        cmdi = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "exec(`convert ${req.query.file}`)", "with_retry": False},
+        seed_finding(
+            client, repo_name=repo, vuln_type="cmdi", title="Command Injection",
+            description="Command injection via the convert endpoint using unsanitized input.",
         )
-        assert sqli.status_code == 200
-        assert cmdi.status_code == 200
 
-        process_tasks(2)
-
-        # get findings to know the cmdi finding id
         all_findings = client.get(f"/findings?repo_name={repo}")
         assert all_findings.status_code == 200
-        cmdi_finding_id = cmdi.json()["run"]["id"]  # run_id from cmdi enqueue
-        # find the cmdi finding by matching it against the findings list
         findings_list = all_findings.json()
         cmdi_findings = [f for f in findings_list if f["vuln_type"] == "cmdi"]
         sqli_findings = [f for f in findings_list if f["vuln_type"] == "sqli"]
@@ -334,7 +252,6 @@ def test_pentest_description_selects_matching_open_target():
         )
 
     assert selected.status_code == 200
-    # pentest is enqueued — verify status is queued
     assert selected.json()["run"]["status"] == "queued"
     assert selected.json()["task_id"]
 
@@ -342,23 +259,10 @@ def test_pentest_description_selects_matching_open_target():
 def test_pentest_rejects_incomplete_firecracker_config():
     repo = f"pentest-firecracker-{uuid4().hex}"
     with TestClient(app) as client:
-        source = client.post(
-            "/source",
-            json={
-                "repo_name": repo,
-                "diff": "+++ b/app.js\n+db.query(`select * from users where id=${req.query.id}`)",
-                "run_context": "local",
-            },
-        )
-        assert source.status_code == 200
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli", severity="high")
+        finding_id = ingested["finding_ids"][0]
 
-        process_tasks(1)
-
-        findings = client.get(f"/findings?repo_name={repo}")
-        assert findings.status_code == 200
-        finding_id = findings.json()[0]["id"]
-
-        # Validation now happens in the worker, not at enqueue time — expect 200
+        # Validation happens in the worker, not at enqueue time — expect 200
         resp = client.post(
             "/pentest",
             json={
@@ -374,34 +278,20 @@ def test_pentest_rejects_incomplete_firecracker_config():
 def test_run_events_streams_trace_and_completion():
     repo = f"events-{uuid4().hex}"
     with TestClient(app) as client:
-        plan = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
-        )
-        assert plan.status_code == 200
-        run_id = plan.json()["run"]["id"]
-
-        process_tasks(1)
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli")
+        run_id = ingested["run_id"]
 
         with client.stream("GET", f"/runs/{run_id}/events") as response:
             body = "".join(response.iter_text())
-    assert "plan.completed" in body
+    assert "ingest.completed" in body
     assert '"kind": "complete"' in body
 
 
 def test_run_trace_access_is_audited():
-    import anyio
-
     repo = f"trace-audit-{uuid4().hex}"
     with TestClient(app) as client:
-        plan = client.post(
-            "/plan",
-            json={"repo_name": repo, "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
-        )
-        assert plan.status_code == 200
-        run_id = plan.json()["run"]["id"]
-
-        process_tasks(1)
+        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli")
+        run_id = ingested["run_id"]
 
         trace = client.get(f"/runs/{run_id}/trace")
         assert trace.status_code == 200
@@ -409,16 +299,3 @@ def test_run_trace_access_is_audited():
         access_log = client.get(f"/runs/{run_id}/trace-access")
         assert access_log.status_code == 200
         assert any(row["run_id"] == run_id for row in access_log.json())
-
-
-def test_source_file_endpoint_reads_encrypted_snapshot():
-    repo = f"source-read-{uuid4().hex}"
-    with TestClient(app) as client:
-        init = client.post("/init", json={"repo_name": repo, "files": {"app.js": "const x = 1;"}})
-        assert init.status_code == 200
-
-        process_tasks(1)
-
-        response = client.get(f"/source-files/{repo}/bootstrap/app.js")
-    assert response.status_code == 200
-    assert response.json()["content"] == "const x = 1;"

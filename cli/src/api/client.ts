@@ -137,14 +137,6 @@ export class SentinelApiClient {
     }
   }
 
-  async init(files: Record<string, string>): Promise<Run> {
-    const result = await this.request<{ task_id: string; run: Run }>("/init", {
-      method: "POST",
-      body: JSON.stringify({ repo_name: this.config.repoName, files }),
-    });
-    return result.run;
-  }
-
   startDeviceAuth() {
     return this.request<DeviceAuthStart>("/auth/device", { method: "POST" });
   }
@@ -195,41 +187,6 @@ export class SentinelApiClient {
   logout() {
     return this.request<{ status: string }>("/auth/logout", { method: "POST" });
   }
-
-  source(
-    diff: string,
-    runContext: string,
-    scope: { baseRef?: string; paths?: string[] } = {}
-  ) {
-    return this.request<{ run: Run; findings: Finding[] }>("/source", {
-      method: "POST",
-      body: JSON.stringify({
-        repo_name: this.config.repoName,
-        diff,
-        run_context: runContext,
-        base_ref: scope.baseRef,
-        paths: scope.paths ?? [],
-      }),
-    });
-  }
-
-  enqueueSource(
-    diff: string,
-    runContext: string,
-    scope: { baseRef?: string; paths?: string[] } = {}
-  ) {
-    return this.request<{ task_id: string; run: Run }>("/source/enqueue", {
-      method: "POST",
-      body: JSON.stringify({
-        repo_name: this.config.repoName,
-        diff,
-        run_context: runContext,
-        base_ref: scope.baseRef,
-        paths: scope.paths ?? [],
-      }),
-    });
-  }
-
   findings(filters: { status?: string; severity?: string } = {}) {
     const params = new URLSearchParams({ repo_name: this.config.repoName });
     if (filters.status) params.set("status", filters.status);
@@ -247,17 +204,6 @@ export class SentinelApiClient {
       node: unknown;
       remediation_plan: string[];
     }>(`/findings/${id}/pull`, {}, LONG_TIMEOUT_MS);
-  }
-
-  plan(content: string, withRetry: boolean) {
-    return this.request<{ task_id: string; run: Run }>("/plan", {
-      method: "POST",
-      body: JSON.stringify({
-        repo_name: this.config.repoName,
-        content,
-        with_retry: withRetry,
-      }),
-    });
   }
 
   suppress(id: string, reason: string) {
@@ -285,29 +231,6 @@ export class SentinelApiClient {
     return this.request<Finding>(`/findings/${id}/suppress/reject`, {
       method: "POST",
       body: JSON.stringify({ reason }),
-    });
-  }
-
-  pentest(
-    target: { findingId?: string; description?: string } = {},
-    sanitizerOutput = "",
-    behavioralProof?: string,
-    proofDetail = ""
-  ) {
-    return this.request<Finding>("/pentest", {
-      method: "POST",
-      body: JSON.stringify({
-        repo_name: this.config.repoName,
-        finding_id: target.findingId,
-        description: target.description,
-        sanitizer_output: sanitizerOutput,
-        behavioral_proof: behavioralProof,
-        proof_detail: proofDetail,
-        boot: this.config.boot,
-        healthcheck: this.config.healthcheck,
-        egress_allowlist: this.config.egress_allowlist,
-        firecracker: this.config.firecracker,
-      }),
     });
   }
 

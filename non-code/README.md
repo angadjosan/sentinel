@@ -1,3 +1,32 @@
+> **Local-AI-calls update.** This document was written before the local-execution
+> refactor and, in many places below (`sentinel init` "sends the full codebase to
+> the cloud", `sentinel source` "the diff is sent to Sentinel's cloud worker",
+> the Storage and Cloud Architecture sections' source-encryption-at-rest
+> claims), it still describes the **old** cloud-upload architecture. That
+> architecture no longer exists. The current model, in one paragraph:
+>
+> All analysis — diff computation, the five-pass graph construction, the SAST/
+> plan/pentest LLM calls — runs **locally**, in a Python engine
+> (`worker/sentinel_worker/local_cli.py`) the CLI spawns as a subprocess. The
+> LLM call is made on the developer's own machine with a key stored only in
+> their system keychain (`sentinel config set api-key`) — the server rejects
+> a `PATCH /config` request that includes one. Source code and diffs are
+> never transmitted anywhere. The only things that reach the cloud are: the
+> **code graph** (`POST /graph/upsert` — node/edge pointers and short semantic
+> labels, never source text), **findings** (`POST /findings/ingest`), and a
+> **pentest confirmation outcome** (`POST /findings/{id}/confirm`, evidence
+> text + node pointers only). `GET /graph/subgraph` lets the local engine pull
+> existing graph context (read-only, same no-source guarantee) to enrich the
+> SAST bootstrap for functions outside the current diff. Run traces (every
+> prompt, every tool call) are written locally to `~/.sentinel/runs/<id>.jsonl`
+> and never uploaded; the cloud only ever sees a redacted summary. Pentest
+> boots the target app locally too (no Firecracker microVM — the app is
+> already on the developer's own machine, not a shared multi-tenant host).
+> Read the sections below for the *design rationale* (the five-pass graph
+> pipeline, the context-loading strategy, the confirmation oracle) — they're
+> still accurate — but treat any claim about *where the codebase or diff is
+> sent* as superseded by the paragraph above.
+
 # Problem
 
 1. Everyone can now build software products. Thus, everyone needs application security.

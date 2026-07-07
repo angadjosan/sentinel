@@ -28,6 +28,7 @@ async def run_sast(
     repo_id: str,
     db: AsyncSession,
     llm: SentinelLLMClient | None = None,
+    repo_dir: str | None = None,
 ) -> list[Finding]:
     if llm is None:
         llm = await get_llm_for_graph(graph.id, db)
@@ -51,6 +52,7 @@ async def run_sast(
             run_id=run_id,
             db=db,
             repo_id=repo_id,
+            repo_dir=repo_dir,
         )
 
     log.info("scan.sast.started", run_id=run_id)

@@ -109,7 +109,6 @@ export type AccountConfig = {
 export type AccountConfigPatch = {
   provider?: string;
   model?: string;
-  api_key?: string;
   api_endpoint?: string | null;
   suppression_approval_required?: boolean;
   monthly_token_budget?: number | null;

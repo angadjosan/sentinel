@@ -13,13 +13,10 @@ from ..auth import Principal, current_principal
 from ..deps import get_db
 from ..schemas import (
     EnqueueResponse,
-    InitRequest,
-    PlanRequest,
     PentestRequest,
     RepoCreateRequest,
     RepoResponse,
     RunResponse,
-    SourceRequest,
 )
 
 router = APIRouter(prefix="/repos", tags=["repos"])
@@ -94,68 +91,9 @@ async def create_repo(
     )
 
 
-@router.post("/{repo_id}/init", response_model=EnqueueResponse)
-async def init_repo(
-    repo_id: str,
-    payload: InitRequest,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
-) -> EnqueueResponse:
-    repo = await _get_repo(db, repo_id, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=repo.name,
-        kind="init",
-        payload={"repo_name": repo.name, "files": payload.files},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
-
-
-@router.post("/{repo_id}/source", response_model=EnqueueResponse)
-async def source_scan(
-    repo_id: str,
-    payload: SourceRequest,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
-) -> EnqueueResponse:
-    repo = await _get_repo(db, repo_id, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=repo.name,
-        kind="source",
-        payload={"repo_name": repo.name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
-
-
-@router.post("/{repo_id}/scan", response_model=EnqueueResponse)
-async def scan_wrapper(
-    repo_id: str,
-    payload: SourceRequest,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
-) -> EnqueueResponse:
-    """Wrapper endpoint: enqueues a source scan; worker will start pentest runs for each finding unless no_pentest=true."""
-    repo = await _get_repo(db, repo_id, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=repo.name,
-        kind="scan",
-        payload={"repo_name": repo.name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
+# NOTE: /{repo_id}/init, /source, and /scan were removed — they took source
+# code / diffs in the request body, which the local-AI-calls model forbids.
+# See main.py's equivalent note next to /tasks/claim.
 
 
 @router.post("/{repo_id}/pentest", response_model=EnqueueResponse)

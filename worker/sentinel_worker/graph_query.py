@@ -22,6 +22,19 @@ class GraphQuery:
         self.db = db
         self.graph_id = graph_id
 
+    async def _get_node(self, node_id: str) -> Node | None:
+        """Fetch a node scoped to this graph.
+
+        `nodes.id` is a single global primary key (not composite with
+        graph_id) — `db.get(Node, node_id)` would return whichever graph
+        happens to own that id first, which leaks or corrupts another
+        tenant's node whenever two unrelated graphs produce the same
+        deterministic id (e.g. two repos both have `fn:app.js:handler`).
+        Every node lookup in this class must go through this method, not
+        `db.get`, until nodes get a composite (graph_id, id) key.
+        """
+        return await self.db.scalar(select(Node).where(Node.id == node_id).where(Node.graph_id == self.graph_id))
+
     async def neighbors(self, node_id: str, edge_kinds: list[str] | None = None, max_hops: int | None = None) -> list[Neighbor]:
         cap = max_hops if max_hops is not None else 50
         seen = {node_id}
@@ -36,7 +49,7 @@ class GraphQuery:
                 stmt = stmt.where(Edge.kind.in_(edge_kinds))
             edges = list(await self.db.scalars(stmt.order_by(Edge.kind.asc(), Edge.dst.asc(), Edge.id.asc())))
             for edge in edges:
-                node = await self.db.get(Node, edge.dst)
+                node = await self._get_node(edge.dst)
                 if node is None:
                     continue
                 result.append(Neighbor(node=node, edge=edge, depth=depth + 1))
@@ -54,7 +67,7 @@ class GraphQuery:
             if len(path) > cap + 1:
                 continue
             if current == dst_id:
-                nodes = [node for node_id in path if (node := await self.db.get(Node, node_id)) is not None]
+                nodes = [node for node_id in path if (node := await self._get_node(node_id)) is not None]
                 paths.append(nodes)
                 continue
             stmt = select(Edge).where(Edge.graph_id == self.graph_id).where(Edge.src == current)
@@ -91,7 +104,7 @@ class GraphQuery:
         included_nodes: set[str] = set()
         included_edges: set[int] = set()
         for node_id in node_ids:
-            node = await self.db.get(Node, node_id)
+            node = await self._get_node(node_id)
             if node is None or node.id in included_nodes:
                 continue
             lines.extend(self._format_node_block(node))

@@ -7,8 +7,14 @@ AWS_ACCESS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{16}\b")
 HIGH_ENTROPY_RE = re.compile(r"\b[A-Za-z0-9_/\-+=]{32,}\b")
 HEX_RE = re.compile(r"^[a-fA-F0-9]+$")
 UUID_RE = re.compile(r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")
+ENV_FILE_RE = re.compile(r"(^|/)\.env(\..+)?$", re.IGNORECASE)
 
 SAFE_SECRET_EXAMPLES = {"AKIAIOSFODNN7EXAMPLE"}
+
+
+def is_env_var_file(path: str) -> bool:
+    """True for .env-style files (.env, .env.local, .env.example, nested), which the SAST LLM must never see."""
+    return bool(ENV_FILE_RE.search(path))
 
 
 def compute_fingerprint(repo_id: str, file_path: str, vuln_type: str) -> str:

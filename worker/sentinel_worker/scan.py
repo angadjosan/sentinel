@@ -16,7 +16,7 @@ from .enrichment import enrich_graph_nodes
 from .graph_query import GraphQuery
 from .models import Edge, Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
-from .security import compute_fingerprint, find_secret_candidates, scrub_secrets
+from .security import compute_fingerprint, find_secret_candidates, is_env_var_file, scrub_secrets
 from .source_store import enforce_source_retention_for_account, store_source_snapshot
 from .trace_store import offload_trace_if_large
 
@@ -50,6 +50,34 @@ def parse_unified_diff(diff: str) -> list[DiffFile]:
     return files
 
 
+def _strip_env_files_from_diff(diff: str) -> str:
+    """Drop .env-style file blocks from a unified diff before it reaches the SAST LLM prompt."""
+    blocks: list[str] = []
+    current: list[str] = []
+    current_has_header = False
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if current:
+                blocks.append("".join(current))
+            current, current_has_header = [line], True
+        elif line.startswith("+++ b/") and not current_has_header:
+            if current:
+                blocks.append("".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append("".join(current))
+
+    def block_path(block: str) -> str:
+        for block_line in block.splitlines():
+            if block_line.startswith("+++ b/"):
+                return block_line.removeprefix("+++ b/")
+        return ""
+
+    return "".join(block for block in blocks if not is_env_var_file(block_path(block)))
+
+
 def trace_event(kind: str, **fields: object) -> str:
     payload = _scrub_trace_value({"ts": datetime.now(UTC).isoformat(), "kind": kind, **fields})
     return json.dumps(payload, sort_keys=True)
@@ -67,7 +95,30 @@ def _scrub_trace_value(value: object) -> object:
     return value
 
 
-async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: str = "dev", account_id: str | None = None) -> Graph:
+async def get_or_create_graph(
+    db: AsyncSession,
+    repo_name: str,
+    account_name: str = "dev",
+    account_id: str | None = None,
+    *,
+    kind: str = "main",
+    branch_name: str | None = None,
+    session_id: str | None = None,
+) -> Graph:
+    """Resolve (creating if needed) the graph for a repo.
+
+    `kind="main"` (the default, and the only kind ever created before this
+    signature grew branch/session support) behaves exactly as before — every
+    existing call site is unaffected. `kind="branch"` / `kind="session"`
+    resolve or create an overlay graph parented off main, per the versioning
+    model in non-code/README.md. NOTE: branch/session graphs currently share
+    the same global `nodes.id` primary key as main (see models.py) — writing a
+    node id that already exists in main from a branch/session graph is
+    rejected by callers (see /graph/upsert) rather than silently upserted,
+    because doing so would overwrite the main graph's row. A composite
+    (graph_id, id) key is required before branch/session graphs can safely
+    carry their own copies of nodes main already has.
+    """
     account = None
     repo = None
     from .models import Account
@@ -85,12 +136,54 @@ async def get_or_create_graph(db: AsyncSession, repo_name: str, account_name: st
         repo = Repo(account_id=account.id, name=repo_name)
         db.add(repo)
         await db.flush()
-    graph = await db.scalar(select(Graph).where(Graph.repo_id == repo.id).where(Graph.kind == "main"))
-    if graph is None:
-        graph = Graph(account_id=account.id, repo_id=repo.id, kind="main")
-        db.add(graph)
+    main_graph = await db.scalar(select(Graph).where(Graph.repo_id == repo.id).where(Graph.kind == "main"))
+    if main_graph is None:
+        main_graph = Graph(account_id=account.id, repo_id=repo.id, kind="main")
+        db.add(main_graph)
         await db.flush()
-    return graph
+
+    if kind == "main":
+        return main_graph
+
+    if kind == "branch":
+        if not branch_name:
+            raise ValueError("branch_name is required for kind='branch'")
+        graph = await db.scalar(
+            select(Graph)
+            .where(Graph.repo_id == repo.id)
+            .where(Graph.kind == "branch")
+            .where(Graph.branch_name == branch_name)
+            .where(Graph.status == "active")
+        )
+        if graph is None:
+            graph = Graph(account_id=account.id, repo_id=repo.id, kind="branch", branch_name=branch_name, parent_id=main_graph.id)
+            db.add(graph)
+            await db.flush()
+        return graph
+
+    if kind == "session":
+        if not session_id:
+            raise ValueError("session_id is required for kind='session'")
+        graph = await db.scalar(
+            select(Graph).where(Graph.repo_id == repo.id).where(Graph.kind == "session").where(Graph.session_id == session_id)
+        )
+        if graph is None:
+            parent = main_graph
+            if branch_name:
+                parent = await get_or_create_graph(db, repo_name, account_name, account_id, kind="branch", branch_name=branch_name)
+            graph = Graph(
+                account_id=account.id,
+                repo_id=repo.id,
+                kind="session",
+                session_id=session_id,
+                branch_name=branch_name,
+                parent_id=parent.id,
+            )
+            db.add(graph)
+            await db.flush()
+        return graph
+
+    raise ValueError(f"unknown graph kind: {kind!r}")
 
 
 async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str], *, account_id: str | None = None, _llm=None) -> Run:
@@ -104,15 +197,18 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     if repo is None:
         raise ValueError(f"repo not found for graph {graph.id}")
     sources: list[SourceFile] = []
+    llm_files: dict[str, str] = {}
     for path, content in files.items():
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
-        sources.append(SourceFile(path=path, content=content, is_new=False))
+        if not is_env_var_file(path):
+            sources.append(SourceFile(path=path, content=content, is_new=False))
+            llm_files[path] = content
     await build_source_graph(db, graph.id, sources)
     llm = _llm
     if llm is None:
         llm = await get_llm_for_graph(graph.id, db)
-    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=files, only_new=False, llm=llm)
-    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=files, llm=llm)
+    await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=llm_files, only_new=False, llm=llm)
+    await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, source_by_file=llm_files, llm=llm)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -130,6 +226,7 @@ async def scan_diff(
     account_id: str | None = None,
     base_ref: str | None = None,
     paths: list[str] | None = None,
+    repo_dir: str | None = None,
     _llm=None,
 ) -> Run:
     graph = await get_or_create_graph(db, repo_name, account_id=account_id)
@@ -139,7 +236,7 @@ async def scan_diff(
     repo = await db.scalar(select(Repo).where(Repo.id == graph.repo_id))
     if repo is None:
         raise ValueError(f"repo not found for graph {graph.id}")
-    await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context, base_ref=base_ref, paths=paths or [], _llm=_llm)
+    await execute_source_scan(db, graph=graph, repo=repo, run=run, diff=diff, run_context=run_context, base_ref=base_ref, paths=paths or [], repo_dir=repo_dir, _llm=_llm)
     return run
 
 
@@ -153,6 +250,7 @@ async def execute_source_scan(
     run_context: str = "local",
     base_ref: str | None = None,
     paths: list[str] | None = None,
+    repo_dir: str | None = None,  # when set, SAST tools read this local working tree instead of cloud snapshots
     check_run_id: int | None = None,
     installation_id: int | None = None,
     gh_repo: str | None = None,
@@ -182,8 +280,9 @@ async def execute_source_scan(
 
     for file in files:
         await store_source_snapshot(db, repo_id=repo.id, commit_hash=run.id, file_path=file.path, content=file.content)
-    if sources:
-        nodes = await build_source_graph(db, graph.id, sources)
+    llm_sources = [s for s in sources if not is_env_var_file(s.path)]
+    if llm_sources:
+        nodes = await build_source_graph(db, graph.id, llm_sources)
         for node in nodes:
             if node.file in nodes_by_path:
                 nodes_by_path[node.file].append(node)
@@ -242,7 +341,7 @@ async def execute_source_scan(
     try:
         sast_findings = await asyncio.wait_for(
             run_sast(
-                diff=diff,
+                diff=_strip_env_files_from_diff(diff),
                 bootstrap_context=bootstrap_context,
                 run_id=run.id,
                 suppressed_fps=suppressed_fps,
@@ -250,6 +349,7 @@ async def execute_source_scan(
                 repo_id=str(repo.id),
                 db=db,
                 llm=llm,
+                repo_dir=repo_dir,
             ),
             timeout=sast_timeout,
         )
@@ -262,9 +362,10 @@ async def execute_source_scan(
     # Graph enrichment runs only on the async worker path (run_context != "local"),
     # not inline on synchronous /source requests, to keep response latency bounded.
     if run_context != "local":
-        await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file={f.path: f.content for f in files}, only_new=True, llm=llm)
+        llm_source_by_file = {f.path: f.content for f in files if not is_env_var_file(f.path)}
+        await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=llm_source_by_file, only_new=True, llm=llm)
         from .enrichment import validate_enrichment_labels
-        await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file={f.path: f.content for f in files})
+        await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file=llm_source_by_file)
     await enforce_source_retention_for_account(db, graph.account_id)
     run.status = "completed"
     run.completed_at = now()
@@ -308,6 +409,7 @@ async def review_plan(
     *,
     with_retry: bool = False,
     account_id: str | None = None,
+    repo_dir: str | None = None,
     _llm=None,
     max_passes: int | None = None,
 ) -> tuple[Run, list[Finding]]:
@@ -348,6 +450,7 @@ async def review_plan(
             repo_id=str(repo.id),
             db=db,
             llm=llm,
+            repo_dir=repo_dir,
         )
         new_fps = {f.fingerprint for f in sast_findings} - seen_fps
         trace_lines.append(trace_event(

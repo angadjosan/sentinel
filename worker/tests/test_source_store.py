@@ -33,6 +33,73 @@ async def test_source_snapshot_encrypts_and_reads_content():
 
 
 @pytest.mark.asyncio
+async def test_store_source_snapshot_refuses_env_files():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            result = await store_source_snapshot(
+                session, repo_id="repo", commit_hash="commit", file_path=".env.local", content="API_KEY=super-secret"
+            )
+        async with session.begin():
+            stored = await session.get(SourceFileSnapshot, ("repo", "commit", ".env.local"))
+    assert result is None
+    assert stored is None
+
+
+@pytest.mark.asyncio
+async def test_read_source_snapshot_refuses_env_files_even_if_stored():
+    """Defense in depth: even a pre-existing snapshot for an env-style path must not be readable."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            snapshot = SourceFileSnapshot(
+                repo_id="repo",
+                commit_hash="commit",
+                file_path=".env",
+                content_enc="irrelevant",
+                content_sha="irrelevant",
+                language=None,
+                deleted=False,
+            )
+            session.add(snapshot)
+        async with session.begin():
+            with pytest.raises(FileNotFoundError):
+                await read_source_snapshot(session, repo_id="repo", commit_hash="commit", file_path=".env")
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_repo_skips_env_files_from_snapshots_and_llm():
+    from tests.conftest import MockLLMClient
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    llm = MockLLMClient()
+    async with sessionmaker() as session:
+        async with session.begin():
+            run = await bootstrap_repo(
+                session,
+                "repo",
+                {"app.js": "const x = 1;", ".env.local": "DATABASE_URL=postgres://user:hunter2@host/db"},
+                _llm=llm,
+            )
+        async with session.begin():
+            graph = await session.get(Graph, run.graph_id)
+            with pytest.raises(FileNotFoundError):
+                await read_source_snapshot(session, repo_id=graph.repo_id, commit_hash="bootstrap", file_path=".env.local")
+
+    assert not any("hunter2" in call.get("content_input", "") for call in llm.calls)
+    assert not any("DATABASE_URL" in call.get("content_input", "") for call in llm.calls)
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_stores_source_separately_from_nodes():
     from tests.conftest import MockLLMClient
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -86,3 +153,44 @@ async def test_source_retention_removes_expired_snapshots_for_account():
     assert expired is None
     assert retained == "fresh"
     assert retained_other == "other"
+
+
+@pytest.mark.asyncio
+async def test_grep_source_tool_excludes_env_files_even_if_stored():
+    """Defense in depth: even if an env-style snapshot exists, the SAST agent's
+    grep_source tool must never surface it in search results."""
+    from sentinel_worker.graph_query import GraphQuery
+    from sentinel_worker.source_store import encrypt_source
+    from sentinel_worker.tools import dispatch_tool
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        async with session.begin():
+            session.add_all([
+                SourceFileSnapshot(
+                    repo_id="repo", commit_hash="bootstrap", file_path=".env",
+                    content_enc=encrypt_source("API_KEY=super-secret-value"),
+                    content_sha="x", language=None, deleted=False,
+                ),
+                SourceFileSnapshot(
+                    repo_id="repo", commit_hash="bootstrap", file_path="config.py",
+                    content_enc=encrypt_source("API_KEY = load_from_env()"),
+                    content_sha="y", language="python", deleted=False,
+                ),
+            ])
+        async with session.begin():
+            result = await dispatch_tool(
+                tool_name="grep_source",
+                tool_input={"pattern": "API_KEY"},
+                graph=GraphQuery(db=session, graph_id="g1"),
+                run_id="run1",
+                db=session,
+                repo_id="repo",
+            )
+
+    matched_files = {m["file_path"] for m in result["matches"]}
+    assert ".env" not in matched_files
+    assert "config.py" in matched_files

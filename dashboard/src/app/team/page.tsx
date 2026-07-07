@@ -121,10 +121,11 @@ export default async function TeamPage() {
                   ))}
                 </select>
               </label>
-              <label>
-                <span>LLM API Key</span>
-                <input name="api_key" type="password" placeholder="leave blank to keep current" autoComplete="new-password" />
-              </label>
+              <p className="muted">
+                LLM API keys are configured and used locally now — run{" "}
+                <code>sentinel config set api-key &lt;key&gt;</code> on each machine that runs scans. The
+                server never stores one.
+              </p>
               <label>
                 <span>API Endpoint</span>
                 <input name="api_endpoint" defaultValue={config.api_endpoint ?? ""} placeholder="default provider endpoint" />
