@@ -17,7 +17,7 @@ type KeytarModule = {
 };
 
 function accountName(config: SentinelConfig): string {
-  return `${config.apiUrl}:${config.repoName}`;
+  return config.apiUrl;
 }
 
 // ── File-based fallback ───────────────────────────────────────────────────────

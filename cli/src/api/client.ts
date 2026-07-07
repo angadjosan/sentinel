@@ -51,6 +51,7 @@ export type DeviceAuthToken =
     };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const LONG_TIMEOUT_MS = 60_000;
 
 export class SentinelApiClient {
   constructor(private readonly config: SentinelConfig = loadConfig()) {}
@@ -102,11 +103,11 @@ export class SentinelApiClient {
     }
   }
 
-  async request<T>(path: string, init: RequestInit = {}, _isRetry = false): Promise<T> {
+  async request<T>(path: string, init: RequestInit = {}, timeoutMs?: number, _isRetry = false): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
-      this.requestTimeoutMs()
+      timeoutMs ?? this.requestTimeoutMs()
     );
     try {
       const response = await fetch(`${this.config.apiUrl}${path}`, {
@@ -122,7 +123,7 @@ export class SentinelApiClient {
       // just means it expired, so refresh once and retry transparently rather
       // than forcing the user through `sentinel auth login` again.
       if (response.status === 401 && !_isRetry && path !== "/auth/refresh" && (await this.refreshCredential())) {
-        return this.request<T>(path, init, true);
+        return this.request<T>(path, init, timeoutMs, true);
       }
       if (!response.ok) {
         const detail = await response.text();
@@ -245,11 +246,11 @@ export class SentinelApiClient {
       finding: Finding;
       node: unknown;
       remediation_plan: string[];
-    }>(`/findings/${id}/pull`);
+    }>(`/findings/${id}/pull`, {}, LONG_TIMEOUT_MS);
   }
 
   plan(content: string, withRetry: boolean) {
-    return this.request<{ run: Run; findings: Finding[] }>("/plan", {
+    return this.request<{ task_id: string; run: Run }>("/plan", {
       method: "POST",
       body: JSON.stringify({
         repo_name: this.config.repoName,

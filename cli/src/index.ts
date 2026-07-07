@@ -280,14 +280,50 @@ program
     }
     const config = loadConfig();
     await ensureBackend(config.apiUrl);
-    const result = await new SentinelApiClient(config).plan(content, Boolean(options.withRetry));
-    for (const finding of result.findings) {
-      console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type}: ${finding.title}`);
-      console.log(`  ${finding.description}`);
-      console.log(`  fix: ${finding.remediation}`);
+    const client = new SentinelApiClient(config);
+    const queued = await client.plan(content, Boolean(options.withRetry));
+    console.log(`plan run ${queued.run.id} started`);
+
+    let findingCount = 0;
+    const allFindings: Array<Record<string, unknown>> = [];
+    const deadline = Date.now() + 120_000;
+    try {
+      for await (const event of client.runEvents(queued.run.id, 120_000)) {
+        try {
+          const parsed = JSON.parse(event) as Record<string, unknown>;
+          if (parsed.vuln_type && typeof parsed.id === "string") {
+            findingCount++;
+            allFindings.push(parsed);
+            console.log(`${chalk.red(((parsed.severity as string) || "unknown").toUpperCase())} ${parsed.vuln_type}: ${parsed.title ?? ""}`);
+            console.log(`  ${parsed.description ?? ""}`);
+            console.log(`  fix: ${parsed.remediation ?? ""}`);
+          }
+          const kind = parsed.kind as string | undefined;
+          if (kind === "run.completed" || kind === "complete" || kind === "plan.completed" ||
+              parsed.status === "failed" || parsed.status === "cancelled") {
+            if (typeof parsed.finding_count === "number") findingCount = parsed.finding_count;
+            break;
+          }
+        } catch { /* non-JSON */ }
+        if (Date.now() > deadline) break;
+      }
+    } catch { /* stream interrupted */ }
+
+    // Fall back to fetching findings directly if stream didn't surface them
+    if (allFindings.length === 0 && findingCount === 0) {
+      const run = await client.run(queued.run.id);
+      findingCount = run.finding_count;
+      if (findingCount > 0) {
+        const findings = await client.findings({ status: "open" });
+        for (const f of findings.filter(f => f.created_at >= run.created_at)) {
+          console.log(`${chalk.red(f.severity.toUpperCase())} ${f.vuln_type}: ${f.title}`);
+          console.log(`  fix: ${f.remediation}`);
+        }
+      }
     }
-    console.log(`plan run ${result.run.id} completed with ${result.findings.length} issue(s)`);
-    process.exitCode = result.findings.length > 0 ? 1 : 0;
+
+    console.log(`plan run ${queued.run.id} completed with ${findingCount} issue(s)`);
+    process.exitCode = findingCount > 0 ? 1 : 0;
   });
 
 program
@@ -308,6 +344,8 @@ program
 
 const suppress = program.command("suppress").description("Suppress or remove suppressions");
 suppress
+  .command("add", { isDefault: true })
+  .description("Suppress a finding")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Suppression reason")
   .action(async (id: string, options) => {
@@ -318,6 +356,7 @@ suppress
   });
 suppress
   .command("remove")
+  .description("Remove a suppression")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Unsuppression reason")
   .action(async (id: string, options) => {
@@ -328,6 +367,7 @@ suppress
   });
 suppress
   .command("approve")
+  .description("Approve a pending suppression request")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Approval reason")
   .action(async (id: string, options) => {
@@ -338,6 +378,7 @@ suppress
   });
 suppress
   .command("reject")
+  .description("Reject a pending suppression request")
   .argument("<id>", "Finding ID")
   .requiredOption("--reason <reason>", "Rejection reason")
   .action(async (id: string, options) => {
