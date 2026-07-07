@@ -116,14 +116,45 @@ export type AccountConfigPatch = {
   source_retention_days?: number;
 };
 
+import { getSessionToken } from "./session";
+
 const apiUrl = process.env.SENTINEL_API_INTERNAL_URL ?? process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
 
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getSessionToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function get<T>(path: string): Promise<T> {
-  const response = await fetch(`${apiUrl}${path}`, { cache: "no-store" });
+  const response = await fetch(`${apiUrl}${path}`, { cache: "no-store", headers: await authHeaders() });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function send<T>(path: string, method: string, body?: unknown, opts: { auth?: boolean } = {}): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (opts.auth !== false) Object.assign(headers, await authHeaders());
+  const response = await fetch(`${apiUrl}${path}`, {
+    method,
+    headers,
+    cache: "no-store",
+    body: body !== undefined ? JSON.stringify(body) : undefined
+  });
+  if (!response.ok) throw new Error(await errorDetail(response));
+  return response.json() as Promise<T>;
+}
+
+async function errorDetail(response: Response): Promise<string> {
+  const text = await response.text();
+  try {
+    const parsed = JSON.parse(text) as { detail?: unknown };
+    if (typeof parsed.detail === "string") return parsed.detail;
+  } catch {
+    // not JSON — fall through to raw text
+  }
+  return text || `${response.status} ${response.statusText}`;
 }
 
 export function listFindings(filters: { status?: string; severity?: string } = {}): Promise<Finding[]> {
@@ -158,26 +189,12 @@ export function accountConfig(): Promise<AccountConfig> {
   return get<AccountConfig>("/config");
 }
 
-export async function updateAccountConfig(patch: AccountConfigPatch): Promise<AccountConfig> {
-  const response = await fetch(`${apiUrl}/config`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify(patch)
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<AccountConfig>;
+export function updateAccountConfig(patch: AccountConfigPatch): Promise<AccountConfig> {
+  return send<AccountConfig>("/config", "PATCH", patch);
 }
 
-export async function approveDeviceCode(userCode: string): Promise<{ status: string }> {
-  const response = await fetch(`${apiUrl}/auth/device/approve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    cache: "no-store",
-    body: JSON.stringify({ user_code: userCode })
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<{ status: string }>;
+export function approveDeviceCode(userCode: string): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/device/approve", "POST", { user_code: userCode });
 }
 
 export function listRuns(): Promise<Run[]> {
@@ -188,17 +205,12 @@ export function getRun(id: string): Promise<Run> {
   return get<Run>(`/runs/${id}`);
 }
 
-export async function cancelRun(id: string): Promise<Run> {
-  const response = await fetch(`${apiUrl}/runs/${id}`, {
-    method: "DELETE",
-    cache: "no-store"
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<Run>;
+export function cancelRun(id: string): Promise<Run> {
+  return send<Run>(`/runs/${id}`, "DELETE");
 }
 
 export async function runTrace(id: string): Promise<string> {
-  const response = await fetch(`${apiUrl}/runs/${id}/trace`, { cache: "no-store" });
+  const response = await fetch(`${apiUrl}/runs/${id}/trace`, { cache: "no-store", headers: await authHeaders() });
   if (!response.ok) throw new Error(await response.text());
   return response.text();
 }
@@ -223,32 +235,109 @@ export function confirmationRate(): Promise<{ total: number; confirmed: number; 
   return get("/analytics/confirmation-rate");
 }
 
-export async function suppressFinding(id: string, reason: string): Promise<Finding> {
-  const response = await fetch(`${apiUrl}/findings/${id}/suppress`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason })
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<Finding>;
+export function suppressFinding(id: string, reason: string): Promise<Finding> {
+  return send<Finding>(`/findings/${id}/suppress`, "PATCH", { reason });
 }
 
-export async function approveSuppression(id: string, reason: string): Promise<Finding> {
-  const response = await fetch(`${apiUrl}/findings/${id}/suppress/approve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason })
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<Finding>;
+export function approveSuppression(id: string, reason: string): Promise<Finding> {
+  return send<Finding>(`/findings/${id}/suppress/approve`, "POST", { reason });
 }
 
-export async function rejectSuppression(id: string, reason: string): Promise<Finding> {
-  const response = await fetch(`${apiUrl}/findings/${id}/suppress/reject`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ reason })
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return response.json() as Promise<Finding>;
+export function rejectSuppression(id: string, reason: string): Promise<Finding> {
+  return send<Finding>(`/findings/${id}/suppress/reject`, "POST", { reason });
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export type AuthUser = {
+  id: string;
+  email: string;
+  name: string | null;
+  role: "admin" | "member" | "readonly" | string;
+  account_id: string;
+  account_name: string;
+  email_verified: boolean;
+  mfa_enabled: boolean;
+};
+
+export type AuthResult = { access_token: string; user: AuthUser };
+
+export type LoginResult = {
+  mfa_required: boolean;
+  challenge_token?: string;
+  access_token?: string;
+  user?: AuthUser;
+};
+
+export type SessionInfo = {
+  id: string;
+  label: string;
+  created_at: string;
+  expires_at: string;
+  last_seen_at: string;
+  user_agent: string | null;
+  ip_address: string | null;
+  current: boolean;
+};
+
+export function signupRequest(payload: { name: string; email: string; password: string; account_name?: string }): Promise<AuthResult> {
+  return send<AuthResult>("/auth/signup", "POST", payload, { auth: false });
+}
+
+export function loginRequest(payload: { email: string; password: string }): Promise<LoginResult> {
+  return send<LoginResult>("/auth/login", "POST", payload, { auth: false });
+}
+
+export function loginMfaRequest(payload: { challenge_token: string; code: string }): Promise<AuthResult> {
+  return send<AuthResult>("/auth/login/mfa", "POST", payload, { auth: false });
+}
+
+export function logoutRequest(): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/logout", "POST");
+}
+
+export function currentUser(): Promise<AuthUser> {
+  return get<AuthUser>("/auth/me");
+}
+
+export function listSessions(): Promise<SessionInfo[]> {
+  return get<SessionInfo[]>("/auth/sessions");
+}
+
+export function revokeSession(id: string): Promise<{ status: string }> {
+  return send<{ status: string }>(`/auth/sessions/${id}`, "DELETE");
+}
+
+export function forgotPasswordRequest(email: string): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/forgot-password", "POST", { email }, { auth: false });
+}
+
+export function resetPasswordRequest(payload: { token: string; password: string }): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/reset-password", "POST", payload, { auth: false });
+}
+
+export function verifyEmailRequest(token: string): Promise<{ status: string }> {
+  return send<{ status: string }>(`/auth/verify-email?token=${encodeURIComponent(token)}`, "POST", undefined, { auth: false });
+}
+
+export function resendVerificationEmail(): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/verify-email/resend", "POST");
+}
+
+export type MfaEnrollment = { secret: string; otpauth_url: string };
+
+export function mfaEnroll(): Promise<MfaEnrollment> {
+  return send<MfaEnrollment>("/auth/mfa/enroll", "POST");
+}
+
+export function mfaConfirm(code: string): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/mfa/confirm", "POST", { code });
+}
+
+export function mfaDisable(password: string): Promise<{ status: string }> {
+  return send<{ status: string }>("/auth/mfa/disable", "POST", { password });
+}
+
+export function githubOAuthLogin(payload: { code: string; redirect_uri: string }): Promise<AuthResult> {
+  return send<AuthResult>("/auth/oauth/github", "POST", payload, { auth: false });
 }

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .models import Base
 
-CURRENT_SCHEMA_VERSION = "0001_initial_models"
+CURRENT_SCHEMA_VERSION = "0003_auth_hardening"
 
 
 async def apply_migrations(engine: AsyncEngine) -> list[str]:
@@ -38,6 +38,30 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN api_endpoint TEXT"))
             if "source_retention_days" not in columns:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN source_retention_days INTEGER DEFAULT 365"))
+            user_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(users)"))}
+            if "name" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN name TEXT"))
+            if "password_hash" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN password_hash TEXT"))
+            if "email_verified_at" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN email_verified_at TIMESTAMP"))
+            if "totp_secret_enc" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN totp_secret_enc TEXT"))
+            if "totp_confirmed" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN totp_confirmed BOOLEAN DEFAULT 0"))
+            if "github_id" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN github_id TEXT"))
+            if "failed_login_count" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN failed_login_count INTEGER DEFAULT 0"))
+            if "locked_until" not in user_columns:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN locked_until TIMESTAMP"))
+            session_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(sessions)"))}
+            if "user_agent" not in session_columns:
+                await conn.execute(text("ALTER TABLE sessions ADD COLUMN user_agent TEXT"))
+            if "ip_address" not in session_columns:
+                await conn.execute(text("ALTER TABLE sessions ADD COLUMN ip_address TEXT"))
+            if "refresh_token_hash" not in session_columns:
+                await conn.execute(text("ALTER TABLE sessions ADD COLUMN refresh_token_hash TEXT"))
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:

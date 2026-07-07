@@ -1,5 +1,5 @@
 import { loadConfig, SentinelConfig } from "../config/sentinel.config.js";
-import { readApiKey } from "../auth/keychain.js";
+import { readApiKey, readCredential, writeCredential } from "../auth/keychain.js";
 
 export type Finding = {
   id: string;
@@ -43,12 +43,15 @@ export type DeviceAuthToken =
   | {
       status: "approved";
       access_token: string;
+      refresh_token?: string;
+      expires_in?: number;
       account_id: string;
       user_id: string;
       database_url?: string;
     };
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const LONG_TIMEOUT_MS = 60_000;
 
 export class SentinelApiClient {
   constructor(private readonly config: SentinelConfig = loadConfig()) {}
@@ -81,11 +84,30 @@ export class SentinelApiClient {
     throw error;
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  /** Exchange the stored refresh token for a fresh access+refresh pair. Returns false if there's nothing to refresh or the server rejects it. */
+  private async refreshCredential(): Promise<boolean> {
+    const credential = await readCredential(this.config);
+    if (!credential?.refreshToken) return false;
+    try {
+      const response = await fetch(`${this.config.apiUrl}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: credential.refreshToken }),
+      });
+      if (!response.ok) return false;
+      const body = (await response.json()) as { access_token: string; refresh_token: string };
+      await writeCredential(this.config, { accessToken: body.access_token, refreshToken: body.refresh_token });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async request<T>(path: string, init: RequestInit = {}, timeoutMs?: number, _isRetry = false): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(
       () => controller.abort(),
-      this.requestTimeoutMs()
+      timeoutMs ?? this.requestTimeoutMs()
     );
     try {
       const response = await fetch(`${this.config.apiUrl}${path}`, {
@@ -97,6 +119,12 @@ export class SentinelApiClient {
           ...(init.headers ?? {}),
         },
       });
+      // CLI access tokens are short-lived (1h) by design — a 401 here usually
+      // just means it expired, so refresh once and retry transparently rather
+      // than forcing the user through `sentinel auth login` again.
+      if (response.status === 401 && !_isRetry && path !== "/auth/refresh" && (await this.refreshCredential())) {
+        return this.request<T>(path, init, timeoutMs, true);
+      }
       if (!response.ok) {
         const detail = await response.text();
         throw new Error(`${response.status} ${response.statusText}: ${detail}`);
@@ -153,6 +181,21 @@ export class SentinelApiClient {
     }
   }
 
+  whoami() {
+    return this.request<{
+      id: string;
+      email: string;
+      name: string | null;
+      role: string;
+      account_id: string;
+      account_name: string;
+    }>("/auth/me");
+  }
+
+  logout() {
+    return this.request<{ status: string }>("/auth/logout", { method: "POST" });
+  }
+
   source(
     diff: string,
     runContext: string,
@@ -203,11 +246,11 @@ export class SentinelApiClient {
       finding: Finding;
       node: unknown;
       remediation_plan: string[];
-    }>(`/findings/${id}/pull`);
+    }>(`/findings/${id}/pull`, {}, LONG_TIMEOUT_MS);
   }
 
   plan(content: string, withRetry: boolean) {
-    return this.request<{ run: Run; findings: Finding[] }>("/plan", {
+    return this.request<{ task_id: string; run: Run }>("/plan", {
       method: "POST",
       body: JSON.stringify({
         repo_name: this.config.repoName,

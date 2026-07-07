@@ -5,13 +5,19 @@ import type { SentinelConfig } from "../config/sentinel.config.js";
 
 const SERVICE = "sentinel";
 
+export type StoredCredential = {
+  accessToken: string;
+  refreshToken?: string;
+};
+
 type KeytarModule = {
   getPassword(service: string, account: string): Promise<string | null>;
   setPassword(service: string, account: string, password: string): Promise<void>;
+  deletePassword(service: string, account: string): Promise<boolean>;
 };
 
 function accountName(config: SentinelConfig): string {
-  return `${config.apiUrl}:${config.repoName}`;
+  return config.apiUrl;
 }
 
 // ── File-based fallback ───────────────────────────────────────────────────────
@@ -55,10 +61,9 @@ async function loadKeytar(): Promise<KeytarModule | null> {
   }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// ── Raw storage (keytar, falling back to the file) ─────────────────────────────
 
-export async function readApiKey(config: SentinelConfig): Promise<string | undefined> {
-  if (process.env.SENTINEL_API_TOKEN) return process.env.SENTINEL_API_TOKEN;
+async function readRaw(config: SentinelConfig): Promise<string | undefined> {
   const key = accountName(config);
   try {
     const keytar = await loadKeytar();
@@ -72,18 +77,66 @@ export async function readApiKey(config: SentinelConfig): Promise<string | undef
   return readFallback()[fallbackKey(SERVICE, key)] ?? undefined;
 }
 
-export async function writeApiKey(config: SentinelConfig, apiKey: string): Promise<void> {
+async function writeRaw(config: SentinelConfig, value: string): Promise<void> {
   const key = accountName(config);
   try {
     const keytar = await loadKeytar();
     if (keytar) {
-      await keytar.setPassword(SERVICE, key, apiKey);
+      await keytar.setPassword(SERVICE, key, value);
       return;
     }
   } catch {
     // fall through to file fallback
   }
   const data = readFallback();
-  data[fallbackKey(SERVICE, key)] = apiKey;
+  data[fallbackKey(SERVICE, key)] = value;
+  writeFallback(data);
+}
+
+function decodeCredential(raw: string): StoredCredential {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StoredCredential>;
+    if (parsed && typeof parsed.accessToken === "string") {
+      return { accessToken: parsed.accessToken, refreshToken: parsed.refreshToken };
+    }
+  } catch {
+    // Pre-refresh-token credentials were stored as a bare access-token string.
+  }
+  return { accessToken: raw };
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export async function readCredential(config: SentinelConfig): Promise<StoredCredential | undefined> {
+  if (process.env.SENTINEL_API_TOKEN) return { accessToken: process.env.SENTINEL_API_TOKEN };
+  const raw = await readRaw(config);
+  return raw ? decodeCredential(raw) : undefined;
+}
+
+export async function writeCredential(config: SentinelConfig, credential: StoredCredential): Promise<void> {
+  await writeRaw(config, JSON.stringify(credential));
+}
+
+export async function readApiKey(config: SentinelConfig): Promise<string | undefined> {
+  const credential = await readCredential(config);
+  return credential?.accessToken;
+}
+
+export async function writeApiKey(config: SentinelConfig, apiKey: string): Promise<void> {
+  await writeCredential(config, { accessToken: apiKey });
+}
+
+export async function clearApiKey(config: SentinelConfig): Promise<void> {
+  const key = accountName(config);
+  try {
+    const keytar = await loadKeytar();
+    if (keytar) {
+      await keytar.deletePassword(SERVICE, key);
+    }
+  } catch {
+    // fall through to file fallback cleanup
+  }
+  const data = readFallback();
+  delete data[fallbackKey(SERVICE, key)];
   writeFallback(data);
 }
