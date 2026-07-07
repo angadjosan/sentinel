@@ -21,7 +21,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
       SENTINEL_JWT_SECRET: "${SENTINEL_JWT_SECRET:-dev-secret-not-for-production}"
       SENTINEL_DEV_MODE: "${SENTINEL_DEV_MODE:-1}"
+      SENTINEL_DASHBOARD_URL: "${SENTINEL_DASHBOARD_URL:-http://localhost:3000}"
       CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
+      GITHUB_OAUTH_CLIENT_SECRET: "${GITHUB_OAUTH_CLIENT_SECRET:-}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      EMAIL_FROM: "${EMAIL_FROM:-}"
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -53,6 +58,9 @@ services:
     environment:
       NEXT_PUBLIC_SENTINEL_API_URL: http://localhost:8000
       SENTINEL_API_INTERNAL_URL: http://api:8000
+      SENTINEL_DEV_MODE: "${SENTINEL_DEV_MODE:-1}"
+      SENTINEL_JWT_SECRET: "${SENTINEL_JWT_SECRET:-dev-secret-not-for-production}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
     ports:
       - "3000:3000"
     restart: unless-stopped

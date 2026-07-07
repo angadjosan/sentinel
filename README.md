@@ -461,7 +461,27 @@ Authenticate the CLI. Run after `init`. Re-run after resetting the database.
 sentinel auth login
 ```
 
-Prints a verification URL. With `SENTINEL_DEV_MODE=1` (default in `docker-compose.yml`) it auto-approves with no browser step. The token is stored in the system keychain and never written to disk.
+Prints a verification URL. With `SENTINEL_DEV_MODE=1` (default in `docker-compose.yml`) it auto-approves with no browser step. Otherwise the URL opens the dashboard's device-approval page (`SENTINEL_DASHBOARD_URL` on the API), where you log in (or sign up) and approve the device to finish. The issued token is long-lived (~90 days), stored in the system keychain, and never written to disk.
+
+---
+
+### `sentinel auth logout`
+
+Revoke the stored credential, both locally and on the server.
+
+```bash
+sentinel auth logout
+```
+
+---
+
+### `sentinel auth whoami`
+
+Show the currently authenticated user, role, and account.
+
+```bash
+sentinel auth whoami
+```
 
 ---
 

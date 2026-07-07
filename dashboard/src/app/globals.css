@@ -109,6 +109,88 @@ a {
   color: #fff;
 }
 
+.topbar-spacer {
+  flex: 1;
+}
+
+.topbar-user {
+  align-items: center;
+  color: #cbd5e1;
+  display: flex;
+  font-size: 13px;
+  gap: 12px;
+}
+
+.topbar-user form button {
+  background: none;
+  border: none;
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.topbar-user form button:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
+.auth-shell {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: calc(100vh - 52px);
+  padding: 24px;
+}
+
+.auth-card {
+  background: var(--panel-bg, #fff);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 10px;
+  padding: 32px;
+  width: 100%;
+  max-width: 380px;
+}
+
+.auth-card h1 {
+  font-size: 20px;
+  margin-bottom: 4px;
+}
+
+.auth-card .muted {
+  margin-bottom: 20px;
+}
+
+.auth-card .error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #b91c1c;
+  font-size: 13px;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+}
+
+.auth-card .switch-link {
+  font-size: 13px;
+  margin-top: 16px;
+  text-align: center;
+}
+
+.oauth-button {
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.oauth-button:hover {
+  background: var(--surface-muted);
+}
+
 .main {
   margin: 0 auto;
   max-width: 1320px;

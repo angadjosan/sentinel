@@ -40,7 +40,64 @@ class User(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid)
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     role: Mapped[str] = mapped_column(String, nullable=False, default="admin")
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    totp_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    github_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Session(Base):
+    """A revocable login session — dashboard password login or CLI device approval.
+
+    Bearer JWTs optionally carry this row's id as a `sid` claim; when present,
+    current_principal checks it here so a session can be revoked before the JWT
+    naturally expires. Tokens without a `sid` (e.g. tests using create_token
+    directly) skip this check entirely and behave as plain stateless JWTs.
+    """
+
+    __tablename__ = "sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False)
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
+    label: Mapped[str] = mapped_column(String, nullable=False, default="session")
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    refresh_token_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuthToken(Base):
+    """Single-use tokens for email verification and password reset."""
+
+    __tablename__ = "auth_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False)
+    purpose: Mapped[str] = mapped_column(String, nullable=False)  # 'email_verify' | 'password_reset'
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LoginAttempt(Base):
+    """IP-scoped login/signup attempts, for rate limiting independent of account lockout."""
+
+    __tablename__ = "login_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ip_address: Mapped[str] = mapped_column(String, nullable=False)
+    endpoint: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

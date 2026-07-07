@@ -21,7 +21,12 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sentinel}
       SENTINEL_JWT_SECRET: ${SENTINEL_JWT_SECRET:?SENTINEL_JWT_SECRET is required}
+      SENTINEL_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -52,6 +57,8 @@ services:
     environment:
       NEXT_PUBLIC_SENTINEL_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
       SENTINEL_API_INTERNAL_URL: http://api:8000
+      SENTINEL_JWT_SECRET: ${SENTINEL_JWT_SECRET:?SENTINEL_JWT_SECRET is required}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
     ports:
       - "${DASHBOARD_PORT:-3000}:3000"
     depends_on:
