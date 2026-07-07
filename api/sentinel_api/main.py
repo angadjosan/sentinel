@@ -7,9 +7,10 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -19,6 +20,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.graph_merge import merge_graph
+from sentinel_worker.graph_query import LayeredGraphQuery
+from sentinel_worker.payload_guard import SourcePayloadError, assert_no_source_markers
 from sentinel_worker.scan import get_or_create_graph, trace_event
 from sentinel_worker.security import compute_fingerprint
 from sentinel_worker.source_store import read_source_snapshot
@@ -39,10 +42,14 @@ from .schemas import (
     FindingResponse,
     GraphResponse,
     GraphMergeRequest,
+    GraphSubgraphResponse,
+    GraphUpsertRequest,
+    GraphUpsertResponse,
     IngestRequest,
     IngestResponse,
     InitRequest,
     NodeResponse,
+    PentestConfirmRequest,
     PentestRequest,
     PlanRequest,
     RemediationResponse,
@@ -194,8 +201,18 @@ def account_config_response(account: Account) -> AccountConfigResponse:
     )
 
 
+async def _node_for_graph(db: AsyncSession, node_id: str | None, graph_id: str) -> Node | None:
+    """Node lookup scoped to graph_id — nodes.id is a global PK, not composite
+    with graph_id, so an unscoped db.get(Node, id) can return another
+    tenant's node if two graphs ever produce the same deterministic id
+    (e.g. two repos both have fn:app.js:handler). Always go through this."""
+    if node_id is None:
+        return None
+    return await db.scalar(select(Node).where(Node.id == node_id).where(Node.graph_id == graph_id))
+
+
 async def finding_response(db: AsyncSession, finding: Finding) -> FindingResponse:
-    node = await db.get(Node, finding.node_id) if finding.node_id else None
+    node = await _node_for_graph(db, finding.node_id, finding.graph_id)
     return FindingResponse(
         id=finding.id,
         vuln_type=finding.vuln_type,
@@ -361,12 +378,20 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
     if account is None:
         raise HTTPException(status_code=404, detail="account not found")
     fields = payload.model_fields_set
+    if "api_key" in fields and payload.api_key is not None:
+        # LLM API keys are configured and used entirely locally now (see
+        # non-code/README.md's local-AI-calls model) — the server never
+        # stores one, so it can't accidentally be used for a server-side LLM
+        # call. Run `sentinel config set api-key <key>` instead.
+        raise HTTPException(
+            status_code=400,
+            detail="api_key is no longer accepted by the server. LLM API keys are stored and used locally — "
+            "run `sentinel config set api-key <key>`.",
+        )
     if "provider" in fields and payload.provider is not None:
         account.provider = payload.provider
     if "model" in fields and payload.model is not None:
         account.model = payload.model
-    if "api_key" in fields and payload.api_key is not None:
-        account.api_key = payload.api_key
     if "api_endpoint" in fields:
         account.api_endpoint = payload.api_endpoint
     if "suppression_approval_required" in fields and payload.suppression_approval_required is not None:
@@ -378,52 +403,14 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
     return account_config_response(account)
 
 
-@app.post("/init", response_model=EnqueueResponse)
-async def init_repo(payload: InitRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
-    task = await enqueue_task(
-        db,
-        repo_name=payload.repo_name,
-        kind="init",
-        payload={"repo_name": payload.repo_name, "files": payload.files},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
-
-
-@app.post("/source", response_model=EnqueueResponse)
-async def source(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
-    await _check_token_budget(db, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=payload.repo_name,
-        kind="source",
-        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
-
-
-@app.post("/source/enqueue", response_model=EnqueueResponse)
-async def source_enqueue(payload: SourceRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
-    await _check_token_budget(db, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=payload.repo_name,
-        kind="source",
-        payload={"repo_name": payload.repo_name, "diff": payload.diff, "run_context": payload.run_context, "base_ref": payload.base_ref, "paths": payload.paths},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
-
+# NOTE: /init, /source, /source/enqueue, and /plan were removed — they took
+# source code / diffs / plan content in the request body, which the
+# local-AI-calls model forbids. That work now runs in the local engine
+# (worker/sentinel_worker/local_cli.py, invoked by the CLI); only the graph
+# delta (POST /graph/upsert) and findings (POST /findings/ingest) come back.
+# The "init"/"source"/"plan" task kinds below are dead now that nothing
+# enqueues them, but the claim/complete/fail/cancel machinery is still used
+# by pentest tasks.
 
 
 @app.post("/tasks/claim", response_model=TaskResponse | None)
@@ -459,22 +446,6 @@ async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db),
     return task_response(task)
 
 
-@app.post("/plan", response_model=EnqueueResponse)
-async def plan(payload: PlanRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
-    await _check_token_budget(db, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=payload.repo_name,
-        kind="plan",
-        payload={"repo_name": payload.repo_name, "content": payload.content, "with_retry": payload.with_retry},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
-
-
 @app.post("/findings/ingest", response_model=IngestResponse)
 async def ingest_findings(payload: IngestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> IngestResponse:
     """Ingest pre-computed findings from a CI-native scan.
@@ -503,6 +474,7 @@ async def ingest_findings(payload: IngestRequest, db: AsyncSession = Depends(get
 
     created = 0
     updated = 0
+    finding_ids: list[str] = []
     for incoming in payload.findings:
         fingerprint = compute_fingerprint(repo.id, incoming.node_id or incoming.file or "unknown", incoming.vuln_type)
         existing = await db.scalar(select(Finding).where(Finding.fingerprint == fingerprint))
@@ -512,25 +484,27 @@ async def ingest_findings(payload: IngestRequest, db: AsyncSession = Depends(get
             if not existing.suppressed:
                 existing.status = "open"
             updated += 1
+            finding_ids.append(existing.id)
         else:
-            db.add(
-                Finding(
-                    graph_id=graph.id,
-                    node_id=incoming.node_id,
-                    run_id=run.id,
-                    vuln_type=incoming.vuln_type,
-                    severity=incoming.severity,
-                    title=incoming.title,
-                    description=incoming.description,
-                    remediation=incoming.remediation,
-                    evidence=incoming.evidence,
-                    fingerprint=fingerprint,
-                    status="open",
-                )
+            new_finding = Finding(
+                graph_id=graph.id,
+                node_id=incoming.node_id,
+                run_id=run.id,
+                vuln_type=incoming.vuln_type,
+                severity=incoming.severity,
+                title=incoming.title,
+                description=incoming.description,
+                remediation=incoming.remediation,
+                evidence=incoming.evidence,
+                fingerprint=fingerprint,
+                status="open",
             )
+            db.add(new_finding)
+            await db.flush()
             created += 1
+            finding_ids.append(new_finding.id)
 
-    return IngestResponse(run_id=run.id, created=created, updated=updated, total=created + updated)
+    return IngestResponse(run_id=run.id, created=created, updated=updated, total=created + updated, finding_ids=finding_ids)
 
 
 @app.get("/findings", response_model=list[FindingResponse])
@@ -595,7 +569,7 @@ async def pull_finding(finding_id: str, db: AsyncSession = Depends(get_db), prin
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
-    node = await db.get(Node, finding.node_id) if finding.node_id else None
+    node = await _node_for_graph(db, finding.node_id, finding.graph_id)
     remediation = await finding_remediation(finding_id=finding_id, db=db, principal=principal)
     return {
         "finding": (await finding_response(db, finding)).model_dump(),
@@ -628,6 +602,42 @@ async def finding_graph(finding_id: str, db: AsyncSession = Depends(get_db), pri
         node_ids.add(edge.dst)
     nodes = list(await db.scalars(select(Node).where(Node.graph_id == finding.graph_id).where(Node.id.in_(node_ids)).order_by(Node.kind.asc(), Node.name.asc())))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.post("/findings/{finding_id}/confirm", response_model=FindingResponse)
+async def confirm_pentest_result(
+    finding_id: str,
+    payload: PentestConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> FindingResponse:
+    """Apply a local pentest run's outcome to a finding.
+
+    `sentinel pentest` runs entirely on the developer's machine — against the
+    app booted locally, with secrets from `.env.sentinel` never leaving that
+    process — and posts only the confirmation outcome and evidence text here.
+    """
+    finding = await _finding_for_principal(db, finding_id, principal)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding not found")
+
+    if payload.confirmed:
+        finding.confirmed = True
+        finding.status = "confirmed"
+        finding.evidence = payload.evidence
+        if payload.entry_node_id and payload.sink_node_id:
+            # Both nodes must legitimately belong to this finding's graph —
+            # _node_for_graph refuses to resolve another tenant's node here.
+            entry_node = await _node_for_graph(db, payload.entry_node_id, finding.graph_id)
+            sink_node = await _node_for_graph(db, payload.sink_node_id, finding.graph_id)
+            if entry_node is not None and sink_node is not None:
+                db.add(Edge(graph_id=finding.graph_id, src=entry_node.id, dst=sink_node.id, kind="CONFIRMED_EXPLOIT"))
+    else:
+        finding.status = payload.status
+        finding.evidence = payload.evidence
+    finding.updated_at = now()
+    await db.flush()
+    return await finding_response(db, finding)
 
 
 @app.patch("/findings/{finding_id}/suppress", response_model=FindingResponse)
@@ -728,11 +738,14 @@ async def remove_suppression(finding_id: str, db: AsyncSession = Depends(get_db)
 
 @app.get("/findings/{finding_id}/remediation", response_model=RemediationResponse)
 async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> RemediationResponse:
-    """Returns finding + graph context + LLM-generated remediation plan."""
-    from pathlib import Path as _Path
-    from sentinel_worker.agent import SentinelLLMClient
+    """Returns the finding, its graph context (pointers/metadata only), and its remediation plan.
+
+    The remediation plan comes from `finding.remediation`, written by the local
+    SAST agent when it emitted the finding — this endpoint does not call an
+    LLM. A richer, agent-generated plan is available locally via `sentinel
+    pull <id>`, which loads this same graph context into the local engine.
+    """
     from sentinel_worker.graph_query import GraphQuery
-    import json as _json
 
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
@@ -751,7 +764,6 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
     for edge in edges:
         node_ids.add(edge.src)
         node_ids.add(edge.dst)
-    neighbor_nodes = list(await db.scalars(select(Node).where(Node.graph_id == finding.graph_id).where(Node.id.in_(node_ids)))) if node_ids else []
     graph_query = GraphQuery(db=db, graph_id=finding.graph_id)
     graph_context = await graph_query.serialize_for_prompt(list(node_ids), max_hops=2)
 
@@ -760,48 +772,6 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
         "Re-run `sentinel source` after the fix to verify the finding no longer appears.",
         "If runtime confirmation exists, re-run `sentinel pentest <id>` with a patched build.",
     ]
-
-    # Attempt LLM-based remediation when a provider is configured
-    account = await db.get(Account, principal.account_id) if hasattr(principal, "account_id") else None
-    if account is None:
-        graph = await db.get(Graph, finding.graph_id)
-        account = await db.get(Account, graph.account_id) if graph else None
-
-    if account and getattr(account, "provider", None) and getattr(account, "api_key", None):
-        try:
-            llm = SentinelLLMClient(provider=account.provider, model=account.model, api_key=account.api_key or "")
-            remediation_prompt_path = _Path(__file__).parent.parent.parent.parent / "worker" / "src" / "sentinel_worker" / "prompts" / "remediation.txt"
-            system = remediation_prompt_path.read_text() if remediation_prompt_path.exists() else (
-                "You are a security engineer. Produce a concrete remediation plan as a JSON list of steps."
-            )
-            user_content = _json.dumps({
-                "finding": {
-                    "vuln_type": finding.vuln_type,
-                    "severity": finding.severity,
-                    "title": finding.title,
-                    "description": finding.description,
-                    "remediation": finding.remediation,
-                    "evidence": finding.evidence,
-                    "node_id": finding.node_id,
-                },
-                "graph_context": graph_context,
-                "neighbors": [{"id": n.id, "kind": n.kind, "name": n.name, "file": n.file, "intent": n.intent} for n in neighbor_nodes],
-            }, sort_keys=True)
-            result = await llm.call(system=system, user=user_content)
-            import json as _j
-            try:
-                parsed = _j.loads(result.content)
-                if isinstance(parsed, list):
-                    remediation_plan = [str(s) for s in parsed]
-                elif isinstance(parsed, dict):
-                    steps = parsed.get("fixes") or parsed.get("steps") or parsed.get("remediation_plan") or []
-                    if steps:
-                        remediation_plan = [str(s) for s in steps]
-            except Exception:
-                if result.content.strip():
-                    remediation_plan = [result.content.strip()]
-        except Exception:
-            pass  # fall back to static plan
 
     return RemediationResponse(
         finding=await finding_response(db, finding),
@@ -911,6 +881,142 @@ async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depen
     nodes = list(await db.scalars(node_stmt))
     edges = list(await db.scalars(edge_stmt))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.get("/graph/subgraph", response_model=GraphSubgraphResponse)
+async def graph_subgraph(
+    repo_name: str,
+    seeds: list[str] = Query(default_factory=list),
+    edge_kinds: list[str] | None = Query(default=None),
+    max_hops: int = 2,
+    graph_kind: Literal["main", "branch", "session"] = "main",
+    branch_name: str | None = None,
+    session_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> GraphSubgraphResponse:
+    """Pull a bootstrap subgraph for local context loading.
+
+    This is the cloud side of the local-execution model: the local engine
+    sends only seed node ids (extracted from the diff it is scanning locally)
+    and gets back nodes/edges. Nodes carry pointers (file/line) and structural
+    metadata only — never source text — so this is safe to serve regardless of
+    what triggered the request.
+    """
+    if not seeds:
+        raise HTTPException(status_code=400, detail="at least one seed node id is required")
+    try:
+        graph = await get_or_create_graph(
+            db,
+            repo_name,
+            account_id=_graph_account_id(principal),
+            kind=graph_kind,
+            branch_name=branch_name,
+            session_id=session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not _skip_tenant_filter(principal) and graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot read graph from another account")
+
+    layered = await LayeredGraphQuery.for_graph(db, graph.id)
+    included_nodes: dict[str, Node] = {}
+    included_edges: dict[int, Edge] = {}
+    for seed_id in seeds:
+        seed_node = await _node_for_graph(db, seed_id, graph.id)
+        if seed_node is not None:
+            included_nodes[seed_node.id] = seed_node
+        for neighbor in await layered.neighbors(seed_id, edge_kinds=edge_kinds, max_hops=max_hops):
+            included_nodes[neighbor.node.id] = neighbor.node
+            included_edges[neighbor.edge.id] = neighbor.edge
+
+    return GraphSubgraphResponse(
+        graph_id=graph.id,
+        nodes=[node_response(node) for node in included_nodes.values()],
+        edges=[edge_response(edge) for edge in included_edges.values()],
+    )
+
+
+@app.post("/graph/upsert", response_model=GraphUpsertResponse)
+async def graph_upsert(
+    payload: GraphUpsertRequest,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> GraphUpsertResponse:
+    """Accept a graph delta (nodes/edges only — pointers and metadata, never
+    source) produced by a local scan.
+
+    A node id that already exists in a *different* graph is rejected (409)
+    rather than silently adopted or overwritten — see the note on
+    `sentinel_worker.scan.get_or_create_graph` and `_node_for_graph`: node ids
+    are a single global primary key today (not composite with graph_id), so
+    two unrelated repos can legitimately produce the same deterministic id
+    (e.g. both have `fn:app.js:handler`). Without this check, an unscoped
+    lookup would silently overwrite another tenant's node.
+    """
+    for node in payload.nodes:
+        try:
+            assert_no_source_markers(node.label or "", field="node.label")
+            assert_no_source_markers(node.intent or "", field="node.intent")
+            assert_no_source_markers(node.name, field="node.name")
+        except SourcePayloadError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        graph = await get_or_create_graph(
+            db,
+            payload.repo_name,
+            account_id=_graph_account_id(principal),
+            kind=payload.graph_kind,
+            branch_name=payload.branch_name,
+            session_id=payload.session_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not _skip_tenant_filter(principal) and graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot write graph for another account")
+
+    nodes_upserted = 0
+    node_fields = (
+        "kind", "name", "file", "line_start", "line_end", "language", "trust_level",
+        "auth_required", "privilege", "is_entry_point", "is_sink", "taint_uncertain",
+        "parse_error", "label", "intent", "commit_hash", "is_new",
+    )
+    for incoming in payload.nodes:
+        existing = await _node_for_graph(db, incoming.id, graph.id)
+        if existing is not None:
+            for field_name in node_fields:
+                setattr(existing, field_name, getattr(incoming, field_name))
+            existing.updated_at = now()
+        else:
+            foreign_owner = await db.scalar(select(Node.graph_id).where(Node.id == incoming.id))
+            if foreign_owner is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"node {incoming.id!r} already exists in a different graph; "
+                        "node ids are a single global primary key today, so this repo cannot "
+                        "claim an id already used elsewhere (requires a composite node key migration)"
+                    ),
+                )
+            db.add(Node(graph_id=graph.id, **incoming.model_dump()))
+        nodes_upserted += 1
+
+    edges_upserted = 0
+    for incoming_edge in payload.edges:
+        exists = await db.scalar(
+            select(Edge)
+            .where(Edge.graph_id == graph.id)
+            .where(Edge.src == incoming_edge.src)
+            .where(Edge.dst == incoming_edge.dst)
+            .where(Edge.kind == incoming_edge.kind)
+        )
+        if exists is None:
+            db.add(Edge(graph_id=graph.id, **incoming_edge.model_dump()))
+            edges_upserted += 1
+
+    await db.flush()
+    return GraphUpsertResponse(graph_id=graph.id, nodes_upserted=nodes_upserted, edges_upserted=edges_upserted)
 
 
 @app.get("/source-files/{repo_name}/{commit_hash}/{file_path:path}", response_model=SourceReadResponse)

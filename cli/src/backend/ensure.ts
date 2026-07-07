@@ -143,7 +143,7 @@ async function ensureWorkerContainer(): Promise<void> {
 
 // ── Legacy localhost spawning (kept for self-hosted local dev) ─────────────────
 
-function resolveVenvPython(): string {
+export function resolveVenvPython(): string {
   // Prefer explicit override, then walk up from cwd looking for a .venv.
   if (process.env.SENTINEL_PYTHON) return process.env.SENTINEL_PYTHON;
   let dir = process.cwd();

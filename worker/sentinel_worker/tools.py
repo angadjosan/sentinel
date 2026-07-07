@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+from pathlib import Path
 
 import structlog
 
@@ -10,8 +12,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import graph_query as gq
 from . import source_store
 from .models import Node, SourceFileSnapshot
+from .security import is_env_var_file
 
 log = structlog.get_logger(__name__)
+
+# Directories never walked when grepping a local working tree — build output,
+# dependencies, and VCS internals are noise (and node_modules/.git can be huge).
+_LOCAL_GREP_IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next"}
+
+
+def _resolve_local_path(repo_dir: str, file_path: str) -> Path:
+    """Resolve a repo-relative path against repo_dir, rejecting escapes (../, absolute paths)."""
+    normalized = os.path.normpath(file_path)
+    if normalized.startswith("..") or os.path.isabs(normalized):
+        raise FileNotFoundError(file_path)
+    return Path(repo_dir) / normalized
+
+
+def _read_local_file(repo_dir: str, file_path: str) -> str:
+    try:
+        return _resolve_local_path(repo_dir, file_path).read_text(errors="strict")
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError) as exc:
+        raise FileNotFoundError(file_path) from exc
+
+
+def _iter_local_files(repo_dir: str):
+    root = Path(repo_dir)
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in _LOCAL_GREP_IGNORE_DIRS for part in path.parts):
+            continue
+        yield path
 
 
 _PENTEST_RESULT_TOOL: dict = {
@@ -241,10 +273,19 @@ async def dispatch_tool(
     run_id: str | None,
     db: AsyncSession,
     repo_id: str,
+    *,
+    repo_dir: str | None = None,
 ) -> dict:
+    """Dispatch a tool call from the LLM.
+
+    `repo_dir`, when set, makes `read_file`/`grep_source` read the local
+    working tree directly instead of decrypting a cloud source snapshot — this
+    is what keeps source code on the local machine during a local scan.
+    Omitting it preserves the original cloud-worker behavior unchanged.
+    """
     log.debug("tool.dispatch", tool=tool_name, run_id=run_id)
     try:
-        return await _dispatch_tool_inner(tool_name, tool_input, graph, run_id, db, repo_id)
+        return await _dispatch_tool_inner(tool_name, tool_input, graph, run_id, db, repo_id, repo_dir=repo_dir)
     except (KeyError, TypeError, ValueError) as exc:
         return {"error": f"Invalid arguments for tool {tool_name}: {exc}"}
 
@@ -256,6 +297,8 @@ async def _dispatch_tool_inner(
     run_id: str | None,
     db: AsyncSession,
     repo_id: str,
+    *,
+    repo_dir: str | None = None,
 ) -> dict:
 
     if tool_name == "graph_neighbors":
@@ -307,12 +350,15 @@ async def _dispatch_tool_inner(
         start_line = tool_input.get("start_line") or tool_input.get("line_start")
         end_line = tool_input.get("end_line") or tool_input.get("line_end")
         try:
-            content = await source_store.read_source_snapshot(
-                db,
-                repo_id=repo_id,
-                commit_hash="bootstrap",
-                file_path=file_path,
-            )
+            if repo_dir is not None:
+                content = _read_local_file(repo_dir, file_path)
+            else:
+                content = await source_store.read_source_snapshot(
+                    db,
+                    repo_id=repo_id,
+                    commit_hash="bootstrap",
+                    file_path=file_path,
+                )
             if start_line is not None or end_line is not None:
                 lines = content.splitlines()
                 s = (start_line - 1) if start_line and start_line > 0 else 0
@@ -331,15 +377,33 @@ async def _dispatch_tool_inner(
         except re.error as exc:
             return {"error": f"Invalid regex pattern: {exc}"}
 
-        # Query all source snapshots for this repo at bootstrap commit
+        matches: list[dict] = []
+        if repo_dir is not None:
+            for path in _iter_local_files(repo_dir):
+                rel_path = path.relative_to(repo_dir).as_posix()
+                if is_env_var_file(rel_path):
+                    continue
+                if file_re and not file_re.search(rel_path):
+                    continue
+                try:
+                    content = path.read_text(errors="strict")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                for lineno, line in enumerate(content.splitlines(), start=1):
+                    if regex.search(line):
+                        matches.append({"file_path": rel_path, "line": lineno, "content": line})
+            return {"matches": matches}
+
+        # Cloud-worker path: query all source snapshots for this repo at bootstrap commit.
         stmt = select(SourceFileSnapshot).where(
             SourceFileSnapshot.repo_id == repo_id,
             SourceFileSnapshot.commit_hash == "bootstrap",
             SourceFileSnapshot.deleted.is_(False),
         )
         snapshots = list(await db.scalars(stmt))
-        matches: list[dict] = []
         for snap in snapshots:
+            if is_env_var_file(snap.file_path):
+                continue
             if file_re and not file_re.search(snap.file_path):
                 continue
             try:

@@ -39,6 +39,7 @@ test = [
 [project.scripts]
 sentinel-worker = "sentinel_worker.worker_main:main"
 sentinel-scan = "sentinel_worker.standalone:main"
+sentinel-local = "sentinel_worker.local_cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]

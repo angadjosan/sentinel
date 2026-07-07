@@ -49,6 +49,7 @@ class IngestResponse(BaseModel):
     created: int
     updated: int
     total: int
+    finding_ids: list[str] = Field(default_factory=list)
 
 
 class FirecrackerRequest(BaseModel):
@@ -78,6 +79,18 @@ class PentestRequest(BaseModel):
     healthcheck: str | None = None
     egress_allowlist: list[str] = Field(default_factory=list)
     firecracker: FirecrackerRequest | None = None
+
+
+class PentestConfirmRequest(BaseModel):
+    """Result of a local pentest run — evidence text and node pointers only,
+    never source or diff content. Posted by the local engine after it runs
+    `sentinel pentest` against the app on the developer's own machine."""
+
+    confirmed: bool
+    status: str = Field(default="not_reproducible", min_length=1)
+    evidence: str | None = None
+    entry_node_id: str | None = None
+    sink_node_id: str | None = None
 
 
 class SuppressRequest(BaseModel):
@@ -247,6 +260,66 @@ class EdgeResponse(BaseModel):
 class GraphResponse(BaseModel):
     nodes: list[NodeResponse]
     edges: list[EdgeResponse]
+
+
+class GraphSubgraphResponse(BaseModel):
+    graph_id: str
+    nodes: list[NodeResponse]
+    edges: list[EdgeResponse]
+
+
+class GraphUpsertNode(BaseModel):
+    """A graph node produced by a local scan.
+
+    Deliberately has no field for source text — only pointers (file/line) and
+    short structural/semantic metadata, matching what nodes have always stored
+    (see non-code/README.md: "Nodes do not store source text").
+    """
+
+    id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    file: str | None = None
+    line_start: int | None = None
+    line_end: int | None = None
+    language: str | None = None
+    trust_level: str | None = None
+    auth_required: bool = False
+    privilege: str | None = None
+    is_entry_point: bool = False
+    is_sink: bool = False
+    taint_uncertain: bool = False
+    parse_error: bool = False
+    label: str | None = Field(default=None, max_length=2000)
+    intent: str | None = Field(default=None, max_length=2000)
+    commit_hash: str | None = None
+    is_new: bool = False
+
+
+class GraphUpsertEdge(BaseModel):
+    src: str = Field(min_length=1)
+    dst: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    tainted: bool = False
+    sanitized: bool = False
+    taint_uncertain: bool = False
+    call_uncertainty: str | None = None
+    order_index: int | None = None
+
+
+class GraphUpsertRequest(BaseModel):
+    repo_name: str = Field(min_length=1)
+    graph_kind: Literal["main", "branch", "session"] = "main"
+    branch_name: str | None = None
+    session_id: str | None = None
+    nodes: list[GraphUpsertNode] = Field(default_factory=list)
+    edges: list[GraphUpsertEdge] = Field(default_factory=list)
+
+
+class GraphUpsertResponse(BaseModel):
+    graph_id: str
+    nodes_upserted: int
+    edges_upserted: int
 
 
 class RepoCreateRequest(BaseModel):

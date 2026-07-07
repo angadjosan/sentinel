@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
 from sentinel_api.main import app
-from .conftest import process_tasks as _process_tasks
+from .conftest import seed_finding
 
 
 def test_auth_required_rejects_missing_token(monkeypatch):
@@ -35,22 +35,13 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     token_a = create_token("user-a", "account-a", "admin")
     token_b = create_token("user-b", "account-b", "admin")
     with TestClient(app) as client:
-        scan_a = client.post(
-            "/plan",
-            headers={"Authorization": f"Bearer {token_a}"},
-            json={"repo_name": "shared-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
-        )
-        scan_b = client.post(
-            "/plan",
-            headers={"Authorization": f"Bearer {token_b}"},
-            json={"repo_name": "shared-repo", "content": "exec(`run ${req.query.id}`)", "with_retry": False},
-        )
-        assert scan_a.status_code == 200
-        assert scan_b.status_code == 200
+        # Distinct node ids: two accounts scanning a repo of the same *name*
+        # are still different repos/graphs — giving them the same node id
+        # would be a genuine cross-tenant id collision (see graph_upsert),
+        # not what this test is about.
+        seed_finding(client, repo_name="shared-repo", vuln_type="sqli", node_id="fn:a/app.js:sink", headers={"Authorization": f"Bearer {token_a}"})
+        seed_finding(client, repo_name="shared-repo", vuln_type="cmdi", node_id="fn:b/app.js:sink", headers={"Authorization": f"Bearer {token_b}"})
 
-    _process_tasks(2)
-
-    with TestClient(app) as client:
         findings_a = client.get("/findings?repo_name=shared-repo", headers={"Authorization": f"Bearer {token_a}"})
         findings_b = client.get("/findings?repo_name=shared-repo", headers={"Authorization": f"Bearer {token_b}"})
     assert findings_a.status_code == 200
@@ -59,28 +50,14 @@ def test_authenticated_accounts_have_isolated_findings(monkeypatch):
     assert {finding["vuln_type"] for finding in findings_b.json()} == {"cmdi"}
 
 
-def test_authenticated_source_enqueues_and_run_is_scoped(monkeypatch):
+def test_authenticated_ingest_run_is_scoped(monkeypatch):
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
     account_id = f"stream-account-{uuid4().hex}"
     token = create_token("stream-user", account_id, "admin")
     with TestClient(app) as client:
-        resp = client.post(
-            "/source",
-            headers={"Authorization": f"Bearer {token}"},
-            json={
-                "repo_name": "stream-repo",
-                "diff": "+++ b/app.js\n+db.query(`select ${req.query.id}`)",
-                "run_context": "local",
-            },
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["run"]["status"] in ("queued", "running", "claimed")
-        run_id = body["run"]["id"]
+        ingested = seed_finding(client, repo_name="stream-repo", vuln_type="sqli", headers={"Authorization": f"Bearer {token}"})
+        run_id = ingested["run_id"]
 
-    _process_tasks(1)
-
-    with TestClient(app) as client:
         run = client.get(f"/runs/{run_id}", headers={"Authorization": f"Bearer {token}"})
         assert run.status_code == 200
         findings = client.get("/findings?repo_name=stream-repo", headers={"Authorization": f"Bearer {token}"})
@@ -93,17 +70,9 @@ def test_authenticated_accounts_cannot_access_other_account_details(monkeypatch)
     token_a = create_token("owner-a", "detail-account-a", "admin")
     token_b = create_token("owner-b", "detail-account-b", "admin")
     with TestClient(app) as client:
-        created = client.post(
-            "/plan",
-            headers={"Authorization": f"Bearer {token_a}"},
-            json={"repo_name": "detail-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
-        )
-        assert created.status_code == 200
-        run_id = created.json()["run"]["id"]
+        ingested = seed_finding(client, repo_name="detail-repo", vuln_type="sqli", headers={"Authorization": f"Bearer {token_a}"})
+        run_id = ingested["run_id"]
 
-    _process_tasks(1)
-
-    with TestClient(app) as client:
         findings_resp = client.get("/findings?repo_name=detail-repo", headers={"Authorization": f"Bearer {token_a}"})
         assert findings_resp.status_code == 200
         finding_id = findings_resp.json()[0]["id"]
@@ -135,23 +104,16 @@ def test_authenticated_graph_runs_and_analytics_are_account_scoped(monkeypatch):
     token_a = create_token("scope-a", account_a, "admin")
     token_b = create_token("scope-b", account_b, "admin")
     with TestClient(app) as client:
-        scan_a = client.post(
-            "/source",
-            headers={"Authorization": f"Bearer {token_a}"},
-            json={"repo_name": f"scope-repo-a-{suffix}", "diff": "+++ b/services/a/app.js\n+app.get('/a', (req,res)=> db.query(`select ${req.query.id}`))", "run_context": "local"},
+        ingested_a = seed_finding(
+            client, repo_name=f"scope-repo-a-{suffix}", vuln_type="sqli", severity="high",
+            file="services/a/app.js", headers={"Authorization": f"Bearer {token_a}"},
         )
-        scan_b = client.post(
-            "/source",
-            headers={"Authorization": f"Bearer {token_b}"},
-            json={"repo_name": f"scope-repo-b-{suffix}", "diff": "+++ b/services/b/app.js\n+app.get('/b', (req,res)=> exec(`run ${req.query.id}`))", "run_context": "local"},
+        seed_finding(
+            client, repo_name=f"scope-repo-b-{suffix}", vuln_type="cmdi",
+            file="services/b/app.js", headers={"Authorization": f"Bearer {token_b}"},
         )
-        assert scan_a.status_code == 200
-        assert scan_b.status_code == 200
-        run_a_id = scan_a.json()["run"]["id"]
+        run_a_id = ingested_a["run_id"]
 
-    _process_tasks(2)
-
-    with TestClient(app) as client:
         runs_a = client.get("/runs", headers={"Authorization": f"Bearer {token_a}"})
         graph_a = client.get("/graph", headers={"Authorization": f"Bearer {token_a}"})
         trends_a = client.get("/analytics/finding-trends", headers={"Authorization": f"Bearer {token_a}"})
@@ -164,44 +126,38 @@ def test_authenticated_graph_runs_and_analytics_are_account_scoped(monkeypatch):
     assert fp_a.json()["total"] == 1
 
 
-def test_monthly_token_budget_blocks_new_runs(monkeypatch):
+def test_authenticated_graph_subgraph_and_upsert_are_account_scoped(monkeypatch):
+    """Closes the coverage gap left by removing /source-files (which used to
+    prove tenant isolation on reading stored source): the graph sync endpoints
+    that replaced it must be isolated the same way."""
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
-    token = create_token("budget-admin", "budget-account", "admin")
+    suffix = uuid4().hex
+    token_a = create_token("graph-a", f"graph-account-a-{suffix}", "admin")
+    token_b = create_token("graph-b", f"graph-account-b-{suffix}", "admin")
+    repo = f"graph-scope-{suffix}"
+    node_id = "fn:app.js:sink"
     with TestClient(app) as client:
-        budget = client.put(
-            "/admin/accounts/budget-account/token-budget",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"monthly_token_budget": 0},
-        )
-        assert budget.status_code == 200
-        response = client.post(
-            "/plan",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"repo_name": "budget-repo", "content": "db.query(`select ${req.query.id}`)", "with_retry": False},
-        )
-    assert response.status_code == 429
-    assert response.json()["detail"]["error"] == "monthly_token_budget_exceeded"
-
-
-def test_source_file_reads_are_account_scoped(monkeypatch):
-    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
-    token_a = create_token("source-a", "source-account-a", "admin")
-    token_b = create_token("source-b", "source-account-b", "admin")
-    with TestClient(app) as client:
-        created = client.post(
-            "/init",
+        pushed = client.post(
+            "/graph/upsert",
             headers={"Authorization": f"Bearer {token_a}"},
-            json={"repo_name": "shared-source", "files": {"app.js": "const tenant = 'a';"}},
+            json={"repo_name": repo, "graph_kind": "main", "nodes": [{"id": node_id, "kind": "FUNCTION", "name": "sink", "file": "app.js"}], "edges": []},
         )
-        assert created.status_code == 200
+        assert pushed.status_code == 200
 
-    _process_tasks(1)
-
-    with TestClient(app) as client:
-        allowed = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_a}"})
-        denied = client.get("/source-files/shared-source/bootstrap/app.js", headers={"Authorization": f"Bearer {token_b}"})
+        allowed = client.get(
+            "/graph/subgraph", headers={"Authorization": f"Bearer {token_a}"},
+            params={"repo_name": repo, "seeds": [node_id]},
+        )
+        # A different account has no such repo yet, so get_or_create_graph makes
+        # a fresh (empty) one for it — it must not see account A's node.
+        denied = client.get(
+            "/graph/subgraph", headers={"Authorization": f"Bearer {token_b}"},
+            params={"repo_name": repo, "seeds": [node_id]},
+        )
     assert allowed.status_code == 200
-    assert denied.status_code == 404
+    assert any(n["id"] == node_id for n in allowed.json()["nodes"])
+    assert denied.status_code == 200
+    assert all(n["id"] != node_id for n in denied.json()["nodes"])
 
 
 def test_device_auth_flow_issues_token_after_admin_approval(monkeypatch):

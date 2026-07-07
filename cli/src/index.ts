@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 import { readFileSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import chalk from "chalk";
 import { Command } from "commander";
 
 import { SentinelApiClient } from "./api/client.js";
-import { writeApiKey } from "./auth/keychain.js";
+import { readApiKey, readLlmApiKey, writeApiKey, writeLlmApiKey } from "./auth/keychain.js";
 import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
-import { currentDiff, lsFiles } from "./diff/git.js";
+import { currentDiff } from "./diff/git.js";
 import { ensureBackend, startBackend, stopBackend, backendStatus } from "./backend/ensure.js";
+import { runLocalInit, runLocalPentest, runLocalPlanReview, runLocalSourceScan } from "./engine/localEngine.js";
 
 const program = new Command();
 
-program.name("sentinel").description("Cloud-backed application security scanner").version("0.1.0");
+program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.0");
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
@@ -67,132 +69,109 @@ program
     }
     const config = loadConfig(root);
     await ensureBackend(config.apiUrl);
-    const files: Record<string, string> = {};
-    for (const file of lsFiles()) {
-      if (file === "sentinel.config.json") continue;
-      try {
-        files[file] = readFileSync(join(root, file), "utf8");
-      } catch {
-        // Binary or unreadable tracked files are ignored by the bootstrap snapshot.
-      }
-    }
-    const run = await new SentinelApiClient(config).init(files);
-    console.log(`initialized ${repoName}; run ${run.id}`);
+    // The codebase is parsed into a graph entirely on this machine; only the
+    // resulting nodes/edges (pointers + short labels, never source text) are
+    // sent to the cloud. See non-code/README.md's local-AI-calls model.
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
+    const result = await runLocalInit({ config, repoDir: root, apiToken, llmApiKey });
+    console.log(`initialized ${repoName}: ${result.nodes} graph nodes, ${result.edges} edges pushed`);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
   });
 
 program
   .command("source")
-  .description("Scan the current git diff")
+  .description("Scan the current git diff — locally. Source and diffs never leave this machine.")
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
-  .option("--queue", "Queue scan for async worker (fire and forget)")
   .action(async (paths: string[], options) => {
     const config = loadConfig();
     validateConfigForScan(config);
     await ensureBackend(config.apiUrl);
+    const root = findRepoRoot();
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
-    const client = new SentinelApiClient(config);
-    const scope = { baseRef: options.base, paths };
-    const runContext = process.env.CI ? "ci" : "local";
-
-    if (options.queue) {
-      const queued = await client.enqueueSource(diff, runContext, scope);
-      console.log(`queued task ${queued.task_id}; run ${queued.run.id}`);
+    if (!diff.trim()) {
+      console.log("no changes to scan");
+      process.exitCode = 0;
       return;
     }
+    const runContext = process.env.CI ? "ci" : "local";
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
 
-    // Default: enqueue + stream findings live
-    const queued = await client.enqueueSource(diff, runContext, scope);
-    console.log(`run ${queued.run.id} started`);
-
-    let findingCount = 0;
-    const deadline = Date.now() + 120_000; // 2-min overall cap
-    try {
-      for await (const event of client.runEvents(queued.run.id, 120_000)) {
-        try {
-          const parsed = JSON.parse(event) as Record<string, unknown>;
-          if (parsed.vuln_type) {
-            findingCount++;
-            console.log(`${chalk.red(((parsed.severity as string) || "unknown").toUpperCase())} ${parsed.vuln_type} ${parsed.id ?? ""}`);
-            console.log(`  ${parsed.title ?? ""}`);
-            if (parsed.remediation) console.log(`  fix: ${parsed.remediation}`);
-          }
-          const kind = parsed.kind as string | undefined;
-          if (kind === "run.completed" || kind === "complete" || kind === "scan.completed" ||
-              parsed.status === "failed" || parsed.status === "cancelled") {
-            if (typeof parsed.finding_count === "number") findingCount = parsed.finding_count;
-            break;
-          }
-        } catch { /* non-JSON trace lines */ }
-        if (Date.now() > deadline) break;
-      }
-    } catch {
-      // Stream interrupted — fall back to polling the run
-      try {
-        const run = await client.run(queued.run.id);
-        findingCount = run.finding_count;
-      } catch { /* ignore secondary error */ }
+    const { result, exitCode } = await runLocalSourceScan({
+      config,
+      repoDir: root,
+      diff,
+      baseRef: options.base,
+      runContext,
+      apiToken,
+      llmApiKey,
+    });
+    for (const finding of result.findings) {
+      console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type} ${finding.fingerprint.slice(0, 8)}`);
+      console.log(`  ${finding.title}`);
+      if (finding.remediation) console.log(`  fix: ${finding.remediation}`);
     }
-    console.log(`run ${queued.run.id} completed with ${findingCount} finding(s)`);
-    process.exitCode = findingCount > 0 ? 1 : 0;
+    console.log(`${result.finding_count} finding(s) · pushed ${result.graph_nodes_pushed} graph node(s), ${result.graph_edges_pushed} edge(s)`);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
+    process.exitCode = exitCode;
   });
 
 program
   .command("scan")
-  .description("Run source scan, then pentest each finding unless skipped")
+  .description("Run source scan locally, then pentest each finding unless skipped")
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
   .option("--no-pentest", "Skip pentest")
   .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
   .action(async (paths: string[], options) => {
-    validateConfigForScan(loadConfig());
     const config = loadConfig();
+    validateConfigForScan(config);
     await ensureBackend(config.apiUrl);
-    const client = new SentinelApiClient(config);
+    const root = findRepoRoot();
     const diff = currentDiff({ staged: options.staged, base: options.base, paths });
-    const scope = { baseRef: options.base, paths };
     const runContext = process.env.CI ? "ci" : "local";
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
 
-    const queued = await client.enqueueSource(diff, runContext, scope);
-    console.log(`run ${queued.run.id} started`);
-
-    let findingCount = 0;
-    const allFindings: Array<{ id: string }> = [];
-    const deadline = Date.now() + 120_000;
-    try {
-      for await (const event of client.runEvents(queued.run.id, 120_000)) {
-        try {
-          const parsed = JSON.parse(event) as Record<string, unknown>;
-          if (parsed.vuln_type && typeof parsed.id === "string") {
-            findingCount++;
-            allFindings.push({ id: parsed.id });
-            console.log(`${chalk.red(((parsed.severity as string) || "unknown").toUpperCase())} ${parsed.vuln_type} ${parsed.id}`);
-            console.log(`  ${parsed.title ?? ""}`);
-          }
-          const kind = parsed.kind as string | undefined;
-          if (kind === "run.completed" || kind === "complete" || kind === "scan.completed" ||
-              parsed.status === "failed" || parsed.status === "cancelled") {
-            if (typeof parsed.finding_count === "number") findingCount = parsed.finding_count;
-            break;
-          }
-        } catch { /* non-JSON */ }
-        if (Date.now() > deadline) break;
-      }
-    } catch { /* stream interrupted */ }
-
-    if (options.pentest && allFindings.length > 0) {
-      const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
-      const pentestResults = await runLimited(allFindings, concurrency, async (finding) =>
-        client.pentest({ findingId: finding.id })
-      );
-      for (const f of pentestResults) {
-        console.log(`pentest ${f.id}: ${f.status} confirmed=${f.confirmed}`);
-      }
+    if (!diff.trim()) {
+      console.log("no changes to scan");
+      process.exitCode = 0;
+      return;
     }
-    console.log(`scan ${queued.run.id}: ${findingCount} finding(s)`);
-    process.exitCode = findingCount > 0 ? 1 : 0;
+
+    const { result, exitCode } = await runLocalSourceScan({
+      config,
+      repoDir: root,
+      diff,
+      baseRef: options.base,
+      runContext,
+      apiToken,
+      llmApiKey,
+    });
+    for (const finding of result.findings) {
+      console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type} ${finding.fingerprint.slice(0, 8)}`);
+      console.log(`  ${finding.title}`);
+    }
+
+    const findingIds = result.push.findings?.finding_ids ?? [];
+    if (options.pentest && findingIds.length > 0) {
+      const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
+      const pentestResults = await runLimited(findingIds, concurrency, async (findingId) =>
+        runLocalPentest({
+          config, repoDir: root, apiToken, llmApiKey, findingId,
+          boot: config.boot, healthcheck: config.healthcheck, egressAllowlist: config.egress_allowlist,
+        })
+      );
+      for (const r of pentestResults) {
+        console.log(`pentest ${r.finding_id}: ${r.status} confirmed=${r.confirmed}`);
+      }
+    } else if (options.pentest && result.findings.length > 0) {
+      console.log("(pentest skipped: findings were not pushed to the cloud, so no finding IDs are available — check network/auth)");
+    }
+    console.log(`scan: ${result.finding_count} finding(s)`);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
+    process.exitCode = exitCode;
   });
 
 program
@@ -255,30 +234,61 @@ program
     }
     const config = loadConfig();
     await ensureBackend(config.apiUrl);
-    const result = await new SentinelApiClient(config).plan(content, Boolean(options.withRetry));
+    const root = findRepoRoot();
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
+    const { result, exitCode } = await runLocalPlanReview({
+      config,
+      repoDir: root,
+      content,
+      withRetry: Boolean(options.withRetry),
+      apiToken,
+      llmApiKey,
+    });
     for (const finding of result.findings) {
       console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type}: ${finding.title}`);
       console.log(`  ${finding.description}`);
       console.log(`  fix: ${finding.remediation}`);
     }
-    console.log(`plan run ${result.run.id} completed with ${result.findings.length} issue(s)`);
-    process.exitCode = result.findings.length > 0 ? 1 : 0;
+    console.log(`plan review completed with ${result.finding_count} issue(s)`);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
+    process.exitCode = exitCode;
   });
 
 program
   .command("pentest")
-  .description("Attempt to confirm a finding with oracle evidence")
+  .description("Attempt to confirm a finding by attacking the app booted on this machine")
   .argument("[target...]", "Finding ID, natural-language target, or empty to auto-select")
   .option("--sanitizer-output <text>", "Sanitizer output")
   .option("--behavioral-proof <kind>", "Behavioral proof kind")
   .option("--proof-detail <text>", "Behavioral proof detail", "")
   .action(async (targetParts: string[], options) => {
     const config = loadConfig();
+    validateConfigForScan(config);
     await ensureBackend(config.apiUrl);
+    const root = findRepoRoot();
+    const client = new SentinelApiClient(config);
     const target = parsePentestTarget(targetParts);
-    const finding = await new SentinelApiClient(config).pentest(target, options.sanitizerOutput ?? "", options.behavioralProof, options.proofDetail);
-    console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
-    if (finding.evidence) console.log(finding.evidence);
+    const findingId = target.findingId ?? (await resolvePentestTargetId(client, target.description));
+    if (!findingId) {
+      throw new Error("No open finding matched. Run `sentinel list` to see finding IDs.");
+    }
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
+    const result = await runLocalPentest({
+      config,
+      repoDir: root,
+      apiToken,
+      llmApiKey,
+      findingId,
+      sanitizerOutput: options.sanitizerOutput,
+      behavioralProof: options.behavioralProof,
+      proofDetail: options.proofDetail,
+      boot: config.boot,
+      healthcheck: config.healthcheck,
+      egressAllowlist: config.egress_allowlist,
+    });
+    console.log(`${result.finding_id}\t${result.status}\tconfirmed=${result.confirmed}`);
+    if (result.evidence) console.log(result.evidence);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
   });
 
 const suppress = program.command("suppress").description("Suppress or remove suppressions");
@@ -336,11 +346,21 @@ runs
   });
 runs
   .command("show")
-  .argument("<id>", "Run ID")
+  .argument("<id>", "Run ID (a local run ID from `sentinel source/scan/plan/pentest`, or a cloud run ID)")
   .action(async (id: string) => {
     const config = loadConfig();
-    await ensureBackend(config.apiUrl);
-    const trace = await new SentinelApiClient(config).trace(id);
+    const localTracePath = join(homedir(), ".sentinel", "runs", `${id}.jsonl`);
+    let trace: string;
+    if (existsSync(localTracePath)) {
+      // Full local traces (every prompt, every tool call) never leave this
+      // machine — the cloud only ever gets a redacted run summary.
+      trace = readFileSync(localTracePath, "utf8");
+      console.log(`(reading full trace from local file: ${localTracePath})\n`);
+    } else {
+      await ensureBackend(config.apiUrl);
+      trace = await new SentinelApiClient(config).trace(id);
+      console.log("(no local trace found for this ID — showing the cloud's redacted run summary)\n");
+    }
     console.log(trace);
     const summary = summarizeTokens(trace);
     if (summary.totalInput + summary.totalOutput > 0) {
@@ -392,10 +412,11 @@ config
     const client = new SentinelApiClient();
 
     if (key === "api-key") {
-      await ensureBackend(loadConfig(root).apiUrl);
-      // Push the LLM provider API key to the server so the worker can use it.
-      await client.patchConfig({ api_key: value });
-      console.log("api-key stored on server");
+      // The LLM provider key is used locally by the scan engine and never
+      // sent to the Sentinel cloud — stored in the system keychain (or the
+      // ~/.sentinel fallback), same mechanism as the Sentinel auth token.
+      await writeLlmApiKey(loadConfig(root), value);
+      console.log("api-key stored locally (never sent to the Sentinel cloud)");
       return;
     }
 
@@ -526,6 +547,32 @@ function parsePentestTarget(parts: string[]): { findingId?: string; description?
     return { findingId: target };
   }
   return { description: target };
+}
+
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+
+// Client-side mirror of the server's retired /pentest description-matching:
+// term-overlap score against title+description+vuln_type, else just the
+// highest-severity open finding. No source is involved — just finding metadata.
+async function resolvePentestTargetId(client: SentinelApiClient, description?: string): Promise<string | undefined> {
+  const findings = await client.findings({ status: "open" });
+  if (findings.length === 0) return undefined;
+  if (!description) {
+    return [...findings].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 5) - (SEVERITY_RANK[b.severity] ?? 5))[0]?.id;
+  }
+  const terms = description
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2);
+  const scored = findings
+    .map((f) => {
+      const haystack = `${f.id} ${f.vuln_type} ${f.title} ${f.description} ${f.file ?? ""}`.toLowerCase();
+      const score = terms.reduce((n, term) => n + (haystack.includes(term) ? 1 : 0), 0);
+      return { finding: f, score };
+    })
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || (SEVERITY_RANK[a.finding.severity] ?? 5) - (SEVERITY_RANK[b.finding.severity] ?? 5));
+  return scored[0]?.finding.id;
 }
 
 function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {

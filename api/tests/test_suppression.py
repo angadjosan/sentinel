@@ -4,27 +4,18 @@ from fastapi.testclient import TestClient
 
 from sentinel_api.auth import create_token
 from sentinel_api.main import app
-from .conftest import process_tasks
+from .conftest import seed_finding
 
 
 def _create_finding(client: TestClient, token: str, marker: str) -> str:
     unique = f"{marker}-{uuid4().hex}"
     repo_name = f"repo-{unique}"
-    response = client.post(
-        "/plan",
+    ingested = seed_finding(
+        client, repo_name=repo_name, vuln_type="cmdi",
+        description=f"Add route that calls exec(`convert ${{req.query.file}}`) // {unique}",
         headers={"Authorization": f"Bearer {token}"},
-        json={
-            "repo_name": repo_name,
-            "content": f"Add route that calls exec(`convert ${{req.query.file}}`) // {unique}",
-            "with_retry": False,
-        },
     )
-    assert response.status_code == 200
-    process_tasks(1)
-    findings = client.get(f"/findings?repo_name={repo_name}", headers={"Authorization": f"Bearer {token}"})
-    assert findings.status_code == 200
-    assert findings.json(), "no findings created"
-    return findings.json()[0]["id"]
+    return ingested["finding_ids"][0]
 
 
 def test_member_suppression_requires_admin_approval(monkeypatch):

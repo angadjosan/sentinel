@@ -6,11 +6,12 @@ import { approveDeviceCode, approveSuppression, rejectSuppression, updateAccount
 export async function updateAccountConfigAction(formData: FormData) {
   const provider = stringValue(formData.get("provider")) ?? "local";
   const model = stringValue(formData.get("model")) ?? "ollama";
-  const apiKey = stringValue(formData.get("api_key"));
   const apiEndpoint = stringValue(formData.get("api_endpoint"));
   const monthlyTokenBudget = optionalNumber(formData.get("monthly_token_budget"), "monthly token budget");
   const sourceRetentionDays = requiredNumber(formData.get("source_retention_days"), "source retention days");
 
+  // No api_key field: LLM keys are configured and used locally now
+  // (`sentinel config set api-key`) — the server rejects one if sent.
   const patch: Parameters<typeof updateAccountConfig>[0] = {
     provider,
     model,
@@ -19,7 +20,6 @@ export async function updateAccountConfigAction(formData: FormData) {
     monthly_token_budget: monthlyTokenBudget,
     source_retention_days: sourceRetentionDays
   };
-  if (apiKey) patch.api_key = apiKey;
 
   await updateAccountConfig(patch);
 

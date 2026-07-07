@@ -511,6 +511,43 @@ class TestScanDB:
         assert count == 1
 
     @pytest.mark.asyncio
+    async def test_scan_diff_never_sends_env_file_content_to_llm(self):
+        """The SAST LLM prompt must never include .env-style file contents, even when
+        they're part of the same diff as legitimate code changes."""
+        from sentinel_worker.scan import scan_diff
+        from tests.conftest import MockLLMClient
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        llm = MockLLMClient()
+        diff = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1 +1,2 @@\n"
+            " import os\n"
+            "+print('hello')\n"
+            "diff --git a/.env.local b/.env.local\n"
+            "--- a/.env.local\n"
+            "+++ b/.env.local\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+DATABASE_URL=postgres://user:hunter2@host/db\n"
+            "+STRIPE_SECRET_KEY=sk_live_abcdef123456\n"
+        )
+        async with sm() as session:
+            async with session.begin():
+                await scan_diff(session, "repo", diff, _llm=llm)
+
+        sast_prompts = [call["user"] for call in llm.calls if "user" in call]
+        assert sast_prompts, "expected at least one SAST tool-use call"
+        for prompt in sast_prompts:
+            assert "hunter2" not in prompt
+            assert "STRIPE_SECRET_KEY" not in prompt
+            assert "DATABASE_URL" not in prompt
+        # The rest of the diff must still reach the LLM.
+        assert any("hello" in prompt for prompt in sast_prompts)
+
+    @pytest.mark.asyncio
     async def test_bootstrap_repo_creates_run_with_completed_status(self):
         """bootstrap_repo completes a Run with status=completed."""
         from sentinel_worker.scan import bootstrap_repo

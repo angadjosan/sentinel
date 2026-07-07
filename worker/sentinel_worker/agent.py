@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Run, TokenSpendByComponent
+from .payload_guard import SOURCE_CONTENT_MARKERS
 from .security import scrub_secrets
 
 log = structlog.get_logger(__name__)
@@ -43,18 +44,7 @@ class ToolCallEvent:
 
 
 def _assert_no_repo_content_in_system(system: str) -> None:
-    forbidden_markers = [
-        "+++ b/",
-        "--- a/",
-        "diff --git",
-        "AKIA",
-        "req.query",
-        "request.GET",
-        "db.query(",
-        "subprocess.",
-        "child_process",
-    ]
-    for marker in forbidden_markers:
+    for marker in SOURCE_CONTENT_MARKERS:
         if marker in system:
             raise ChannelViolationError(
                 f"repository content marker found in system prompt: {marker}"
