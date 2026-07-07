@@ -11,8 +11,12 @@ async def run_one_task(db: AsyncSession, *, worker_id: str, account_id: str | No
     claimed = await claim_next_task(db, worker_id=worker_id, account_id=account_id)
     if claimed is None:
         return None
+    # Run the task inside a savepoint so that a mid-task DB error (e.g. FK
+    # violation from a synthetic node_id) only rolls back the task's writes,
+    # leaving the outer transaction valid for fail_task/complete_task.
     try:
-        await execute_claimed_task(db, claimed, _llm=_llm)
+        async with db.begin_nested():
+            await execute_claimed_task(db, claimed, _llm=_llm)
     except Exception as exc:
         await fail_task(db, task_id=claimed.task.id, error=f"{type(exc).__name__}: {exc}")
         return claimed.task.id
@@ -37,6 +41,9 @@ async def execute_claimed_task(db: AsyncSession, claimed: ClaimedTask, *, _llm=N
             run_context=str(claimed.payload.get("run_context", "worker")),
             base_ref=claimed.payload.get("base_ref") if isinstance(claimed.payload.get("base_ref"), str) else None,
             paths=[str(p) for p in claimed.payload.get("paths", [])] if isinstance(claimed.payload.get("paths"), list) else [],
+            check_run_id=claimed.payload.get("check_run_id"),
+            installation_id=claimed.payload.get("installation_id"),
+            gh_repo=claimed.payload.get("repo") if isinstance(claimed.payload.get("repo"), str) else None,
             _llm=_llm,
         )
         return

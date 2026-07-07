@@ -1,7 +1,15 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { approveDeviceCode, approveSuppression, rejectSuppression, updateAccountConfig } from "../../lib/api";
+import {
+  approveDeviceCode,
+  approveSuppression,
+  mfaDisable,
+  rejectSuppression,
+  resendVerificationEmail,
+  revokeSession,
+  updateAccountConfig
+} from "../../lib/api";
 
 export async function updateAccountConfigAction(formData: FormData) {
   const provider = stringValue(formData.get("provider")) ?? "local";
@@ -49,6 +57,25 @@ export async function approveDeviceCodeAction(formData: FormData) {
     throw new Error("device code is required");
   }
   await approveDeviceCode(userCode.toUpperCase());
+  revalidatePath("/team");
+}
+
+export async function revokeSessionAction(formData: FormData) {
+  const id = stringValue(formData.get("id"));
+  if (!id) throw new Error("session id is required");
+  await revokeSession(id);
+  revalidatePath("/team");
+}
+
+export async function resendVerificationAction() {
+  await resendVerificationEmail();
+  revalidatePath("/team");
+}
+
+export async function mfaDisableAction(formData: FormData) {
+  const password = stringValue(formData.get("password"));
+  if (!password) throw new Error("password is required");
+  await mfaDisable(password);
   revalidatePath("/team");
 }
 

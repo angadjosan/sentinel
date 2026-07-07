@@ -4,9 +4,12 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import bcrypt
 from fastapi import Depends, Header, HTTPException
 from jose import JWTError, jwt
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from .deps import get_db
 
 ALGORITHM = "HS256"
 
@@ -16,6 +19,7 @@ class Principal:
     user_id: str
     account_id: str
     role: str
+    sid: str | None = None
 
 
 def jwt_secret() -> str:
@@ -41,22 +45,35 @@ def auth_required() -> bool:
     return os.getenv("SENTINEL_DEV_MODE", "0") != "1"
 
 
-def create_token(user_id: str, account_id: str, role: str = "admin", expires_minutes: int = 60) -> str:
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
+
+
+def create_token(user_id: str, account_id: str, role: str = "admin", expires_minutes: int = 60, sid: str | None = None) -> str:
     now = datetime.now(UTC)
-    return jwt.encode(
-        {
-            "sub": user_id,
-            "account_id": account_id,
-            "role": role,
-            "iat": int(now.timestamp()),
-            "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
-        },
-        jwt_secret(),
-        algorithm=ALGORITHM,
-    )
+    payload = {
+        "sub": user_id,
+        "account_id": account_id,
+        "role": role,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=expires_minutes)).timestamp()),
+    }
+    if sid:
+        payload["sid"] = sid
+    return jwt.encode(payload, jwt_secret(), algorithm=ALGORITHM)
 
 
-async def current_principal(authorization: str | None = Header(default=None)) -> Principal:
+async def current_principal(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Principal:
     if not auth_required():
         return Principal(user_id="dev", account_id="dev", role="admin")
     if not authorization or not authorization.startswith("Bearer "):
@@ -66,11 +83,38 @@ async def current_principal(authorization: str | None = Header(default=None)) ->
         payload = jwt.decode(token, jwt_secret(), algorithms=[ALGORITHM])
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="invalid bearer token") from exc
+
+    if payload.get("purpose"):
+        # Single-purpose ephemeral tokens (e.g. the MFA login challenge) are
+        # signed with the same secret but must never work as a general bearer
+        # token — they prove one narrow fact ("this request just presented a
+        # correct password"), not a full authenticated session.
+        raise HTTPException(status_code=401, detail="invalid bearer token")
+
+    sid = payload.get("sid")
+    if sid:
+        # Tokens minted through login/signup/device-approval carry a session id
+        # that can be revoked (logout, "sign out this device") before the JWT
+        # naturally expires. Tokens without a sid (e.g. tests calling
+        # create_token directly) are stateless, as before.
+        from sentinel_worker.models import Session as SessionRow  # local import avoids a cycle
+
+        session = await db.get(SessionRow, sid)
+        if session is None or session.revoked_at is not None or _as_utc(session.expires_at) < datetime.now(UTC):
+            raise HTTPException(status_code=401, detail="session revoked or expired")
+
     return Principal(
         user_id=str(payload.get("sub")),
         account_id=str(payload.get("account_id")),
         role=str(payload.get("role", "readonly")),
+        sid=str(sid) if sid else None,
     )
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def require_admin(principal: Principal = Depends(current_principal)) -> Principal:

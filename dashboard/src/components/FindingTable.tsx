@@ -5,23 +5,23 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { SeverityBadge } from "./SeverityBadge";
 import type { Finding } from "../lib/api";
-import { approveSuppression, rejectSuppression, suppressFinding } from "../lib/api";
+import { approveSuppressionAction, rejectSuppressionAction, suppressFindingAction } from "../app/findings/actions";
 
 export function FindingTable({ findings }: { findings: Finding[] }) {
   const router = useRouter();
 
   async function suppress(id: string) {
-    await suppressFinding(id, "Reviewed in dashboard");
+    await suppressFindingAction(id);
     router.refresh();
   }
 
   async function approve(id: string) {
-    await approveSuppression(id, "Approved in dashboard");
+    await approveSuppressionAction(id);
     router.refresh();
   }
 
   async function reject(id: string) {
-    await rejectSuppression(id, "Rejected in dashboard");
+    await rejectSuppressionAction(id);
     router.refresh();
   }
 

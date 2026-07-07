@@ -106,6 +106,8 @@ class DeviceStartResponse(BaseModel):
 
 class DeviceTokenResponse(BaseModel):
     access_token: str
+    refresh_token: str | None = None
+    expires_in: int | None = None
     account_id: str
     user_id: str
     database_url: str | None = None
@@ -344,3 +346,95 @@ class RemediationResponse(BaseModel):
     finding: FindingResponse
     graph_context: str
     remediation_plan: list[str]
+
+
+class SignupRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=8, max_length=200)
+    account_name: str | None = Field(default=None, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class AuthUserResponse(BaseModel):
+    id: str
+    email: str
+    name: str | None = None
+    role: str
+    account_id: str
+    account_name: str
+    email_verified: bool = False
+    mfa_enabled: bool = False
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    refresh_token: str | None = None
+    user: AuthUserResponse
+
+
+class LoginResponse(BaseModel):
+    mfa_required: bool = False
+    challenge_token: str | None = None
+    access_token: str | None = None
+    refresh_token: str | None = None
+    user: AuthUserResponse | None = None
+
+
+class MfaLoginRequest(BaseModel):
+    challenge_token: str = Field(min_length=1)
+    code: str = Field(min_length=6, max_length=8)
+
+
+class MfaEnrollResponse(BaseModel):
+    secret: str
+    otpauth_url: str
+
+
+class MfaConfirmRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=8)
+
+
+class MfaDisableRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1)
+    password: str = Field(min_length=8, max_length=200)
+
+
+class GithubOAuthRequest(BaseModel):
+    code: str = Field(min_length=1)
+    redirect_uri: str = Field(min_length=1)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=1)
+
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_in: int
+
+
+class SessionResponse(BaseModel):
+    id: str
+    label: str
+    created_at: str
+    expires_at: str
+    last_seen_at: str
+    user_agent: str | None = None
+    ip_address: str | None = None
+    current: bool = False
+
+

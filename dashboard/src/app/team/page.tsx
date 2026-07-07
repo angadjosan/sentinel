@@ -1,10 +1,23 @@
 import Link from "next/link";
-import { accountConfig, listFindings } from "../../lib/api";
+import { accountConfig, currentUser, listFindings, listSessions } from "../../lib/api";
 import { SeverityBadge } from "../../components/SeverityBadge";
-import { approveDeviceCodeAction, approveSuppressionAction, rejectSuppressionAction, updateAccountConfigAction } from "./actions";
+import {
+  approveDeviceCodeAction,
+  approveSuppressionAction,
+  mfaDisableAction,
+  rejectSuppressionAction,
+  resendVerificationAction,
+  revokeSessionAction,
+  updateAccountConfigAction
+} from "./actions";
 
 export default async function TeamPage() {
-  const [config, findings] = await Promise.all([accountConfig(), listFindings()]);
+  const [config, findings, sessions, user] = await Promise.all([
+    accountConfig(),
+    listFindings(),
+    listSessions().catch(() => []),
+    currentUser().catch(() => null)
+  ]);
   const pending = findings.filter((finding) => finding.status === "suppression_pending");
 
   return (
@@ -15,6 +28,53 @@ export default async function TeamPage() {
           <div className="muted">Account {config.account_id}</div>
         </div>
       </div>
+
+      {user ? (
+        <section className="panel" style={{ marginTop: 16 }}>
+          <div className="panel-header">
+            <h2>Security</h2>
+          </div>
+          <div className="panel-body">
+            <div className="kv" style={{ marginBottom: 16 }}>
+              <dt>Email</dt>
+              <dd>
+                {user.email} {user.email_verified ? <span className="badge low">verified</span> : <span className="badge medium">unverified</span>}
+                {!user.email_verified ? (
+                  <form action={resendVerificationAction} style={{ display: "inline", marginLeft: 8 }}>
+                    <button type="submit" style={{ padding: "2px 8px", fontSize: 12 }}>
+                      Resend verification email
+                    </button>
+                  </form>
+                ) : null}
+              </dd>
+              <dt>Two-factor auth</dt>
+              <dd>
+                {user.mfa_enabled ? (
+                  <>
+                    <span className="badge low">enabled</span>
+                    <form action={mfaDisableAction} className="settings-form compact-form" style={{ marginTop: 8, maxWidth: 320 }}>
+                      <label>
+                        <span>Current password (required to disable)</span>
+                        <input name="password" type="password" required autoComplete="current-password" />
+                      </label>
+                      <div className="form-actions">
+                        <button type="submit" className="danger" style={{ padding: "4px 12px", fontSize: 12 }}>
+                          Disable
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                ) : (
+                  <>
+                    <span className="badge medium">disabled</span>{" "}
+                    <Link href="/team/mfa/setup">Enable two-factor authentication</Link>
+                  </>
+                )}
+              </dd>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <section className="grid metrics">
         <div className="panel metric">
@@ -104,6 +164,51 @@ export default async function TeamPage() {
               </div>
             </form>
           </div>
+        </div>
+      </section>
+
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>Your sessions &amp; devices</h2>
+        </div>
+        <div className="panel-body">
+          {sessions.length ? (
+            <table className="table compact-table">
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>IP</th>
+                  <th>Created</th>
+                  <th>Expires</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessions.map((session) => (
+                  <tr key={session.id}>
+                    <td style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={session.user_agent ?? undefined}>
+                      {session.label}
+                      {session.current ? " (this session)" : ""}
+                      {session.user_agent ? ` — ${session.user_agent}` : ""}
+                    </td>
+                    <td>{session.ip_address ?? "—"}</td>
+                    <td>{new Date(session.created_at).toLocaleString()}</td>
+                    <td>{new Date(session.expires_at).toLocaleDateString()}</td>
+                    <td>
+                      <form action={revokeSessionAction}>
+                        <input type="hidden" name="id" value={session.id} />
+                        <button type="submit" className="danger" style={{ padding: "4px 12px", fontSize: 12 }}>
+                          Revoke
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="muted">No active sessions.</div>
+          )}
         </div>
       </section>
 

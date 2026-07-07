@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -29,8 +31,12 @@ from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next
 from sentinel_worker.trace_store import read_run_trace
 
 from .auth import Principal, create_token, current_principal, require_admin
+from .deps import get_db, get_tenant_db, init_schema
 from .deps import get_db, init_schema
+from .routers.auth import router as auth_router
 from .routers.repos import router as repos_router
+from .security import client_ip as _client_ip
+from .sessions import CLI_ACCESS_MINUTES, CLI_REFRESH_MINUTES, issue_session
 from .schemas import (
     AccountConfigPatch,
     AccountConfigResponse,
@@ -166,6 +172,7 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
 app.add_middleware(TenantContextMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.include_router(repos_router)
+app.include_router(auth_router)
 
 RUNS_TOTAL = Counter("sentinel_runs_total", "Runs by kind and status", ["kind", "status"])
 FINDINGS_TOTAL = Counter("sentinel_findings_total", "Findings by type and severity", ["vuln_type", "severity"])
@@ -259,6 +266,71 @@ async def metrics(principal: Principal = Depends(require_admin)) -> PlainTextRes
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
 
+def _github_install_account_id(installation_id: int) -> str:
+    """Deterministic account id per GitHub App installation, stable across webhook deliveries.
+
+    Using uuid5 (rather than a DB lookup-by-name) gives a valid-UUID account id so Postgres
+    tenant-schema routing (see sentinel_worker.db._schema_name) applies to GitHub App scans too.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"sentinel-github-app-installation:{installation_id}"))
+
+
+@app.post("/webhook/github")
+async def github_webhook(request: Request) -> dict[str, bool]:
+    """Receives GitHub App webhooks, enqueues a scan for opened/updated PRs, and posts a pending Check Run.
+
+    No CLI, no workflow file, no config — installing the App is enough. See non-code/shipping.md.
+    """
+    from sentinel_worker.github_app import (
+        GitHubAppNotConfiguredError,
+        create_check_run,
+        fetch_pr_diff,
+        get_installation_token,
+        verify_webhook_signature,
+        webhook_secret,
+    )
+
+    body = await request.body()
+    try:
+        secret = webhook_secret()
+    except GitHubAppNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not verify_webhook_signature(secret, request.headers.get("x-hub-signature-256"), body):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+
+    payload = json.loads(body)
+    event = request.headers.get("x-github-event")
+
+    if event == "pull_request" and payload.get("action") in ("opened", "synchronize"):
+        pr = payload["pull_request"]
+        installation_id = payload["installation"]["id"]
+        repo_full_name = payload["repository"]["full_name"]
+        head_sha = pr["head"]["sha"]
+
+        token = await get_installation_token(installation_id)
+        check_run_id = await create_check_run(token, repo_full_name, head_sha)
+        diff = await fetch_pr_diff(token, repo_full_name, pr["number"])
+
+        account_id = _github_install_account_id(installation_id)
+        async with contextlib.asynccontextmanager(get_tenant_db)(account_id) as db:
+            await enqueue_task(
+                db,
+                repo_name=repo_full_name,
+                kind="source",
+                payload={
+                    "diff": diff,
+                    "run_context": "ci",
+                    "check_run_id": check_run_id,
+                    "installation_id": installation_id,
+                    "repo": repo_full_name,
+                    "sha": head_sha,
+                },
+                account_id=account_id,
+            )
+
+    return {"ok": True}
+
+
 @app.post("/auth/device", response_model=DeviceStartResponse)
 async def start_device_auth(db: AsyncSession = Depends(get_db)) -> DeviceStartResponse:
     device_code = secrets.token_urlsafe(32)
@@ -269,10 +341,12 @@ async def start_device_auth(db: AsyncSession = Depends(get_db)) -> DeviceStartRe
         expires_at=datetime.now(UTC) + timedelta(seconds=DEVICE_CODE_TTL_SECONDS),
     )
     db.add(session)
+    dashboard_url = os.getenv("SENTINEL_DASHBOARD_URL", "").rstrip("/")
+    verification_url = f"{dashboard_url}/device?user_code={user_code}" if dashboard_url else "/auth/device/verify"
     return DeviceStartResponse(
         device_code=device_code,
         user_code=user_code,
-        verification_url="/auth/device/verify",
+        verification_url=verification_url,
         expires_in=DEVICE_CODE_TTL_SECONDS,
     )
 
@@ -287,8 +361,8 @@ async def device_verify_page(db: AsyncSession = Depends(get_db)) -> PlainTextRes
             media_type="text/plain",
         )
     return PlainTextResponse(
-        "To approve a device: POST /auth/device/approve with {\"user_code\": \"XXXX-XXXX\"} "
-        "and a valid admin Bearer token.",
+        "Set SENTINEL_DASHBOARD_URL so device logins point at the dashboard's /device page. "
+        "Without it: POST /auth/device/approve with {\"user_code\": \"XXXX-XXXX\"} and a valid admin Bearer token.",
         media_type="text/plain",
     )
 
@@ -311,51 +385,46 @@ async def approve_device_auth(payload: DeviceApproveRequest, db: AsyncSession = 
 
 
 @app.get("/auth/device/token", response_model=DeviceTokenResponse)
-async def device_auth_token(device_code: str, db: AsyncSession = Depends(get_db)) -> DeviceTokenResponse:
-    import os as _os
+async def device_auth_token(device_code: str, request: Request, db: AsyncSession = Depends(get_db)) -> DeviceTokenResponse:
     session = await db.get(DeviceAuthSession, device_code)
     if session is None:
         raise HTTPException(status_code=404, detail="device code not found")
     if _as_utc(session.expires_at) < datetime.now(UTC):
         session.status = "expired"
         raise HTTPException(status_code=410, detail="device code expired")
-    # Auto-approve on first poll. The device code is the security token —
-    # only someone who initiated the flow has it.
-    if session.status != "approved":
-        if _is_dev_mode():
-            # Local dev: reuse the single dev account so config/findings persist
-            # across restarts without re-login.
-            dev_user = await _dev_actor(db)
-            session.account_id = dev_user.account_id
-            session.user_id = dev_user.id
-        else:
-            # Cloud: create a fresh account + user for this device session so
-            # every login gets its own isolated account and API key.
-            from sentinel_worker.models import Account as _Account, User as _User
-            new_account = _Account(
-                name=f"user-{session.device_code[:8]}",
-                provider="anthropic",
-                model="claude-sonnet-4-6",
-            )
-            db.add(new_account)
-            await db.flush()
-            new_user = _User(
-                account_id=new_account.id,
-                email=f"device-{session.device_code[:16]}@sentinel.local",
-                role="admin",
-            )
-            db.add(new_user)
-            await db.flush()
-            session.account_id = new_account.id
-            session.user_id = new_user.id
+    if session.status != "approved" and _is_dev_mode():
+        # Local self-host dev mode auto-approves so `docker compose up -d`
+        # requires no login — it reuses the single dev account so config and
+        # findings persist across restarts without re-login.
+        dev_user = await _dev_actor(db)
+        session.account_id = dev_user.account_id
+        session.user_id = dev_user.id
         session.status = "approved"
         session.role = "admin"
         session.approved_at = now()
+    # In cloud mode this session only becomes "approved" via a real logged-in
+    # user hitting /auth/device/approve from the dashboard — see approve_device_auth.
     if session.status != "approved" or not session.account_id or not session.user_id:
         raise HTTPException(status_code=202, detail="authorization pending")
-    token = create_token(session.user_id, session.account_id, session.role or "admin")
+    user = await db.get(User, session.user_id)
+    if user is None:
+        # Dev-mode pseudo-user path with no DB row (shouldn't normally happen).
+        token = create_token(session.user_id, session.account_id, session.role or "admin", expires_minutes=CLI_ACCESS_MINUTES)
+        return DeviceTokenResponse(access_token=token, account_id=session.account_id, user_id=session.user_id, database_url=os.getenv("SENTINEL_WORKER_DATABASE_URL"))
+    issued = await issue_session(
+        db,
+        user,
+        label="cli",
+        session_minutes=CLI_REFRESH_MINUTES,
+        access_minutes=CLI_ACCESS_MINUTES,
+        with_refresh=True,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=_client_ip(request),
+    )
     return DeviceTokenResponse(
-        access_token=token,
+        access_token=issued.access_token,
+        refresh_token=issued.refresh_token,
+        expires_in=issued.expires_in,
         account_id=session.account_id,
         user_id=session.user_id,
         database_url=os.getenv("SENTINEL_WORKER_DATABASE_URL"),
