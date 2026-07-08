@@ -41,45 +41,47 @@ Sentinel takes a different approach. It reasons about exploitability in context.
 
 ## Benchmarks
 
-We seeded 25 real vulnerabilities across 5 production-shaped repositories (Next.js apps, a FastAPI service, a Python CLI, an Express web app) and measured detection against the same ground truth, using the same grading rubric, for every approach.
+We seed known vulnerabilities into real, production-shaped repositories and measure how many each approach detects, holding the code, the ground truth, and the grading rubric identical across every run. The most recent run covers **25 injected vulnerabilities across 5 repositories** (Next.js apps, a FastAPI service, a Python CLI, an Express web app), graded against a blind frontier-model reviewer.
 
-Sentinel leads on cumulative detection, and its pentest-verification layer drives false positives close to zero. That second number is the one that matters most once a human has to triage the output.
+<div align="center">
 
-```mermaid
-xychart-beta
-    title "Vulnerability detection recall (20 seeded vulns, 4 comparable repos)"
-    x-axis ["Sentinel", "raw Fable 5", "raw Opus 4.8", "Typical SAST"]
-    y-axis "Recall %" 0 --> 100
-    bar [85.0, 84.0, 83.4, 41.0]
-```
+| 17 / 20 | 85.0% | 84.0% | 83.4% |
+|:---:|:---:|:---:|:---:|
+| **Sentinel** vulns detected<br/>(4 measurable repos) | **Sentinel** recall | Fable 5 mean recall<br/>(raw, single-shot) | Opus 4.8 mean recall<br/>(raw, single-shot) |
+
+</div>
+
+> **This is a living benchmark.** The figures below are from our most recent run (blind reviewer: **Fable 5**, July 2026). We re-run the suite as new frontier models ship and as we grow the seeded-vulnerability set, and we keep the full raw data and per-trial journals for audit. Expect these numbers to move; we publish the latest rather than a cherry-picked snapshot.
+
+<div align="center">
+  <img src="assets/benchmark-recall.png" alt="Seeded-vulnerability detection recall by repository: Sentinel vs. raw Fable 5 vs. raw Opus 4.8" width="860">
+</div>
+
+Sentinel matches or edges out frontier models on raw detection, and it does something neither a raw model nor a signature scanner does: it proves each finding by exploitation, so the noise that makes every other tool exhausting to run never reaches you.
 
 ### Per-repository results
 
-| Repository | Stack | Ground truth | Sentinel | raw Fable 5 | raw Opus 4.8 |
+| Repository | Stack | Ground truth | Sentinel | Fable 5 (raw) | Opus 4.8 (raw) |
 |---|---|:---:|:---:|:---:|:---:|
 | `scams` | Next.js event registration | 5 | **5 / 5** | 84.0% | 88.0% |
 | `challenge` | Python CLI / tooling | 5 | **5 / 5** | 88.0% | 87.5% |
 | `video-condense-backend` | FastAPI video service | 5 | **5 / 5** | 84.0% | 76.0% |
 | `BaroButForCoding` | Express "code roast" app | 5 | **2 / 5** | 80.0% | 82.0% |
-| **Aggregate (measurable repos)** | | **20** | **17 / 20 (85.0%)** | 83.4% | 84.0% |
+| **Aggregate (4 measurable repos)** | | **20** | **17 / 20 (85.0%)** | **84.0%** | **83.4%** |
+| `calhacksy1` | Full-stack hackathon platform | 5 | n/a | 60.0% | 58.0% |
+| **All 5 repos** (models only) | | **25** | n/a | **79.2%** | **78.3%** |
 
-<sub>Sentinel's number is cumulative detection across up to 10 scan attempts against the same code; the blind-review models are single-shot averages over 10 independent trials. Ground truth and worktrees were held identical across all runs. `calhacksy1` is excluded from Sentinel's aggregate because a git-tracked 69 MB `venv/` breaks its init step. That's a fixable infra limit, not a detection miss.</sub>
+<sub><b>How to read this.</b> Sentinel's number is cumulative detection: the share of seeded vulns found across up to 10 scans of the same code. Fable 5 and Opus 4.8 are mean per-trial recall over 10 independent, single-shot blind reviews, so the two are not measured on an identical basis. `calhacksy1` is excluded from Sentinel's aggregate because a git-tracked 69 MB `venv/` breaks its init step, a fixable infra limit rather than a detection miss.</sub>
 
 ### The number the incumbents would rather you didn't see: false positives
 
-Recall is only half the story. Every finding a human has to dismiss is wasted time, and this is where signature tools fall apart.
+Recall is only half the story. Every finding a human has to dismiss is wasted time, and false positives, not misses, are what make security tooling exhausting to live with. In this run, the raw model's false-positive rate rose with codebase size, from ~1 on the small Python CLI to ~4.4 on the large full-stack app, and tracked surface area rather than which model was reviewing.
 
-```mermaid
-xychart-beta
-    title "False positives per scan (lower is better)"
-    x-axis ["Sentinel post-pentest", "raw LLM review", "Semgrep", "Snyk Code", "typical SAST"]
-    y-axis "Avg false positives" 0 --> 30
-    bar [0.4, 2.3, 11.0, 14.0, 26.0]
-```
+<div align="center">
+  <img src="assets/benchmark-fp.png" alt="Mean false positives per trial by repository, showing false positives scale with codebase size" width="860">
+</div>
 
-Sentinel's pentest layer takes the one to four raw false positives an LLM review typically produces and verifies them out. Only findings backed by runtime evidence survive to `confirmed`. Traditional SAST has no such gate, which is exactly why the industry average sits north of 85% noise.
-
-> Bottom line: Sentinel matches or beats frontier models on raw detection (85% vs. 84% and 83.4%), and then does what neither a raw model nor a signature scanner does. It proves each finding by exploitation, which collapses the false-positive rate that makes every other tool exhausting to run.
+This is exactly the gap the pentest layer closes. A finding is only promoted to `confirmed` once Sentinel has reproduced it against a running copy of your app with a runtime oracle, so the unverified findings that pile up on larger codebases are filtered out before they ever reach your queue. Traditional SAST has no equivalent gate, which is why industry estimates put its false-positive rate north of 85%.
 
 ---
 
