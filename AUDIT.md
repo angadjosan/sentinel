@@ -9,9 +9,9 @@
 ## How to use this document
 
 1. **Read §1–§3** once — they lock the target architecture and product decisions every task must obey.
-2. **Use §4** for phase ordering and dependency graph — do not start a task until its prerequisites are met.
-3. **Hand off §6 subagent workstreams** — **5 tasks (`W1`–`W5`)**, not 20. Copy one block into a new agent session.
-4. **Verify with §5 acceptance gates** before calling a phase done.
+2. **Read §6 “Three clocks”** — when to **start**, **merge**, and run **integration smoke**. All five workstreams **start in parallel**; gates (§5) apply at integration, not at kickoff.
+3. **Hand off §6 subagent workstreams** — **5 tasks (`W1`–`W5`)**. Copy one prompt block into a new agent session on **day 1**.
+4. **Verify with §5 acceptance gates** after merging — not before starting individual streams.
 5. The audit findings are in **§2**; phases in **§4**; handoff in **§6**.
 
 ### How many “paths”?
@@ -22,15 +22,45 @@
 | **Implementation workstreams** | **5** | Subagent handoff packages (`W1`–`W5`). |
 | ~~SA-00 … SA-20~~ | ~~21~~ | **Retired** — was a fine-grained breakdown of the same 5 streams; use `W1`–`W5` instead. |
 
+### Three clocks (start ≠ merge ≠ done)
+
+This is the most common source of confusion. **Parallel work does not mean “everything works end-to-end on day 1.”** It means five agents can code simultaneously on separate branches.
+
+| Clock | Question it answers | When | W1–W5 |
+|-------|---------------------|------|-------|
+| **① Start** | Can I begin coding? | **Day 1 — all five** | ✅ Launch every workstream immediately on its own branch |
+| **② Merge** | Can this PR land on `main`? | When **your** stream’s tests pass on **your** branch | Each stream merges independently; see merge order below |
+| **③ Integration** | Does the **product** work E2E? | **Once** after streams are combined | Run Gates 0–4 (§5) — e.g. `sentinel source` → `sentinel pentest` → dashboard |
+
+**Analogy:** five contractors renovate different rooms the same week (① start). Each finishes their room and gets sign-off (② merge). You only host the housewarming when **all** rooms are done (③ integration).
+
+**What is *not* blocked on day 1**
+
+- W2 can implement `enqueuePentest` + poll before W1’s worker runs — CLI will error on pentest until W1 merges; that’s expected mid-flight.
+- W4 can write pentest E2E tests first (TDD) — mark `@pytest.mark.xfail` until W1 lands.
+- W5 can build dashboard forms against §3 D1 field names — no need to wait for W2.
+- W3 can delete webhook diff storage without waiting for W2 — **except** “delete local pentest” belongs to W2, not W3.
+
+**What *is* blocked until integration (③)**
+
+- Full manual smoke: `sentinel pentest` succeeding end-to-end (needs W1 + W2).
+- Gate 0 alone can pass after W1 merges; Gate 1 needs W1 + W2; Gates 2–4 need the relevant streams merged.
+
+**Suggested merge order** (reduces git conflicts, not start order):
+
+`W1 → W4 → W2 → W3 → W5` → run integration smoke (Gates 0–4)
+
 ### Subagent invocation template
 
 ```text
 You are implementing Sentinel workstream WN from AUDIT.md.
 
-Read AUDIT.md §1 (target architecture) and §3 (locked decisions) first.
-Implement only WN. Do not expand into other workstreams unless WN explicitly lists it as in-scope.
-Run the tests listed in WN before finishing.
-If blocked, stop and report which workstream must land first (see §6 dependency order).
+Read §1 (target architecture), §3 (locked decisions), and §6 "Three clocks" first.
+Implement only WN on branch feat/wN-.... Start immediately — do not wait for other streams.
+Respect file ownership in §6 (don't edit other streams' owned paths).
+Run the tests listed in WN before opening your PR.
+Your PR can merge before integration smoke; E2E may be incomplete until other streams land.
+If you need a schema/API shape, use §3 D1 — do not invent conflicting fields.
 ```
 
 ---
@@ -203,9 +233,11 @@ Worker writes finding confirmation directly in `run_pentest`. Deprecate public `
 
 ---
 
-## §5 Phase acceptance gates (checklists)
+## §5 Phase acceptance gates (integration checklist)
 
-### Gate 0 — Cloud pentest executes
+Run these **after merging** workstreams — not before starting them. Individual streams may satisfy subsets on their branch (noted per gate).
+
+### Gate 0 — Cloud pentest executes *(needs W1 merged)*
 
 - [ ] `runner.py` handles `kind=pentest` without raising
 - [ ] Worker test: enqueue → claim → complete updates finding
@@ -213,27 +245,27 @@ Worker writes finding confirmation directly in `run_pentest`. Deprecate public `
 - [ ] Oracle rejects `behavioral_proof` without HTTP/sanitizer evidence
 - [ ] Pentest run row exists with `kind=pentest` and trace in Postgres
 
-### Gate 1 — CLI integrated
+### Gate 1 — CLI integrated *(needs W1 + W2 merged)*
 
 - [ ] `sentinel pentest <id>` never spawns local pentest subprocess
 - [ ] CLI polls until run terminal; prints confirmed/not_reproducible
 - [ ] `scan --pentest` enqueues one cloud pentest per ingested finding ID
 - [ ] Repo pentest config readable from cloud API
 
-### Gate 2 — Legacy removed
+### Gate 2 — Legacy removed *(needs W3 merged)*
 
 - [ ] GitHub webhook does not store diff in task payload
 - [ ] `POST /repos/{id}/plan` deleted or fixed; no `NameError`
 - [ ] README does not claim local pentest
 - [ ] `local_cli pentest` subcommand removed
 
-### Gate 3 — Tests trustworthy
+### Gate 3 — Tests trustworthy *(needs W4 merged)*
 
 - [ ] At least one test fails if `runner.py` pentest handler removed
 - [ ] No test named `*confirmed*` that only asserts `status=queued`
 - [ ] SQLi fixture test exists in `worker/tests/`
 
-### Gate 4 — Customer-ready docs/UX
+### Gate 4 — Customer-ready docs/UX *(needs W5 merged)*
 
 - [ ] `sentinel doctor` exits non-zero with actionable messages
 - [ ] Dashboard Team page explains SAST local / pentest cloud split
@@ -245,34 +277,41 @@ Worker writes finding confirmation directly in `run_pentest`. Deprecate public `
 
 There are **3 architecture paths** in the repo (§2). This plan collapses them into **1 target** using **5 workstreams**. Each workstream is one subagent session.
 
-### Dependency order
+> **Parallel by default.** See **§6 “Three clocks”** at the top of this doc. **Start all five on day 1.** Gates (§5) = integration checklist, not “wait for W1 before opening W2.”
+
+### File ownership (avoid merge fights)
+
+| Workstream | Branch name | Start | Owns exclusively | Do not touch |
+|------------|-------------|-------|------------------|--------------|
+| **W1** | `feat/w1-cloud-pentest` | Day 1 | `pentest.py`, `oracle.py`, pentest worker tests, repo migration | `cli/**`, `dashboard/**`, webhook |
+| **W2** | `feat/w2-cli-cloud` | Day 1 | `cli/**`, `localEngine.ts`, delete local pentest in `local_engine` / `local_cli` | `pentest.py`, webhook |
+| **W3** | `feat/w3-legacy-cleanup` | Day 1 | webhook, dead routes/schemas, `FindingGraph`, `ensure.ts` | local pentest removal (W2), `pentest.py` |
+| **W4** | `feat/w4-tests` | Day 1 | new tests, SQLi fixture, conftest scope | production code unless test requires tiny hook |
+| **W5** | `feat/w5-ux-docs` | Day 1 | `dashboard/**`, `README.md`, `non-code/` | API schema changes (use §3 D1) |
+
+**Shared files — edit only your slice:**
+
+| File | W1 | W2 | W3 |
+|------|----|----|-----|
+| `runner.py` | *add* `pentest` handler | — | *remove* `source`/`plan`/`init` handlers |
+| `schemas.py` | *add* repo pentest fields | — | *remove* dead request types |
+
+Merge both sides; conflicts here are expected and small.
+
+### Parallel execution diagram
 
 ```
-W1 Cloud pentest (worker)     ──► Gate 0
-        │
-        ▼
-W2 CLI → cloud                ──► Gate 1
-        │
-        ├──────────────────┐
-        ▼                  ▼
-W3 Legacy cleanup      W4 Tests (can start after W1)
-        │                  │
-        └────────┬─────────┘
-                 ▼
-           W5 UX + docs       ──► Gates 2–4
+  DAY 1 — all agents start
+  ────────────────────────
+  W1 worker     W2 CLI      W3 legacy     W4 tests     W5 docs
+     │             │             │             │            │
+     └─────────────┴─────────────┴─────────────┴────────────┘
+                              │
+                    merge: W1→W4→W2→W3→W5
+                              │
+                              ▼
+                   ③ Integration smoke (Gates 0–4)
 ```
-
-| Order | Workstream | Gates | Can parallel with |
-|-------|------------|-------|-------------------|
-| 1 | **W1** Cloud pentest | 0 | — |
-| 2 | **W2** CLI → cloud | 1 | — (needs W1) |
-| 3 | **W3** Legacy cleanup | 2 | W4 after W1 |
-| 3 | **W4** Tests | 3 | W3 after W2 |
-| 4 | **W5** UX + docs | 4 | W3, W4 |
-
-**Rule:** Do not start W3 until W2 merges (need working cloud pentest before deleting local pentest + webhook).
-
----
 
 ### W1 — Cloud pentest (make worker execute)
 
@@ -301,7 +340,7 @@ Workstream W1 from AUDIT.md: Implement cloud pentest end-to-end.
 
 Read §1, §3, §5 Gate 0. Repo pentest config (staging + local_worker modes), runner pentest handler, HTTP payload dispatch, hardened oracle, worker LLM env, worker-internal confirmation, integration tests.
 
-Do NOT change CLI (W2) or delete local pentest yet. Gate 0 must pass: POST /pentest → worker → finding updated with HTTP proof in tests.
+Do NOT edit cli/** (W2) or dashboard/** (W5). Parallel OK with W2/W3/W4/W5 on other paths. Gate 0 must pass on your branch before merge.
 ```
 
 ---
@@ -309,7 +348,7 @@ Do NOT change CLI (W2) or delete local pentest yet. Gate 0 must pass: POST /pent
 ### W2 — CLI → cloud (trigger pentest, kill local pentest)
 
 **Gates:** 1  
-**Prerequisites:** W1 merged  
+**Parallel:** ✅ Start with W1; E2E pentest works after both merge  
 **Effort:** ~2–3 days  
 **Phases:** P1.1–P1.4, P4.1  
 
@@ -331,9 +370,7 @@ Do NOT change CLI (W2) or delete local pentest yet. Gate 0 must pass: POST /pent
 ```text
 Workstream W2 from AUDIT.md: CLI cloud pentest integration.
 
-Prerequisite: W1 merged (worker executes pentest). Add enqueuePentest + poll, rewrite pentest/scan --pentest, remove all local pentest code, sync pentest config to cloud, implement sentinel doctor.
-
-Do NOT remove GitHub webhook (W3). Gate 1 must pass.
+Parallel with W1/W3/W4/W5. Add enqueuePentest + poll, rewrite pentest/scan --pentest, remove local pentest code, sync pentest config, implement sentinel doctor. Do NOT edit worker/pentest.py (W1) or webhook (W3). Gate 1 passes after W1 merges.
 ```
 
 ---
@@ -341,7 +378,7 @@ Do NOT remove GitHub webhook (W3). Gate 1 must pass.
 ### W3 — Legacy cleanup (one architecture in code)
 
 **Gates:** 2  
-**Prerequisites:** W2 merged  
+**Parallel:** ✅ Start day 1; do NOT delete local pentest (W2 owns that)  
 **Effort:** ~2 days  
 **Phases:** P2.1–P2.4  
 
@@ -362,7 +399,7 @@ Do NOT remove GitHub webhook (W3). Gate 1 must pass.
 ```text
 Workstream W3 from AUDIT.md: Legacy architecture cleanup.
 
-Prerequisite: W2 merged. Remove webhook diff scan, dead runner kinds/routes/schemas, narrow source_store exposure. No code path uploads source on CLI scan. Update shipping.md for CI Action path.
+Parallel with all streams. Remove webhook diff scan, dead runner kinds/routes/schemas, narrow source_store. Do NOT remove local pentest (W2) or edit cli/** (W2). Gate 2 after merge.
 ```
 
 ---
@@ -370,7 +407,7 @@ Prerequisite: W2 merged. Remove webhook diff scan, dead runner kinds/routes/sche
 ### W4 — Tests (trustworthy CI)
 
 **Gates:** 3  
-**Prerequisites:** W1 merged (can run parallel with W2/W3 after that)  
+**Parallel:** ✅ Start day 1; pentest E2E may `@pytest.mark.xfail` until W1 merges  
 **Effort:** ~1–2 days  
 **Phases:** P3.1–P3.4, part of P5.4  
 
@@ -390,7 +427,7 @@ Prerequisite: W2 merged. Remove webhook diff scan, dead runner kinds/routes/sche
 ```text
 Workstream W4 from AUDIT.md: Realign tests.
 
-Prerequisite: W1 merged. Fix misleading pentest API tests, add SQLi SAST fixture test, narrow _PatternLLM scope, surface adapter coverage warnings on CLI. Gate 3 checkboxes must pass.
+Parallel with all streams. Fix misleading tests, SQLi fixture, narrow _PatternLLM, adapter warnings on CLI. Pentest E2E xfail OK until W1 lands. Gate 3 after integration merge.
 ```
 
 ---
@@ -398,7 +435,7 @@ Prerequisite: W1 merged. Fix misleading pentest API tests, add SQLi SAST fixture
 ### W5 — UX + docs (customer-facing truth)
 
 **Gates:** 4  
-**Prerequisites:** W2 merged (W3/W4 can overlap)  
+**Parallel:** ✅ Start day 1; use §3 D1 field names (same as W1), don't add new API fields  
 **Effort:** ~2 days  
 **Phases:** P4.2–P4.4, P4.3  
 
@@ -418,7 +455,7 @@ Prerequisite: W1 merged. Fix misleading pentest API tests, add SQLi SAST fixture
 ```text
 Workstream W5 from AUDIT.md: Dashboard UX and documentation.
 
-Prerequisite: W2 merged. Dashboard pentest config + honest labels, suppression reasons, README/non-code rewrite for target architecture (§1). Gate 4 checkboxes must pass.
+Parallel with all streams. Dashboard pentest config UI + README for §1 architecture. Schema from §3 D1 only. Gate 4 after integration merge.
 ```
 
 ---
@@ -436,15 +473,19 @@ Do **not** assign these until Gates 0–4 pass. Fold into a future W6 if needed.
 
 ---
 
-## §7b Suggested schedule (3 agents max)
+## §7b Launch checklist (day 1)
 
-| Week | Agent A | Agent B | Agent C |
-|------|---------|---------|---------|
-| 1 | **W1** | — | — |
-| 2 | **W2** | **W4** (after W1 mid-week) | — |
-| 3 | **W3** | **W5** | optional post-MVP |
+| Agent | Branch | Prompt section |
+|-------|--------|----------------|
+| A | `feat/w1-cloud-pentest` | W1 prompt block |
+| B | `feat/w2-cli-cloud` | W2 prompt block |
+| C | `feat/w3-legacy-cleanup` | W3 prompt block |
+| D | `feat/w4-tests` | W4 prompt block |
+| E | `feat/w5-ux-docs` | W5 prompt block |
 
-Minimum serial path: **W1 → W2 → W3** (one agent, ~2 weeks). Full plan with polish: **W1 → W2 → (W3 + W4 + W5)** (~3 weeks, 2–3 agents).
+**After all PRs merged:** run Gates 0–4 (§5) as one integration smoke session.
+
+One person solo: same five workstreams, but run them **serially** — still use the gates; ignore “day 1 parallel.”
 
 ---
 
@@ -481,16 +522,20 @@ Minimum serial path: **W1 → W2 → W3** (one agent, ~2 weeks). Full plan with 
 
 **North star:** CLI runs SAST locally and syncs graph + findings to cloud; cloud worker runs pentest against configured staging URL (or `local_worker` on self-host).
 
-**3 architecture paths → 1 target, via 5 workstreams:**
+| Clock | Rule |
+|-------|------|
+| **Start (①)** | All **W1–W5** on day 1, separate branches |
+| **Merge (②)** | Each stream when its own tests pass; order `W1→W4→W2→W3→W5` reduces conflicts |
+| **Integration (③)** | Gates 0–4 (§5) once combined — product E2E |
+
+**3 architecture paths → 1 target, via 5 parallel workstreams:**
 
 | # | Workstream | One line |
 |---|------------|----------|
 | W1 | Cloud pentest | Worker executes; HTTP + oracle |
 | W2 | CLI → cloud | Enqueue/poll; delete local pentest |
 | W3 | Legacy cleanup | Webhook, dead routes, one architecture |
-| W4 | Tests | No fake green pentest/SAST tests |
+| W4 | Tests | No fake-green pentest/SAST tests |
 | W5 | UX + docs | Dashboard + README tell the truth |
 
-**Critical path:** W1 → W2 → W3. W4 and W5 after W2.
-
-**Hand off one `W1`–`W5` prompt block per subagent.** When Gates 0–4 in §5 pass, the repo matches §1.
+Hand off one **W1–W5** prompt block per subagent on day 1. Integration smoke when all are merged.
