@@ -65,6 +65,11 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
             node_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(nodes)"))}
             if "deleted" not in node_columns:
                 await conn.execute(text("ALTER TABLE nodes ADD COLUMN deleted BOOLEAN DEFAULT 0"))
+            graph_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(graphs)"))}
+            if "base_graph_id" not in graph_columns:
+                await conn.execute(text("ALTER TABLE graphs ADD COLUMN base_graph_id TEXT"))
+            if "promoted_at" not in graph_columns:
+                await conn.execute(text("ALTER TABLE graphs ADD COLUMN promoted_at TIMESTAMP"))
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:

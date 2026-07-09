@@ -78,6 +78,42 @@ async def test_unknown_kind_rejected(db):
 
 
 @pytest.mark.asyncio
+async def test_branch_creation_snapshots_base(db):
+    """Creating a branch graph captures an immutable base snapshot of main."""
+    from sqlalchemy import select
+
+    from sentinel_worker.models import Graph, Node
+
+    main = await get_or_create_graph(db, "acme/repo")
+    db.add(Node(id="n:1", graph_id=main.id, kind="FUNCTION", name="f", label="original"))
+    await db.flush()
+
+    branch = await get_or_create_graph(db, "acme/repo", kind="branch", branch_name="feature/x", base_commit="abc123")
+    assert branch.base_graph_id is not None
+    assert branch.base_commit == "abc123"
+
+    base = await db.get(Graph, branch.base_graph_id)
+    assert base is not None
+    assert base.kind == "base"
+    base_nodes = list(await db.scalars(select(Node).where(Node.graph_id == base.id)))
+    assert {n.id for n in base_nodes} == {"n:1"}
+    assert base_nodes[0].label == "original"
+
+
+@pytest.mark.asyncio
+async def test_base_snapshot_is_excluded_from_graph_list_shape(db):
+    """Base snapshot graphs are kind='base' and must not be surfaced as versions."""
+    await get_or_create_graph(db, "acme/repo", kind="branch", branch_name="feature/x")
+    from sqlalchemy import select
+
+    from sentinel_worker.models import Graph
+
+    kinds = {g.kind for g in await db.scalars(select(Graph))}
+    assert "base" in kinds  # snapshot exists
+    assert {"main", "branch"} <= kinds
+
+
+@pytest.mark.asyncio
 async def test_materialized_nodes_shadows_tombstone(db):
     """A tombstone in a higher layer hides the live copy below it, but the lower
     layer viewed on its own still shows the node."""

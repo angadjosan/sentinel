@@ -149,9 +149,15 @@ class Graph(Base):
     session_id: Mapped[str | None] = mapped_column(String, nullable=True)
     parent_id: Mapped[str | None] = mapped_column(String, ForeignKey("graphs.id"), nullable=True)
     base_commit: Mapped[str | None] = mapped_column(String, nullable=True)
+    # For a branch graph: the immutable `kind="base"` snapshot of main captured
+    # at branch-creation time. It is the merge base for the 3-way merge
+    # (base / current-main / branch). Null for legacy branches, main, and
+    # session graphs — merge falls back to a 2-way upsert when absent.
+    base_graph_id: Mapped[str | None] = mapped_column(String, ForeignKey("graphs.id"), nullable=True)
     status: Mapped[str] = mapped_column(String, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Node(Base):
