@@ -43,32 +43,40 @@ def reset_account_context(token: contextvars.Token) -> None:
     _current_account_id.reset(token)
 
 
-def _normalize_postgres_url(url: str) -> str:
+def _normalize_postgres_url(url: str) -> tuple[str, bool]:
     """Rewrite libpq-style Postgres URLs (e.g. from Neon) for SQLAlchemy + asyncpg.
 
     asyncpg's connect() rejects libpq query params like `sslmode`/`channel_binding`
-    with a TypeError, so they're dropped here; SSL is still enforced via connect_args.
+    with a TypeError, so they're dropped here. Returns whether the original URL
+    requested SSL (e.g. Neon's `sslmode=require`), so callers only enforce it when
+    asked — plain local Postgres (docker-compose) has no SSL to negotiate.
     """
     parts = urlsplit(url)
     scheme = "postgresql+asyncpg"
     query = parse_qs(parts.query)
-    query.pop("sslmode", None)
+    sslmode = query.pop("sslmode", [None])[0]
     query.pop("channel_binding", None)
-    return urlunsplit((scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment))
+    wants_ssl = sslmode not in (None, "disable")
+    return urlunsplit((scheme, parts.netloc, parts.path, urlencode(query, doseq=True), parts.fragment)), wants_ssl
 
 
 def database_url() -> str:
+    resolved, _wants_ssl = _resolve_database_url()
+    return resolved
+
+
+def _resolve_database_url() -> tuple[str, bool]:
     if url := os.getenv("DATABASE_URL"):
         if url.startswith(("postgresql://", "postgres://")):
             return _normalize_postgres_url(url)
-        return url
+        return url, False
     dev_db = Path(os.getenv("SENTINEL_DEV_DB", str(Path.home() / ".sentinel" / "sentinel.dev.db")))
     try:
         dev_db.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         dev_db = Path(tempfile.gettempdir()) / "sentinel" / "sentinel.dev.db"
         dev_db.parent.mkdir(parents=True, exist_ok=True)
-    return f"sqlite+aiosqlite:///{dev_db}"
+    return f"sqlite+aiosqlite:///{dev_db}", False
 
 
 def _is_postgres(engine: AsyncEngine) -> bool:
@@ -76,13 +84,19 @@ def _is_postgres(engine: AsyncEngine) -> bool:
 
 
 def create_engine(url: str | None = None) -> AsyncEngine:
-    resolved = url or database_url()
+    if url is not None:
+        resolved, wants_ssl = (_normalize_postgres_url(url) if url.startswith(("postgresql://", "postgres://")) else (url, False))
+    else:
+        resolved, wants_ssl = _resolve_database_url()
     connect_args: dict = {}
     kwargs: dict = {}
     if "postgresql" in resolved:
         # PgBouncer (Neon's pooled endpoint) doesn't support asyncpg prepared statements.
         connect_args["statement_cache_size"] = 0
-        connect_args["ssl"] = "require"
+        if wants_ssl:
+            # Neon (and other managed Postgres) requires SSL; a plain local
+            # docker-compose Postgres has no SSL configured to negotiate.
+            connect_args["ssl"] = "require"
         if os.getenv("VERCEL"):
             # Serverless: Neon closes idle connections in seconds, so don't pool —
             # each request gets a fresh connection and closes it immediately.

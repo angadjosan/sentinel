@@ -6,14 +6,14 @@ import "@xyflow/react/dist/style.css"
 import type { GraphNode, GraphEdge } from "../lib/api"
 
 const NODE_COLORS: Record<string, string> = {
-  ROUTE: "#3b82f6",
-  FUNCTION: "#6b7280",
-  MIDDLEWARE: "#10b981",
-  PARAMETER: "#f59e0b",
-  FINDING: "#ef4444",
-  FILE: "#8b5cf6",
-  DEPENDENCY: "#ec4899",
-  CLASS: "#0ea5e9",
+  ROUTE: "#5ea8ff",
+  FUNCTION: "#2b3a33",
+  MIDDLEWARE: "#2dd482",
+  PARAMETER: "#ffd15c",
+  FINDING: "#ff5d5d",
+  FILE: "#8b93a7",
+  DEPENDENCY: "#ff9e4f",
+  CLASS: "#5ea8ff",
 }
 
 interface GraphExplorerProps {
@@ -59,11 +59,10 @@ function layoutNodes(nodes: GraphNode[], edges: GraphEdge[]): Node[] {
       position: pos,
       data: {
         label: (
-          <div style={{ fontSize: 11, maxWidth: 180 }}>
-            <div style={{ fontWeight: 700, fontSize: 10, opacity: 0.7 }}>{n.kind}</div>
-            <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.name}</div>
-            {n.label && <div style={{ opacity: 0.75, fontSize: 10 }}>{n.label}</div>}
-            {n.file && <div style={{ opacity: 0.5, fontSize: 9 }}>{n.file.split("/").slice(-2).join("/")}</div>}
+          <div style={{ fontSize: 12, maxWidth: 190 }}>
+            <div style={{ fontWeight: 700, fontSize: 9.5, opacity: 0.7, letterSpacing: "0.04em" }}>{n.kind}</div>
+            <div style={{ fontWeight: 650, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.name}</div>
+            {n.label && <div style={{ opacity: 0.8, fontSize: 10.5, marginTop: 1 }}>{n.label}</div>}
           </div>
         ),
         raw: n,
@@ -71,7 +70,7 @@ function layoutNodes(nodes: GraphNode[], edges: GraphEdge[]): Node[] {
       style: {
         background: NODE_COLORS[n.kind] ?? "#9ca3af",
         color: "white",
-        border: n.is_entry_point ? "2px solid white" : n.is_sink ? "2px solid #fbbf24" : "none",
+        border: n.is_entry_point ? "2px solid #e8efe9" : n.is_sink ? "2px solid #ff5d5d" : "1px solid rgba(255,255,255,0.08)",
         borderRadius: 8,
         padding: "6px 10px",
         minWidth: 140,
@@ -109,7 +108,7 @@ export function GraphExplorer({ nodes: rawNodes, edges: rawEdges }: GraphExplore
     <div style={{ display: "flex", height: 600 }}>
       <div style={{ flex: 1, position: "relative" }}>
         {rawNodes.length > MAX_NODES && (
-          <div style={{ position: "absolute", top: 8, left: 8, zIndex: 10, background: "#1e293b", color: "#f59e0b", padding: "4px 10px", borderRadius: 6, fontSize: 12 }}>
+          <div style={{ position: "absolute", top: 8, left: 8, zIndex: 10, background: "var(--surface)", border: "1px solid rgba(255,158,79,0.3)", color: "var(--high)", padding: "4px 10px", borderRadius: 6, fontSize: 12 }}>
             Showing {MAX_NODES} of {rawNodes.length} nodes — search to filter
           </div>
         )}
@@ -118,7 +117,10 @@ export function GraphExplorer({ nodes: rawNodes, edges: rawEdges }: GraphExplore
           edges={flowEdges}
           onNodeClick={onNodeClick}
           fitView
-          fitViewOptions={{ padding: 0.2 }}
+          fitViewOptions={{ padding: 0.35, maxZoom: 1.1 }}
+          minZoom={0.3}
+          maxZoom={2.5}
+          proOptions={{ hideAttribution: true }}
         >
           <Background />
           <Controls />
@@ -127,15 +129,15 @@ export function GraphExplorer({ nodes: rawNodes, edges: rawEdges }: GraphExplore
               const raw = (n.data as { raw?: GraphNode })?.raw
               return NODE_COLORS[raw?.kind ?? ""] ?? "#9ca3af"
             }}
-            style={{ background: "#0f172a" }}
+            style={{ background: "var(--bg-grid)" }}
           />
         </ReactFlow>
       </div>
       {selected && (
-        <div style={{ width: 280, borderLeft: "1px solid #1e293b", overflowY: "auto", padding: 16, background: "#0f172a" }}>
+        <div style={{ width: 300, borderLeft: "1px solid var(--border)", overflowY: "auto", padding: 16, background: "var(--surface)" }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
-            <strong style={{ fontSize: 14 }}>Node Detail</strong>
-            <button onClick={() => setSelected(null)} style={{ background: "none", border: "none", cursor: "pointer", color: "#94a3b8" }}>✕</button>
+            <strong style={{ fontSize: 14 }}>Node detail</strong>
+            <button className="ghost icon sm" onClick={() => setSelected(null)}>✕</button>
           </div>
           <dl className="kv" style={{ fontSize: 12 }}>
             <dt>Kind</dt><dd>{selected.kind}</dd>

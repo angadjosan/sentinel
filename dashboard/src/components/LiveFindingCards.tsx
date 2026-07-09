@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { SeverityBadge } from "./SeverityBadge"
+import { SeverityBadge } from "./ui"
 import type { Finding } from "../lib/api"
 
 interface LiveFindingCardsProps {
@@ -63,7 +63,7 @@ export function LiveFindingCards({ runId, apiUrl }: LiveFindingCardsProps) {
                   width: 10,
                   height: 10,
                   borderRadius: "50%",
-                  background: connected ? "#10b981" : "#f59e0b",
+                  background: connected ? "var(--accent)" : "var(--medium)",
                   display: "inline-block",
                   animation: "pulse 1.5s infinite",
                 }}
@@ -97,7 +97,7 @@ export function LiveFindingCards({ runId, apiUrl }: LiveFindingCardsProps) {
                 </div>
               </div>
               {finding.confirmed && (
-                <span style={{ color: "#ef4444", fontSize: 12, fontWeight: 600 }}>CONFIRMED</span>
+                <span style={{ color: "var(--critical)", fontSize: 12, fontWeight: 600 }}>CONFIRMED</span>
               )}
             </div>
           ))}

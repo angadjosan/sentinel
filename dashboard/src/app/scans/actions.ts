@@ -9,6 +9,6 @@ export async function cancelRunAction(formData: FormData) {
     throw new Error("runId is required");
   }
   await cancelRun(runId);
-  revalidatePath("/runs");
-  revalidatePath(`/runs/${runId}`);
+  revalidatePath("/scans");
+  revalidatePath(`/scans/${runId}`);
 }

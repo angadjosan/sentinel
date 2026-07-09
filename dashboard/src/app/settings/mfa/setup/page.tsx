@@ -35,7 +35,7 @@ export default async function MfaSetupPage({
           </div>
         </form>
         <div className="switch-link">
-          <Link href="/team">Cancel</Link>
+          <Link href="/settings">Cancel</Link>
         </div>
       </div>
     </div>

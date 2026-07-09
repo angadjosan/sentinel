@@ -1,157 +1,140 @@
-import { ShieldCheck, ShieldOff, AlertTriangle } from "lucide-react";
+import Link from "next/link";
+import { AlertTriangle, ArrowLeft, Ban, ShieldAlert, ShieldCheck } from "lucide-react";
 import { findingAudit, findingGraph, pullFinding } from "../../../lib/api";
-import { SeverityBadge } from "../../../components/SeverityBadge";
-import { TaintPathGraph } from "../../../components/TaintPathGraph";
+import { TaintPathView } from "../../../components/TaintPathView";
+import { FindingActions } from "../../../components/FindingActions";
+import { SeverityBadge, StatusPill, FileRef, scanFamily, relativeTime } from "../../../components/ui";
 
 export default async function FindingDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const [context, audit, graph] = await Promise.all([pullFinding(id), findingAudit(id), findingGraph(id)]);
+  const [context, audit, graph] = await Promise.all([
+    pullFinding(id),
+    findingAudit(id).catch(() => []),
+    findingGraph(id).catch(() => ({ nodes: [], edges: [] }))
+  ]);
   const finding = context.finding;
   const node = context.node;
+
+  const verdict = finding.confirmed
+    ? { cls: "confirmed", icon: <ShieldAlert size={20} />, title: "Confirmed exploitable", sub: "Reproduced by the pentest oracle — a runtime proof exists, not just agent judgment." }
+    : finding.status === "suppressed"
+    ? { cls: "suppressed", icon: <Ban size={20} />, title: "Suppressed", sub: "Excluded from the queue. Full audit trail preserved below." }
+    : finding.status === "suppression_pending"
+    ? { cls: "review", icon: <AlertTriangle size={20} />, title: "Suppression pending review", sub: "Awaiting admin approval — still counts as open until approved." }
+    : { cls: "review", icon: <AlertTriangle size={20} />, title: "Needs review", sub: "Surfaced by contextual reasoning as reachable and unresolved on this diff." };
 
   return (
     <>
       <div className="toolbar">
         <div>
+          <Link href="/findings" className="chip" style={{ marginBottom: 10 }}><ArrowLeft size={13} /> Findings</Link>
+          <div className="eyebrow">{scanFamily(finding.vuln_type)} · {finding.vuln_type.replace(/_/g, " ")}</div>
           <h1>{finding.title}</h1>
-          <div className="muted">{finding.id}</div>
+          <div className="sub mono" style={{ fontSize: 12 }}>{finding.id}</div>
         </div>
-        <SeverityBadge severity={finding.severity} />
+        <div className="toolbar-actions">
+          <SeverityBadge severity={finding.severity} />
+          <StatusPill status={finding.status} />
+        </div>
       </div>
 
-      <section className="grid metrics">
-        <div className="panel metric">
-          <div className="label">Status</div>
-          <div className="value">{finding.status}</div>
+      <div className={`verdict ${verdict.cls}`}>
+        <div className="v-icon">{verdict.icon}</div>
+        <div style={{ flex: 1 }}>
+          <div className="v-title">{verdict.title}</div>
+          <div className="v-sub">{verdict.sub}</div>
         </div>
-        <div className="panel metric">
-          <div className="label">Type</div>
-          <div className="value">{finding.vuln_type}</div>
-        </div>
-        <div className="panel metric">
-          <div className="label">Confirmed</div>
-          <div className="value icon-value">{finding.confirmed ? <ShieldCheck size={24} /> : <ShieldOff size={24} />}</div>
-        </div>
-        <div className="panel metric">
-          <div className="label">Fingerprint</div>
-          <div className="value compact">{finding.fingerprint}</div>
-        </div>
-      </section>
+      </div>
 
-      <section className="grid two detail-grid">
-        <div className="panel">
-          <div className="panel-header">
-            <h2>Remediation</h2>
+      <section className="grid two detail-grid" style={{ marginTop: 14 }}>
+        <div className="stack">
+          <div className="panel">
+            <div className="panel-header"><h2>Exploitability</h2></div>
+            <div className="panel-body"><p style={{ margin: 0, lineHeight: 1.6 }}>{finding.description}</p></div>
           </div>
-          <div className="panel-body">
-            <p>{finding.description}</p>
-            <ol className="steps">
-              {context.remediation_plan.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
+          <div className="panel">
+            <div className="panel-header"><h2>Remediation</h2></div>
+            <div className="panel-body">
+              <ol className="steps">
+                {context.remediation_plan.map((step, index) => (<li key={index}>{step}</li>))}
+              </ol>
+            </div>
           </div>
         </div>
 
-        <div className="panel">
-          <div className="panel-header">
-            <h2>Graph Context</h2>
+        <div className="stack">
+          <div className="panel">
+            <div className="panel-header"><h2>Actions</h2></div>
+            <div className="panel-body"><FindingActions finding={finding} /></div>
           </div>
-          <div className="panel-body">
-            {node ? (
+          <div className="panel">
+            <div className="panel-header"><h2>Location & context</h2></div>
+            <div className="panel-body">
               <dl className="kv">
-                <dt>Node</dt>
-                <dd>{node.id}</dd>
-                <dt>Kind</dt>
-                <dd>{node.kind}</dd>
-                <dt>File</dt>
-                <dd>{node.file ?? "n/a"}</dd>
-                <dt>Lines</dt>
-                <dd>{node.line_start ?? "?"}-{node.line_end ?? "?"}</dd>
-                <dt>Entry Point</dt>
-                <dd>{node.is_entry_point ? "yes" : "no"}</dd>
-                <dt>Sink</dt>
-                <dd>{node.is_sink ? "yes" : "no"}</dd>
-                <dt>Intent</dt>
-                <dd>{node.intent ?? "n/a"}</dd>
+                <dt>File</dt><dd><FileRef file={finding.file} line={finding.line_start} /></dd>
+                <dt>Scan</dt><dd>{scanFamily(finding.vuln_type)}</dd>
+                <dt>Updated</dt><dd>{relativeTime(finding.updated_at)}</dd>
+                {node ? (<>
+                  <dt>Graph node</dt><dd className="mono" style={{ fontSize: 12 }}>{node.id}</dd>
+                  <dt>Kind</dt><dd>{node.kind}</dd>
+                  <dt>Entry point</dt><dd>{node.is_entry_point ? <span className="chip accent">yes</span> : "no"}</dd>
+                  <dt>Sink</dt><dd>{node.is_sink ? <span className="chip warn">yes</span> : "no"}</dd>
+                  {node.intent ? <><dt>Intent</dt><dd>{node.intent}</dd></> : null}
+                </>) : null}
+                <dt>Fingerprint</dt><dd className="mono" style={{ fontSize: 11.5 }}>{finding.fingerprint}</dd>
               </dl>
-            ) : (
-              <div className="muted">No graph node linked to this finding.</div>
-            )}
+            </div>
           </div>
         </div>
       </section>
 
-      <section className="panel" style={{ marginTop: 16 }}>
+      <section className="panel" style={{ marginTop: 14 }}>
         <div className="panel-header">
-          <h2>Taint Path</h2>
-          <span className="muted">{graph.nodes.length} nodes, {graph.edges.length} edges</span>
+          <h2>Taint path</h2>
+          <span className="muted">{graph.nodes.length} nodes · {graph.edges.length} edges · entry → sink</span>
         </div>
         <div className="panel-body">
-          {graph.nodes.length ? (
-            <TaintPathGraph nodes={graph.nodes} edges={graph.edges} />
-          ) : (
-            <div className="muted">No graph path recorded for this finding.</div>
-          )}
+          {graph.nodes.length ? <TaintPathView nodes={graph.nodes} edges={graph.edges} focusId={node?.id ?? null} /> : <div className="empty" style={{ padding: 30 }}><p>No graph path recorded for this finding.</p></div>}
         </div>
       </section>
 
-      {finding.confirmed && finding.evidence && (
-        <section className="panel" style={{ marginTop: 16, borderLeft: "4px solid #ef4444" }}>
-          <div className="panel-header" style={{ color: "#ef4444" }}>
-            <AlertTriangle size={18} style={{ marginRight: 8 }} />
-            <h2 style={{ color: "#ef4444" }}>Confirmed Exploit Evidence</h2>
+      {finding.confirmed && finding.evidence ? (
+        <section className="panel" style={{ marginTop: 14, borderColor: "rgba(255,93,93,0.35)" }}>
+          <div className="panel-header" style={{ borderColor: "rgba(255,93,93,0.25)" }}>
+            <h2 style={{ color: "var(--critical)", display: "flex", alignItems: "center", gap: 8 }}><ShieldAlert size={16} /> Confirmed exploit evidence</h2>
           </div>
-          <div className="panel-body">
-            <pre className="trace evidence" style={{ borderColor: "#ef4444" }}>{finding.evidence}</pre>
-          </div>
+          <div className="panel-body"><pre className="trace evidence" style={{ borderColor: "rgba(255,93,93,0.3)" }}>{finding.evidence}</pre></div>
         </section>
-      )}
+      ) : null}
 
-      <section className="grid two detail-grid">
+      <section className={finding.confirmed ? "" : "grid two detail-grid"} style={{ marginTop: 14 }}>
+        {finding.confirmed ? null : (
+          <div className="panel">
+            <div className="panel-header"><h2>Evidence</h2></div>
+            <div className="panel-body">
+              {finding.evidence ? <pre className="trace evidence">{finding.evidence}</pre> : <div className="empty" style={{ padding: 24 }}><p>No runtime confirmation evidence yet. Run a pentest to attempt exploitation.</p></div>}
+            </div>
+          </div>
+        )}
         <div className="panel">
-          <div className="panel-header">
-            <h2>Evidence</h2>
-          </div>
-          <div className="panel-body">
-            <pre className="trace evidence">{finding.evidence ?? "No runtime confirmation evidence recorded."}</pre>
-          </div>
-        </div>
-
-        <div className="panel">
-          <div className="panel-header">
-            <h2>Suppression History</h2>
-          </div>
+          <div className="panel-header"><h2>Audit trail</h2><ShieldCheck size={15} className="dim" /></div>
           <div className="panel-body">
             {audit.length ? (
-              <table className="table compact-table">
-                <thead>
-                  <tr>
-                    <th>Action</th>
-                    <th>Reason</th>
-                    <th>Time</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {audit.map((row) => (
-                    <tr key={row.id}>
-                      <td>{row.action}</td>
-                      <td>{row.reason}</td>
-                      <td>{new Date(row.created_at).toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="muted">No suppression actions recorded.</div>
-            )}
+              <div className="stack" style={{ gap: 10 }}>
+                {audit.map((row) => (
+                  <div key={row.id} className="spread" style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10 }}>
+                    <div>
+                      <div style={{ textTransform: "capitalize", fontWeight: 550 }}>{row.action}</div>
+                      <div className="muted" style={{ fontSize: 12.5 }}>{row.reason}</div>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12 }}>{relativeTime(row.created_at)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : <div className="empty" style={{ padding: 24 }}><p>No suppression actions recorded.</p></div>}
           </div>
         </div>
       </section>
     </>
   );
 }
-
-// NOTE: The bespoke FindingGraph / EdgeLabel / orderNodes / nodeClass renderer
-// was removed. The Taint Path panel above now renders via the shared
-// <TaintPathGraph /> component; this dead duplicate was never mounted.
