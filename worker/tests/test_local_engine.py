@@ -19,11 +19,8 @@ import pytest
 from sentinel_worker.agent import ToolCallEvent
 from sentinel_worker.local_engine import (
     GraphDelta,
-    fetch_cloud_finding,
-    push_pentest_result,
     push_results_to_cloud,
     run_local_init,
-    run_local_pentest,
     run_local_plan_review,
     run_local_source_scan,
 )
@@ -210,128 +207,10 @@ async def test_local_init_builds_graph_from_tracked_files(tmp_path):
     assert os.path.isfile(local_trace_path)
 
 
-class _ConfirmingPentestLLM:
-    """Reads app/db.py through the tool dispatcher (proving repo_dir wiring in
-    the pentest agent loop too), then confirms via emit_pentest_result."""
-
-    def __init__(self):
-        self.seen_content = None
-
-    async def call_with_tools(self, *, system, user, tools, tool_dispatcher, max_iterations=50, **kwargs):
-        read_result = await tool_dispatcher("read_file", {"file_path": "app/db.py"})
-        self.seen_content = read_result.get("content")
-        await tool_dispatcher(
-            "emit_pentest_result",
-            {
-                "payloads": ["' OR '1'='1"],
-                "confirmed": True,
-                "outcome": "data_exfiltrated",
-                "proof_artifact": f"dumped row via payload; sink source: {self.seen_content!r}",
-            },
-        )
-        return
-        yield  # pragma: no cover — makes this an async generator
-
-
-_FINDING_JSON = {
-    "id": "finding-1", "vuln_type": "sqli", "severity": "high", "title": "SQLi",
-    "description": "d", "remediation": "r", "status": "open", "confirmed": False,
-    "evidence": None, "fingerprint": "fp1", "node_id": "fn:app/db.py:query_user",
-    "file": "app/db.py", "line_start": 1, "line_end": 2,
-    "created_at": "2024-01-01T00:00:00", "updated_at": "2024-01-01T00:00:00",
-}
-_TARGET_NODE_JSON = {
-    "id": "fn:app/db.py:query_user", "kind": "FUNCTION", "name": "query_user", "file": "app/db.py",
-    "line_start": 1, "line_end": 2, "language": "python", "auth_required": False,
-    "is_entry_point": False, "is_sink": True, "label": None, "intent": None,
-}
-
-
-@pytest.mark.asyncio
-async def test_local_pentest_confirms_finding_reading_repo_dir(tmp_path, monkeypatch):
-    (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "db.py").write_text("def query_user(user_id):\n    return db.query(user_id)\n")
-
-    def fake_get(url, headers=None, timeout=None, params=None):
-        request = httpx.Request("GET", url)
-        if url.endswith("/findings/finding-1"):
-            return httpx.Response(200, json=_FINDING_JSON, request=request)
-        if url.endswith("/graph/subgraph"):
-            return httpx.Response(200, json={"graph_id": "g1", "nodes": [_TARGET_NODE_JSON], "edges": []}, request=request)
-        raise AssertionError(f"unexpected GET {url}")
-
-    monkeypatch.setattr(httpx, "get", fake_get)
-
-    llm = _ConfirmingPentestLLM()
-    result = await run_local_pentest(
-        repo_name="acme/repo", repo_dir=str(tmp_path), finding_id="finding-1", llm=llm,
-        api_url="https://cloud.example/api", api_token="tok",
-    )
-
-    assert "db.query(user_id)" in llm.seen_content  # proves repo_dir wiring reached the pentest tool loop too
-    assert result.confirmed is True
-    assert result.status == "confirmed"
-    assert result.sink_node_id == "fn:app/db.py:query_user"
-
-
-@pytest.mark.asyncio
-async def test_local_pentest_not_reproducible_without_confirmation(tmp_path, monkeypatch):
-    (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "db.py").write_text("def query_user(user_id):\n    return safe(user_id)\n")
-
-    class _NoConfirmLLM:
-        async def call_with_tools(self, *, system, user, tools, tool_dispatcher, max_iterations=50, **kwargs):
-            return
-            yield  # pragma: no cover
-
-    def fake_get(url, headers=None, timeout=None, params=None):
-        request = httpx.Request("GET", url)
-        if url.endswith("/findings/finding-1"):
-            return httpx.Response(200, json=_FINDING_JSON, request=request)
-        if url.endswith("/graph/subgraph"):
-            return httpx.Response(200, json={"graph_id": "g1", "nodes": [_TARGET_NODE_JSON], "edges": []}, request=request)
-        raise AssertionError(f"unexpected GET {url}")
-
-    monkeypatch.setattr(httpx, "get", fake_get)
-
-    result = await run_local_pentest(
-        repo_name="acme/repo", repo_dir=str(tmp_path), finding_id="finding-1", llm=_NoConfirmLLM(),
-        api_url="https://cloud.example/api", api_token="tok",
-    )
-    assert result.confirmed is False
-    assert result.status == "not_reproducible"
-
-
-def test_fetch_cloud_finding_and_push_pentest_result(monkeypatch):
-    def fake_get(url, headers=None, timeout=None, params=None):
-        assert url == "https://cloud.example/api/findings/finding-1"
-        return httpx.Response(200, json=_FINDING_JSON, request=httpx.Request("GET", url))
-
-    captured_post = {}
-
-    def fake_post(url, json=None, headers=None, timeout=None):
-        captured_post["url"] = url
-        captured_post["json"] = json
-        return httpx.Response(200, json={"id": "finding-1", "status": "confirmed", "confirmed": True}, request=httpx.Request("POST", url))
-
-    monkeypatch.setattr(httpx, "get", fake_get)
-    monkeypatch.setattr(httpx, "post", fake_post)
-
-    finding = fetch_cloud_finding(api_url="https://cloud.example/api", token="tok", finding_id="finding-1")
-    assert finding["id"] == "finding-1"
-
-    from sentinel_worker.local_engine import LocalPentestResult
-    result = LocalPentestResult(
-        finding_id="finding-1", confirmed=True, status="confirmed", evidence="proof",
-        entry_node_id="route:x", sink_node_id="fn:app/db.py:query_user",
-    )
-    resp = push_pentest_result(api_url="https://cloud.example/api", token="tok", result=result)
-    assert resp["status"] == "confirmed"
-    assert captured_post["url"] == "https://cloud.example/api/findings/finding-1/confirm"
-    assert captured_post["json"]["confirmed"] is True
-    # No source/diff content anywhere in what actually got sent.
-    import json as _json
-    assert "diff --git" not in _json.dumps(captured_post["json"])
+# NOTE: local pentest tests were removed with the local pentest code
+# (AUDIT.md §3 D4). Pentest now runs on the cloud worker; its integration tests
+# live in worker/tests/test_runner_pentest.py etc. (owned by W1). The CLI-side
+# enqueue+poll behavior is covered by cli/tests.
 
 
 @pytest.mark.asyncio

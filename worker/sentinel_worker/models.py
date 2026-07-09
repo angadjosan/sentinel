@@ -30,6 +30,10 @@ class Account(Base):
     model: Mapped[str] = mapped_column(String, default="ollama")
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_endpoint: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Optional server-side pentest-agent credential (AUDIT.md §3 D2). Separate
+    # from the SAST `api_key` policy; set admin-only via dashboard. The worker
+    # env `SENTINEL_PENTEST_LLM_API_KEY` takes precedence when present.
+    pentest_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_retention_days: Mapped[int] = mapped_column(Integer, default=365)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -122,6 +126,15 @@ class Repo(Base):
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id"), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     remote_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Pentest reachability config (AUDIT.md §3 D1 — dual mode).
+    # staging (hosted default): worker sends HTTP payloads to staging_base_url.
+    # local_worker (self-hosted): worker boots a subprocess sandbox on its own host.
+    pentest_mode: Mapped[str] = mapped_column(String, nullable=False, default="staging")
+    staging_base_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    healthcheck_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    boot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    healthcheck: Mapped[str | None] = mapped_column(Text, nullable=True)
+    egress_allowlist: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-encoded list[str]
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

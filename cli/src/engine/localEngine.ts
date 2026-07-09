@@ -46,6 +46,9 @@ export interface LocalSourceResult {
   finding_count: number;
   graph_nodes_pushed: number;
   graph_edges_pushed: number;
+  // Changed files that no framework adapter matched (AUDIT.md §6 W4 P5.4).
+  // Surfaced to the user on stderr after a scan; absent on older engines.
+  adapter_unmatched_files?: string[];
   local_run_id?: string;
   local_trace_path?: string;
   push: PushResult;
@@ -65,17 +68,6 @@ export interface LocalInitResult {
   local_run_id?: string;
   local_trace_path?: string;
   push: PushResult;
-}
-
-export interface LocalPentestResult {
-  finding_id: string;
-  confirmed: boolean;
-  status: string;
-  evidence: string | null;
-  payloads: string[];
-  local_run_id?: string;
-  local_trace_path?: string;
-  push: unknown;
 }
 
 interface RawRunResult {
@@ -194,35 +186,6 @@ export async function runLocalPlanReview(
   return { result: parseJsonStdout<LocalPlanResult>(stdout, "sentinel plan"), exitCode };
 }
 
-export async function runLocalPentest(
-  opts: CommonEngineOpts & {
-    findingId: string;
-    sanitizerOutput?: string;
-    behavioralProof?: string;
-    proofDetail?: string;
-    boot?: string;
-    healthcheck?: string;
-    egressAllowlist?: string[];
-  }
-): Promise<LocalPentestResult> {
-  const args = [
-    "pentest",
-    "--repo-name", opts.config.repoName,
-    "--repo-dir", opts.repoDir,
-    "--finding-id", opts.findingId,
-    "--provider", opts.config.provider,
-    "--model", opts.config.model,
-    "--api-url", opts.config.apiUrl,
-  ];
-  if (opts.sanitizerOutput) args.push("--sanitizer-output", opts.sanitizerOutput);
-  if (opts.behavioralProof) args.push("--behavioral-proof", opts.behavioralProof);
-  if (opts.proofDetail) args.push("--proof-detail", opts.proofDetail);
-  if (opts.boot) args.push("--boot", opts.boot);
-  if (opts.healthcheck) args.push("--healthcheck", opts.healthcheck);
-  for (const host of opts.egressAllowlist ?? []) args.push("--egress-allowlist", host);
-  if (opts.config.api_endpoint) args.push("--llm-endpoint", opts.config.api_endpoint);
-  if (opts.apiToken) args.push("--api-token", opts.apiToken);
-  const { stdout, exitCode, stderr } = await runLocalEngine(args, { llmApiKey: opts.llmApiKey });
-  if (exitCode !== 0) throw new Error(`local pentest failed (exit ${exitCode}): ${stderr.slice(-2000)}`);
-  return parseJsonStdout<LocalPentestResult>(stdout, "sentinel pentest");
-}
+// NOTE: local pentest execution was removed (AUDIT.md §3 D4). `sentinel pentest`
+// now enqueues a cloud pentest (POST /pentest) and polls the run — the cloud
+// worker owns pentest execution (§1 invariant 4). See cli/src/index.ts.

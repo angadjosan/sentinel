@@ -37,6 +37,13 @@ export const ConfigSchema = z.object({
   model: z.string().default("llama3.2"),
   boot: z.string().optional(),
   healthcheck: z.string().optional(),
+  // AUDIT.md §3 D1 — pentest reachability config, synced to the cloud Repo so
+  // the worker knows how to reach the target app. `staging` (default, hosted)
+  // probes staging_base_url over HTTP; `local_worker` (self-hosted) boots the
+  // app on the worker host.
+  pentest_mode: z.enum(["staging", "local_worker"]).optional(),
+  staging_base_url: z.string().url().optional(),
+  healthcheck_path: z.string().optional(),
   env: z.object({ from: z.string() }).optional(),
   variants: z.record(VariantSchema).default({}),
   egress_allowlist: z.array(z.string().min(1)).default([]),

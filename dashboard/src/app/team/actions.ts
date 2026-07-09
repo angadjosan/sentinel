@@ -8,7 +8,10 @@ import {
   rejectSuppression,
   resendVerificationEmail,
   revokeSession,
-  updateAccountConfig
+  updateAccountConfig,
+  updateRepoPentestConfig,
+  type PentestMode,
+  type RepoPentestConfigPatch
 } from "../../lib/api";
 
 export async function updateAccountConfigAction(formData: FormData) {
@@ -35,18 +38,57 @@ export async function updateAccountConfigAction(formData: FormData) {
   revalidatePath("/team");
 }
 
+export async function updateRepoPentestConfigAction(formData: FormData) {
+  const repoId = stringValue(formData.get("repo_id"));
+  if (!repoId) throw new Error("repo_id is required");
+
+  const mode = stringValue(formData.get("pentest_mode"));
+  if (mode !== "staging" && mode !== "local_worker") {
+    throw new Error("pentest_mode must be 'staging' or 'local_worker'");
+  }
+  const pentestMode = mode as PentestMode;
+
+  const patch: RepoPentestConfigPatch = { pentest_mode: pentestMode };
+
+  if (pentestMode === "staging") {
+    // Hosted worker probes a reachable staging URL — no boot argv (§3 D1).
+    const stagingBaseUrl = stringValue(formData.get("staging_base_url"));
+    if (!stagingBaseUrl) {
+      throw new Error("staging_base_url is required in staging mode");
+    }
+    patch.staging_base_url = stagingBaseUrl;
+    patch.healthcheck_path = stringValue(formData.get("healthcheck_path"));
+    // Clear self-hosted-only fields so the two modes don't bleed together.
+    patch.boot = null;
+    patch.healthcheck = null;
+    patch.egress_allowlist = [];
+  } else {
+    // Self-hosted worker boots the app in a subprocess sandbox (§3 D1).
+    patch.boot = stringValue(formData.get("boot"));
+    patch.healthcheck = stringValue(formData.get("healthcheck"));
+    patch.egress_allowlist = parseAllowlist(formData.get("egress_allowlist"));
+    patch.staging_base_url = null;
+    patch.healthcheck_path = null;
+  }
+
+  await updateRepoPentestConfig(repoId, patch);
+  revalidatePath("/team");
+}
+
 export async function approveSuppressionAction(formData: FormData) {
   const findingId = stringValue(formData.get("finding_id"));
-  const reason = stringValue(formData.get("reason")) ?? "Approved by admin";
+  const reason = stringValue(formData.get("reason"));
   if (!findingId) throw new Error("finding_id is required");
+  if (!reason) throw new Error("a suppression review reason is required");
   await approveSuppression(findingId, reason);
   revalidatePath("/team");
 }
 
 export async function rejectSuppressionAction(formData: FormData) {
   const findingId = stringValue(formData.get("finding_id"));
-  const reason = stringValue(formData.get("reason")) ?? "Rejected by admin";
+  const reason = stringValue(formData.get("reason"));
   if (!findingId) throw new Error("finding_id is required");
+  if (!reason) throw new Error("a suppression review reason is required");
   await rejectSuppression(findingId, reason);
   revalidatePath("/team");
 }
@@ -83,6 +125,15 @@ function stringValue(value: FormDataEntryValue | null): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function parseAllowlist(value: FormDataEntryValue | null): string[] {
+  const text = stringValue(value);
+  if (text === null) return [];
+  return text
+    .split(/[\n,]/)
+    .map((host) => host.trim())
+    .filter(Boolean);
 }
 
 function optionalNumber(value: FormDataEntryValue | null, label: string): number | null {

@@ -6,8 +6,6 @@ from fastapi.testclient import TestClient
 
 from sentinel_api.main import app
 
-from .conftest import process_tasks
-
 
 def _sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
@@ -35,37 +33,33 @@ def test_github_webhook_requires_configured_secret(monkeypatch):
     assert response.status_code == 503
 
 
-def test_github_webhook_enqueues_scan_and_completes_check_run(monkeypatch):
+def test_github_webhook_does_not_fetch_diff_or_enqueue_scan(monkeypatch):
+    """AUDIT.md §3 D5 / Gate 2: the webhook no longer runs SAST in the cloud.
+
+    A valid pull_request delivery must be acknowledged WITHOUT pulling the PR
+    diff or enqueuing a `kind=source` task (which would store the customer's diff
+    in tasks.payload — a SAST-privacy violation). PR SAST runs in CI via
+    action.yml / standalone.py instead.
+    """
     monkeypatch.setenv("GITHUB_APP_WEBHOOK_SECRET", "test-secret")
 
-    calls = {}
-    completed = {}
+    called = {"fetch_pr_diff": False, "get_installation_token": False, "create_check_run": False}
 
-    async def fake_get_installation_token(installation_id):
-        calls["installation_id"] = installation_id
+    async def fake_fetch_pr_diff(*args, **kwargs):
+        called["fetch_pr_diff"] = True
+        return ""
+
+    async def fake_get_installation_token(*args, **kwargs):
+        called["get_installation_token"] = True
         return "fake-token"
 
-    async def fake_create_check_run(token, repo, sha):
-        calls["check_run_repo"] = repo
-        calls["check_run_sha"] = sha
+    async def fake_create_check_run(*args, **kwargs):
+        called["create_check_run"] = True
         return 999
 
-    async def fake_fetch_pr_diff(token, repo, pr_number):
-        calls["pr_number"] = pr_number
-        return (
-            "+++ b/app.js\n"
-            "+app.get('/u', (req,res)=> db.query(`select * from users where id=${req.query.id}`))"
-        )
-
-    async def fake_complete_check_run(token, repo, check_run_id, findings):
-        completed["repo"] = repo
-        completed["check_run_id"] = check_run_id
-        completed["findings"] = findings
-
+    monkeypatch.setattr("sentinel_worker.github_app.fetch_pr_diff", fake_fetch_pr_diff)
     monkeypatch.setattr("sentinel_worker.github_app.get_installation_token", fake_get_installation_token)
     monkeypatch.setattr("sentinel_worker.github_app.create_check_run", fake_create_check_run)
-    monkeypatch.setattr("sentinel_worker.github_app.fetch_pr_diff", fake_fetch_pr_diff)
-    monkeypatch.setattr("sentinel_worker.github_app.complete_check_run", fake_complete_check_run)
 
     payload = {
         "action": "opened",
@@ -88,17 +82,11 @@ def test_github_webhook_enqueues_scan_and_completes_check_run(monkeypatch):
         )
         assert response.status_code == 200
         assert response.json() == {"ok": True}
-        assert calls["installation_id"] == 12345
-        assert calls["check_run_repo"] == "acme/widgets"
-        assert calls["check_run_sha"] == "abc123"
-        assert calls["pr_number"] == 7
 
-        process_tasks(1)
-
-    assert completed["repo"] == "acme/widgets"
-    assert completed["check_run_id"] == 999
-    assert completed["findings"]
-    assert completed["findings"][0]["vuln_type"] == "sqli"
+    # The legacy cloud-scan path must be fully severed.
+    assert called["fetch_pr_diff"] is False
+    assert called["get_installation_token"] is False
+    assert called["create_check_run"] is False
 
 
 def test_github_webhook_ignores_other_actions(monkeypatch):

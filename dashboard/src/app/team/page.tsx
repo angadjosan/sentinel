@@ -1,22 +1,23 @@
 import Link from "next/link";
-import { accountConfig, currentUser, listFindings, listSessions } from "../../lib/api";
+import { accountConfig, currentUser, listFindings, listRepos, listSessions } from "../../lib/api";
 import { SeverityBadge } from "../../components/SeverityBadge";
+import { RepoPentestConfigForm } from "../../components/RepoPentestConfigForm";
+import { SuppressionReviewButtons } from "../../components/SuppressionReviewButtons";
 import {
   approveDeviceCodeAction,
-  approveSuppressionAction,
   mfaDisableAction,
-  rejectSuppressionAction,
   resendVerificationAction,
   revokeSessionAction,
   updateAccountConfigAction
 } from "./actions";
 
 export default async function TeamPage() {
-  const [config, findings, sessions, user] = await Promise.all([
+  const [config, findings, sessions, user, repos] = await Promise.all([
     accountConfig(),
     listFindings(),
     listSessions().catch(() => []),
-    currentUser().catch(() => null)
+    currentUser().catch(() => null),
+    listRepos().catch(() => [])
   ]);
   const pending = findings.filter((finding) => finding.status === "suppression_pending");
 
@@ -28,6 +29,27 @@ export default async function TeamPage() {
           <div className="muted">Account {config.account_id}</div>
         </div>
       </div>
+
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>How Sentinel runs</h2>
+        </div>
+        <div className="panel-body">
+          <p>
+            <strong>SAST runs locally.</strong> Source code and diffs never leave the machine running
+            the CLI. Scans call your LLM with a key stored in that machine&apos;s keychain; only the
+            code graph (file/line pointers and short labels — never source) and finding metadata sync
+            to the cloud.
+          </p>
+          <p>
+            <strong>Pentest runs in the cloud.</strong> The worker confirms a finding by sending HTTP
+            payloads to a running instance of your app and checking for a runtime oracle (HTTP or
+            sanitizer proof — not the agent&apos;s own say-so). Configure where the worker reaches
+            your app per repo below. Its LLM credential is server-side
+            (<code>SENTINEL_PENTEST_LLM_API_KEY</code> on the worker), separate from your local SAST key.
+          </p>
+        </div>
+      </section>
 
       {user ? (
         <section className="panel" style={{ marginTop: 16 }}>
@@ -90,8 +112,8 @@ export default async function TeamPage() {
           <div className="value">{config.monthly_token_budget?.toLocaleString() ?? "none"}</div>
         </div>
         <div className="panel metric">
-          <div className="label">Source Retention</div>
-          <div className="value">{config.source_retention_days}d</div>
+          <div className="label">Repos</div>
+          <div className="value">{repos.length}</div>
         </div>
       </section>
 
@@ -134,10 +156,13 @@ export default async function TeamPage() {
                 <span>Monthly Token Budget</span>
                 <input name="monthly_token_budget" type="number" min="0" step="1" defaultValue={config.monthly_token_budget ?? ""} placeholder="unlimited" />
               </label>
-              <label>
-                <span>Source Retention Days</span>
-                <input name="source_retention_days" type="number" min="1" step="1" defaultValue={config.source_retention_days} />
-              </label>
+              {/*
+                Source retention is a legacy account field. The cloud never
+                receives source code or diffs, so there is nothing to retain —
+                the control is hidden but the value is round-tripped so the
+                PATCH stays valid while the field exists server-side.
+              */}
+              <input type="hidden" name="source_retention_days" value={config.source_retention_days} />
               <label className="checkbox-row">
                 <input name="suppression_approval_required" type="checkbox" defaultChecked={config.suppression_approval_required} />
                 <span>Require admin approval for member suppressions</span>
@@ -164,6 +189,39 @@ export default async function TeamPage() {
               </div>
             </form>
           </div>
+        </div>
+      </section>
+
+      <section className="panel" style={{ marginTop: 16 }}>
+        <div className="panel-header">
+          <h2>Pentest Configuration</h2>
+          <span className="muted">{repos.length} repo{repos.length === 1 ? "" : "s"}</span>
+        </div>
+        <div className="panel-body">
+          <p className="muted">
+            Where the cloud worker reaches each repo&apos;s app to run a pentest. Set a reachable{" "}
+            staging URL for the hosted worker, or configure a self-hosted worker to boot the app
+            itself. No source code is uploaded either way.
+          </p>
+          {repos.length ? (
+            <div className="grid" style={{ gap: 16, marginTop: 8 }}>
+              {repos.map((repo) => (
+                <div className="panel" key={repo.id}>
+                  <div className="panel-header">
+                    <h2 style={{ fontSize: 15 }}>{repo.name}</h2>
+                    <span className="badge low">{repo.pentest_mode ?? "not configured"}</span>
+                  </div>
+                  <div className="panel-body">
+                    <RepoPentestConfigForm repo={repo} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="muted">
+              No repos registered yet. Run <code>sentinel init</code> in a repo to register it.
+            </div>
+          )}
         </div>
       </section>
 
@@ -240,22 +298,7 @@ export default async function TeamPage() {
                     </td>
                     <td>{finding.vuln_type}</td>
                     <td>
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <form action={approveSuppressionAction} style={{ display: "inline" }}>
-                          <input type="hidden" name="finding_id" value={finding.id} />
-                          <input type="hidden" name="reason" value="Approved by admin" />
-                          <button type="submit" className="primary" style={{ padding: "4px 12px", fontSize: 12 }}>
-                            Approve
-                          </button>
-                        </form>
-                        <form action={rejectSuppressionAction} style={{ display: "inline" }}>
-                          <input type="hidden" name="finding_id" value={finding.id} />
-                          <input type="hidden" name="reason" value="Rejected by admin" />
-                          <button type="submit" className="danger" style={{ padding: "4px 12px", fontSize: 12 }}>
-                            Reject
-                          </button>
-                        </form>
-                      </div>
+                      <SuppressionReviewButtons findingId={finding.id} />
                     </td>
                   </tr>
                 ))}

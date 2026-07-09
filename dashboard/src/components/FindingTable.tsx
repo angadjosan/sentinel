@@ -10,18 +10,37 @@ import { approveSuppressionAction, rejectSuppressionAction, suppressFindingActio
 export function FindingTable({ findings }: { findings: Finding[] }) {
   const router = useRouter();
 
+  // Prompt for a reason (parity with the CLI's required `--reason`) instead of
+  // writing a hardcoded string. The API enforces a minimum-length reason.
+  function promptReason(verb: string): string | null {
+    const reason = window.prompt(`Reason for ${verb} (required):`);
+    if (reason === null) return null; // cancelled
+    const trimmed = reason.trim();
+    if (trimmed.length < 10) {
+      window.alert("A reason of at least 10 characters is required.");
+      return null;
+    }
+    return trimmed;
+  }
+
   async function suppress(id: string) {
-    await suppressFindingAction(id);
+    const reason = promptReason("suppressing this finding");
+    if (reason === null) return;
+    await suppressFindingAction(id, reason);
     router.refresh();
   }
 
   async function approve(id: string) {
-    await approveSuppressionAction(id);
+    const reason = promptReason("approving this suppression");
+    if (reason === null) return;
+    await approveSuppressionAction(id, reason);
     router.refresh();
   }
 
   async function reject(id: string) {
-    await rejectSuppressionAction(id);
+    const reason = promptReason("rejecting this suppression");
+    if (reason === null) return;
+    await rejectSuppressionAction(id, reason);
     router.refresh();
   }
 
