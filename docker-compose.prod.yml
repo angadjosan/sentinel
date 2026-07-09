@@ -40,6 +40,9 @@ services:
       start_period: 20s
 
   worker:
+    # Staging (default): the API image is fine — no sandbox tooling needed.
+    # For local_worker pentest, use the sandbox-capable worker image instead:
+    #   image: ${SENTINEL_IMAGE_WORKER:-ghcr.io/your-org/sentinel/worker:latest}
     image: ${SENTINEL_IMAGE_API:-ghcr.io/your-org/sentinel/api:latest}
     command: ["sentinel-worker"]
     restart: unless-stopped
@@ -47,6 +50,17 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sentinel}
       SENTINEL_WORKER_ID: ${HOSTNAME:-worker-1}
       SENTINEL_WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      # --- local_worker gVisor sandbox (opt-in) ---------------------------------
+      # SENTINEL_EMBEDDED_DOCKER: "1"      # run an embedded dockerd+runsc (needs privileged)
+      # SENTINEL_SANDBOX_RUNTIME: "auto"   # auto | gvisor | runc
+      # SENTINEL_SANDBOX_HARD_EGRESS: "1"  # apply iptables egress DROP (needs NET_ADMIN)
+      # SENTINEL_BROKER_<REF>: "<secret>"  # real upstream creds for the credential broker
+    # To enable the sandbox, pick ONE shape and uncomment it:
+    #   (a) embedded daemon — self-contained, runs anywhere privileged is allowed:
+    # privileged: true
+    #   (b) host daemon — the host runs dockerd+runsc (see scripts/install-gvisor.sh):
+    # cap_add: ["NET_ADMIN"]
+    # volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
     depends_on:
       postgres:
         condition: service_healthy

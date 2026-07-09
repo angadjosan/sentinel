@@ -70,6 +70,48 @@ The worker image is published to GHCR on each release tag:
 ghcr.io/sentineldev/sentinel-worker:latest
 ```
 
+## Pentest sandbox worker (gVisor)
+
+Only needed for **`local_worker`** pentest mode. The hosted default is
+**`staging`** (HTTP probe of a running deployment) — it needs none of this, so the
+Vercel API and the Railway worker are unchanged.
+
+For `local_worker`, the worker boots the target under a **gVisor (`runsc`)**
+sandbox with default-deny token-scoped egress, a credential broker, canaries, and
+attack-safety controls. Migration `0005` (the `pentest_config` column) auto-applies
+on worker/API boot — no manual migration step.
+
+The worker image (`ghcr.io/<org>/sentinel-worker`) carries `docker` + `runsc` +
+`iptables`. Pick one deployment shape:
+
+**(a) Embedded daemon — self-contained, "runs wherever" privileged is allowed.**
+```yaml
+# docker-compose override for the worker service
+privileged: true
+environment:
+  SENTINEL_EMBEDDED_DOCKER: "1"     # entrypoint starts dockerd + registers runsc
+  SENTINEL_SANDBOX_RUNTIME: "auto"  # auto -> runsc if available, else runc
+  SENTINEL_SANDBOX_HARD_EGRESS: "1" # apply iptables egress DROP (needs NET_ADMIN)
+```
+
+**(b) Host daemon — the VM host runs dockerd+runsc; the worker uses its socket.**
+```bash
+sudo ./scripts/install-gvisor.sh   # installs runsc, registers it, creates the network
+```
+```yaml
+cap_add: ["NET_ADMIN"]
+volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+```
+
+**Real upstream credentials** for the broker live only in the worker environment,
+referenced by `credential_ref` → env var `SENTINEL_BROKER_<REF>` (e.g.
+`SENTINEL_BROKER_STRIPE_TEST_KEY`). They never reach the agent or the target env.
+
+**Graceful degradation:** if `runsc` is missing the worker falls back to `runc`
+(still container + proxy isolated); if `NET_ADMIN` is missing it relies on the
+internal network + proxy. If Docker itself is unavailable, `local_worker` tasks
+fail preflight with a clear message — switch that repo to `staging`.
+
 ## Smoke Test
 
 ```bash
@@ -77,3 +119,8 @@ curl -fsSL https://your-api.vercel.app/health
 ```
 
 Should return `200` with health JSON.
+
+Sandbox worker image smoke (on a machine with Docker):
+```bash
+docker run --rm --entrypoint sh ghcr.io/<org>/sentinel-worker:latest -c "docker --version && runsc --version"
+```

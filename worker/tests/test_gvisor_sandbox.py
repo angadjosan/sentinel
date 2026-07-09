@@ -22,8 +22,10 @@ def test_image_tier_builds_runsc_argv_with_caps_and_env():
     )
     plan = build_gvisor_plan(config)
     argv = plan.container_argv
-    assert argv[:5] == ["docker", "run", "--rm", "-d", "--runtime"]
-    assert "runsc" in argv
+    assert argv[:4] == ["docker", "run", "--rm", "-d"]
+    assert "--runtime" in argv and "runsc" in argv
+    assert "--name" in argv and plan.container_name == "sentinel-pentest"
+    assert "--add-host" in argv and "host.docker.internal:host-gateway" in argv  # proxy reachability
     assert "--memory" in argv and "1024m" in argv
     assert "--pids-limit" in argv and "128" in argv  # anti-fork-bomb
     assert "--cap-drop" in argv and "ALL" in argv
@@ -33,6 +35,15 @@ def test_image_tier_builds_runsc_argv_with_caps_and_env():
     assert "-e" in argv and "SENTINEL_CANARY_0=decoy" in argv
     assert DEFAULT_EGRESS_NETWORK in argv
     assert plan.boot_argv == []
+
+
+def test_runtime_param_selects_runc_fallback():
+    from sentinel_worker.vm import PentestSandboxConfig, TargetSpec, build_gvisor_plan
+
+    plan = build_gvisor_plan(PentestSandboxConfig(target=TargetSpec(image="img@sha256:x")), runtime="runc", name="pt-1")
+    argv = plan.container_argv
+    assert argv[argv.index("--runtime") + 1] == "runc"
+    assert plan.container_name == "pt-1"
 
 
 def test_boot_tier_parses_argv_and_has_no_container():
@@ -76,7 +87,7 @@ async def test_gvisor_executor_delegates_to_command_executor():
         def __init__(self):
             self.calls = []
 
-        async def run(self, argv, *, timeout_seconds=30):
+        async def run(self, argv, *, timeout_seconds=30, stdin=None):
             self.calls.append(argv)
             return CommandResult(argv=argv, exit_code=0)
 
@@ -86,3 +97,22 @@ async def test_gvisor_executor_delegates_to_command_executor():
     assert result.exit_code == 0
     assert rec.calls == [["echo", "hi"]]
     await executor.close()
+
+
+async def test_executor_tears_down_started_containers():
+    """A detached `docker run -d --name X` is tracked and stopped on close()."""
+    from sentinel_worker.vm import CommandResult, SandboxExecutor
+
+    class Recording(SandboxExecutor):
+        def __init__(self):
+            self.calls = []
+
+        async def run(self, argv, *, timeout_seconds=30, stdin=None):
+            self.calls.append(argv)
+            return CommandResult(argv=argv, exit_code=0, stdout="container-id-123\n")
+
+    rec = Recording()
+    executor = GvisorSandboxExecutor(command_executor=rec)
+    await executor.run(["docker", "run", "--rm", "-d", "--name", "sentinel-pt-abc", "img"])
+    await executor.close()
+    assert ["docker", "stop", "--time", "5", "sentinel-pt-abc"] in rec.calls

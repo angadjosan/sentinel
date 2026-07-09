@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .models import Base
 
-CURRENT_SCHEMA_VERSION = "0003_auth_hardening"
+CURRENT_SCHEMA_VERSION = "0005_repo_pentest_config_blob"
 
 
 async def apply_migrations(engine: AsyncEngine) -> list[str]:
@@ -38,6 +38,8 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN api_endpoint TEXT"))
             if "source_retention_days" not in columns:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN source_retention_days INTEGER DEFAULT 365"))
+            if "pentest_api_key" not in columns:  # 0004
+                await conn.execute(text("ALTER TABLE accounts ADD COLUMN pentest_api_key TEXT"))
             user_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(users)"))}
             if "name" not in user_columns:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN name TEXT"))
@@ -62,6 +64,20 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN ip_address TEXT"))
             if "refresh_token_hash" not in session_columns:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN refresh_token_hash TEXT"))
+            # Repo pentest config (0004 flat columns + 0005 structured blob). create_all
+            # covers fresh dev DBs; these ALTERs upgrade a pre-existing SQLite dev DB.
+            repo_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(repos)"))}
+            for column, ddl in (
+                ("pentest_mode", "ALTER TABLE repos ADD COLUMN pentest_mode TEXT DEFAULT 'staging'"),
+                ("staging_base_url", "ALTER TABLE repos ADD COLUMN staging_base_url TEXT"),
+                ("healthcheck_path", "ALTER TABLE repos ADD COLUMN healthcheck_path TEXT"),
+                ("boot", "ALTER TABLE repos ADD COLUMN boot TEXT"),
+                ("healthcheck", "ALTER TABLE repos ADD COLUMN healthcheck TEXT"),
+                ("egress_allowlist", "ALTER TABLE repos ADD COLUMN egress_allowlist TEXT"),
+                ("pentest_config", "ALTER TABLE repos ADD COLUMN pentest_config TEXT"),  # 0005
+            ):
+                if column not in repo_columns:
+                    await conn.execute(text(ddl))
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:

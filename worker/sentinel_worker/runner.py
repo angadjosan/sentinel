@@ -80,9 +80,11 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     Loads the finding + repo pentest config, dispatches HTTP payloads to the
     staging URL, and lets the oracle write the finding confirmation directly.
     """
+    import hashlib
+
     from .pentest import PentestRequestContext, run_pentest
     from .pentest_config import resolve_pentest_config
-    from .vm import GvisorSandboxExecutor
+    from .vm import DEFAULT_EGRESS_NETWORK, GvisorSandboxExecutor, apply_egress_rules, egress_rules, ensure_egress_network
 
     payload = claimed.payload
     finding_id = payload.get("finding_id")
@@ -116,14 +118,32 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
 
     # local_worker (self-hosted): boot the target under gVisor on the worker host.
     # staging (hosted default): no on-worker sandbox — HTTP-only probe of staging_base_url.
-    executor = GvisorSandboxExecutor() if resolved.use_local_sandbox else None
-
-    # Start the token-scoped egress proxy as the sandbox's only outbound path,
-    # and point the sandbox at it. It composes default-deny + token-scoping with
-    # per-request credential brokering and canary leak detection.
+    executor = None
     proxy_server = None
+    sandbox_runtime = "runsc"
+    container_name = "sentinel-pentest"
     if resolved.use_local_sandbox:
+        from .sandbox_preflight import detect_capabilities
+
+        executor = GvisorSandboxExecutor()
+        # Preflight: hard-fail with a clear message if docker is absent; otherwise
+        # resolve the runtime (runsc, or runc fallback) and whether we can apply
+        # iptables hardening (NET_ADMIN). Degrades gracefully.
+        caps = await detect_capabilities(executor)
+        sandbox_runtime = caps.runtime
+        container_name = f"sentinel-pt-{hashlib.sha256(f'{repo.id}:{finding_id}'.encode()).hexdigest()[:12]}"
+
+        # Ensure the internal egress network exists (target has no direct external
+        # route — outbound only via the proxy).
+        await ensure_egress_network(executor, DEFAULT_EGRESS_NETWORK)
+
+        # Start the token-scoped egress proxy as the sandbox's only outbound path.
         proxy_server = await _start_egress_proxy(resolved, seed=f"{repo.id}:{finding_id}", healthcheck=healthcheck)
+
+        # Optional hard enforcement: DROP the target's forwarded egress so even a
+        # proxy-unaware app can't bypass it. Best-effort; requires NET_ADMIN.
+        if caps.hard_egress:
+            await apply_egress_rules(executor, egress_rules(resolved.sandbox.vm_ip, []))
 
     context = PentestRequestContext(
         sanitizer_output=str(payload.get("sanitizer_output", "")),
@@ -136,6 +156,9 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
         attack_safety=resolved.attack_safety,
         canary_tokens=resolved.canary_tokens,
         broker=resolved.broker,
+        sandbox_runtime=sandbox_runtime,
+        sandbox_network=DEFAULT_EGRESS_NETWORK,
+        container_name=container_name,
     )
 
     llm = await _pentest_llm(db, account, _llm)
@@ -154,7 +177,7 @@ async def _start_egress_proxy(resolved, *, seed: str, healthcheck: str | None):
     import hashlib
 
     from .egress_proxy import build_egress_proxy
-    from .vm import _host_from_healthcheck, build_egress_proxy_env
+    from .vm import DEFAULT_PROXY_HOST_FROM_SANDBOX, _host_from_healthcheck, build_egress_proxy_env
 
     egress = resolved.sandbox.egress
     allow_hosts = list(egress.allow_hosts) if egress else []
@@ -171,9 +194,11 @@ async def _start_egress_proxy(resolved, *, seed: str, healthcheck: str | None):
         canary_tokens=resolved.canary_tokens,
         token_scoped=bool(egress.token_scoped) if egress else True,
     )
-    server = await proxy.serve()
+    # Bind on all interfaces so the sandboxed container can reach the proxy via
+    # the docker host gateway (host.docker.internal), not just host-localhost.
+    server = await proxy.serve(host="0.0.0.0")
     port = server.sockets[0].getsockname()[1]
     # env is a mutable dict on the frozen config — safe to enrich in place.
-    resolved.sandbox.env.update(build_egress_proxy_env(port))
+    resolved.sandbox.env.update(build_egress_proxy_env(port, host=DEFAULT_PROXY_HOST_FROM_SANDBOX))
     resolved.sandbox.env["SENTINEL_SANDBOX_TOKEN"] = sandbox_token
     return server
