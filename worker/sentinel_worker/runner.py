@@ -118,6 +118,13 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     # staging (hosted default): no on-worker sandbox — HTTP-only probe of staging_base_url.
     executor = GvisorSandboxExecutor() if resolved.use_local_sandbox else None
 
+    # Start the token-scoped egress proxy as the sandbox's only outbound path,
+    # and point the sandbox at it. It composes default-deny + token-scoping with
+    # per-request credential brokering and canary leak detection.
+    proxy_server = None
+    if resolved.use_local_sandbox:
+        proxy_server = await _start_egress_proxy(resolved, seed=f"{repo.id}:{finding_id}", healthcheck=healthcheck)
+
     context = PentestRequestContext(
         sanitizer_output=str(payload.get("sanitizer_output", "")),
         behavioral_proof=payload.get("behavioral_proof"),
@@ -132,6 +139,41 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     )
 
     llm = await _pentest_llm(db, account, _llm)
-    # run_pentest creates its own Run, evaluates the oracle, and writes the
-    # finding confirmation + CONFIRMED_EXPLOIT edge directly (AUDIT.md §3 D6).
-    await run_pentest(db, finding, context, llm=llm)
+    try:
+        # run_pentest creates its own Run, evaluates the oracle, and writes the
+        # finding confirmation + CONFIRMED_EXPLOIT edge directly (AUDIT.md §3 D6).
+        await run_pentest(db, finding, context, llm=llm)
+    finally:
+        if proxy_server is not None:
+            proxy_server.close()
+
+
+async def _start_egress_proxy(resolved, *, seed: str, healthcheck: str | None):
+    """Build + serve the run's egress proxy and wire the sandbox to route all
+    outbound traffic through it (HTTP(S)_PROXY env + a per-run sandbox token)."""
+    import hashlib
+
+    from .egress_proxy import build_egress_proxy
+    from .vm import _host_from_healthcheck, build_egress_proxy_env
+
+    egress = resolved.sandbox.egress
+    allow_hosts = list(egress.allow_hosts) if egress else []
+    hc = resolved.sandbox.healthcheck or healthcheck
+    hc_host = _host_from_healthcheck(hc) if hc else None
+    if hc_host:
+        allow_hosts.append(hc_host)
+
+    sandbox_token = hashlib.sha256(f"sandbox-token:{seed}".encode()).hexdigest()[:32]
+    proxy = build_egress_proxy(
+        allow_hosts=allow_hosts,
+        sandbox_token=sandbox_token,
+        broker=resolved.broker,
+        canary_tokens=resolved.canary_tokens,
+        token_scoped=bool(egress.token_scoped) if egress else True,
+    )
+    server = await proxy.serve()
+    port = server.sockets[0].getsockname()[1]
+    # env is a mutable dict on the frozen config — safe to enrich in place.
+    resolved.sandbox.env.update(build_egress_proxy_env(port))
+    resolved.sandbox.env["SENTINEL_SANDBOX_TOKEN"] = sandbox_token
+    return server
