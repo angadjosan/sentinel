@@ -157,8 +157,14 @@ class Graph(Base):
 class Node(Base):
     __tablename__ = "nodes"
 
+    # Composite primary key (graph_id, id): node ids are only deterministic
+    # *within* a graph (e.g. `fn:app.js:handler`), so main / branch / session
+    # graphs must each be able to carry their own copy of the same id. Before
+    # this, `id` was a single global PK, which meant a branch graph could not
+    # override a node that already existed in main and unscoped `db.get(Node,
+    # id)` could return another graph's row. All lookups are graph-scoped.
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    graph_id: Mapped[str] = mapped_column(String, ForeignKey("graphs.id"), nullable=False)
+    graph_id: Mapped[str] = mapped_column(String, ForeignKey("graphs.id"), primary_key=True, nullable=False)
     kind: Mapped[str] = mapped_column(String, nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
     file: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -185,8 +191,12 @@ class Edge(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     graph_id: Mapped[str] = mapped_column(String, ForeignKey("graphs.id"), nullable=False)
-    src: Mapped[str] = mapped_column(String, ForeignKey("nodes.id"), nullable=False)
-    dst: Mapped[str] = mapped_column(String, ForeignKey("nodes.id"), nullable=False)
+    # src/dst reference nodes within the same graph_id. No FK constraint: nodes
+    # now have a composite (graph_id, id) PK, which a single-column FK cannot
+    # target. Referential integrity is enforced at the application layer (every
+    # edge is written with the same graph_id as its endpoints).
+    src: Mapped[str] = mapped_column(String, nullable=False)
+    dst: Mapped[str] = mapped_column(String, nullable=False)
     kind: Mapped[str] = mapped_column(String, nullable=False)
     tainted: Mapped[bool] = mapped_column(Boolean, default=False)
     sanitized: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -246,7 +256,9 @@ class Finding(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uuid)
     graph_id: Mapped[str] = mapped_column(String, ForeignKey("graphs.id"), nullable=False)
-    node_id: Mapped[str | None] = mapped_column(String, ForeignKey("nodes.id"), nullable=True)
+    # No FK to nodes.id: nodes have a composite (graph_id, id) PK now. The node
+    # is resolved via (finding.graph_id, finding.node_id) at read time.
+    node_id: Mapped[str | None] = mapped_column(String, nullable=True)
     run_id: Mapped[str | None] = mapped_column(String, ForeignKey("runs.id"), nullable=True)
     vuln_type: Mapped[str] = mapped_column(String, nullable=False)
     severity: Mapped[str] = mapped_column(String, nullable=False)

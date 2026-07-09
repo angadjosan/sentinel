@@ -428,7 +428,7 @@ async def _dispatch_tool_inner(
 
     elif tool_name == "graph_annotate":
         node_id = tool_input["node_id"]
-        node = await db.get(Node, node_id)
+        node = await db.get(Node, {"graph_id": graph.graph_id, "id": node_id})
         if node is None:
             return {"error": f"Node not found: {node_id}"}
         if "label" in tool_input and tool_input["label"]:

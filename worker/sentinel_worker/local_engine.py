@@ -193,7 +193,7 @@ def push_results_to_cloud(
 
 async def _merge_cloud_context(session: AsyncSession, *, graph_id: str, context: GraphDelta) -> None:
     for incoming in context.nodes:
-        if await session.get(Node, incoming["id"]) is None:
+        if await session.get(Node, {"graph_id": graph_id, "id": incoming["id"]}) is None:
             session.add(Node(graph_id=graph_id, **{k: v for k, v in incoming.items() if k != "id"}, id=incoming["id"]))
     await session.flush()
     for incoming in context.edges:
@@ -264,7 +264,7 @@ async def run_local_source_scan(
                     file_path: str | None = None
                     line: int | None = None
                     if f.node_id:
-                        node = await session.get(Node, f.node_id)
+                        node = await session.get(Node, {"graph_id": f.graph_id, "id": f.node_id})
                         if node is not None:
                             file_path, line = node.file, node.line_start
                         elif f.node_id.startswith("file:"):

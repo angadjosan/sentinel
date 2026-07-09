@@ -1015,16 +1015,9 @@ async def graph_upsert(
                 setattr(existing, field_name, getattr(incoming, field_name))
             existing.updated_at = now()
         else:
-            foreign_owner = await db.scalar(select(Node.graph_id).where(Node.id == incoming.id))
-            if foreign_owner is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"node {incoming.id!r} already exists in a different graph; "
-                        "node ids are a single global primary key today, so this repo cannot "
-                        "claim an id already used elsewhere (requires a composite node key migration)"
-                    ),
-                )
+            # Nodes now have a composite (graph_id, id) PK, so the same id can
+            # legitimately exist in another graph (main vs branch vs session).
+            # We scope by graph.id above, so this is a fresh node for THIS graph.
             db.add(Node(graph_id=graph.id, **incoming.model_dump()))
         nodes_upserted += 1
 

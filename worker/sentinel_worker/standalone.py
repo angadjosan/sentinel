@@ -216,7 +216,7 @@ async def _scan(
                     file_path: str | None = None
                     line: int | None = None
                     if f.node_id:
-                        node = await session.get(Node, f.node_id)
+                        node = await session.get(Node, {"graph_id": f.graph_id, "id": f.node_id})
                         if node is not None:
                             file_path = node.file
                             line = node.line_start

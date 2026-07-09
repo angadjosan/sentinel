@@ -337,7 +337,7 @@ class TestConstructionDB:
                     ),
                 )
             async with session.begin():
-                route = await session.get(Node, "route:api.py:POST /items")
+                route = await session.get(Node, {"graph_id": graph.id, "id": "route:api.py:POST /items"})
         assert route is not None
         assert route.is_entry_point is True
 
@@ -362,7 +362,7 @@ class TestConstructionDB:
                     ),
                 )
             async with session.begin():
-                fn = await session.get(Node, "fn:utils.ts:validateInput")
+                fn = await session.get(Node, {"graph_id": graph.id, "id": "fn:utils.ts:validateInput"})
         assert fn is not None
         assert fn.language == "typescript"
 
@@ -379,7 +379,7 @@ class TestConstructionDB:
                 await session.flush()
                 await build_file_graph(session, graph.id, SourceFile(path="empty.py", content="", is_new=True))
             async with session.begin():
-                file_node = await session.get(Node, "file:empty.py")
+                file_node = await session.get(Node, {"graph_id": graph.id, "id": "file:empty.py"})
                 fns = list(await session.scalars(select(Node).where(Node.kind == "FUNCTION").where(Node.file == "empty.py")))
         assert file_node is not None
         assert fns == []
