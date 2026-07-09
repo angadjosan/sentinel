@@ -18,3 +18,4 @@ cli/binaries/
 .vercel
 .env*
 build/
+.playwright-mcp/
