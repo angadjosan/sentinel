@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
-from sentinel_worker.graph_merge import merge_graph
+from sentinel_worker.graph_merge import gc_sessions, merge_graph, promote_session_to_branch
 from sentinel_worker.graph_query import LayeredGraphQuery
 from sentinel_worker.payload_guard import SourcePayloadError, assert_no_source_markers
 from sentinel_worker.scan import get_or_create_graph, trace_event
@@ -44,6 +44,9 @@ from .schemas import (
     GraphResponse,
     GraphMergeRequest,
     GraphMetaResponse,
+    MergeBranchRequest,
+    SessionGcRequest,
+    SessionPromoteRequest,
     GraphSubgraphResponse,
     GraphUpsertRequest,
     GraphUpsertResponse,
@@ -1146,6 +1149,85 @@ async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = De
         "findings_repointed": result.findings_repointed,
         "had_base": result.had_base,
     }
+
+
+@app.post("/graphs/merge-branch")
+async def merge_branch_endpoint(
+    payload: MergeBranchRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)
+) -> dict[str, object]:
+    """Merge a branch graph into main, resolved by repo + branch name. This is
+    the CD entry point — invoked when a branch lands, so callers don't have to
+    know internal graph ids."""
+    main_graph = await get_or_create_graph(db, payload.repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot merge graphs for another account")
+    branch = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "branch")
+        .where(Graph.branch_name == payload.branch_name)
+        .where(Graph.status == "active")
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail="no active branch graph for that repo/branch")
+    result = await merge_graph(db, branch_graph_id=branch.id, main_graph_id=main_graph.id)
+    return {
+        "branch_graph_id": branch.id,
+        "main_graph_id": main_graph.id,
+        "copied": result.copied,
+        "conflicts": result.conflicts,
+        "findings_repointed": result.findings_repointed,
+        "had_base": result.had_base,
+    }
+
+
+@app.post("/graphs/promote-session")
+async def promote_session_endpoint(
+    payload: SessionPromoteRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)
+) -> dict[str, object]:
+    """Promote a dev session graph into its branch graph (same diff landed in CI)."""
+    main_graph = await get_or_create_graph(db, payload.repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot promote graphs for another account")
+    branch = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "branch")
+        .where(Graph.branch_name == payload.branch_name)
+        .where(Graph.status == "active")
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail="no active branch graph for that repo/branch")
+    session_graph = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "session")
+        .where(Graph.session_id == payload.session_id)
+    )
+    if session_graph is None:
+        raise HTTPException(status_code=404, detail="no session graph with that id")
+    result = await promote_session_to_branch(db, session_graph_id=session_graph.id, branch_graph_id=branch.id)
+    return {
+        "session_graph_id": session_graph.id,
+        "branch_graph_id": branch.id,
+        "copied": result.copied,
+        "findings_repointed": result.findings_repointed,
+    }
+
+
+@app.post("/admin/sessions/gc")
+async def gc_sessions_endpoint(
+    payload: SessionGcRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)
+) -> dict[str, int]:
+    """Reclaim session graphs: promoted ones, plus any older than the cutoff."""
+    older_than = now() - timedelta(days=payload.older_than_days) if payload.older_than_days is not None else None
+    removed = await gc_sessions(
+        db,
+        account_id=_graph_account_id(principal),
+        older_than=older_than,
+        include_promoted=payload.include_promoted,
+    )
+    return {"removed": removed}
 
 
 @app.get("/analytics/token-spend")

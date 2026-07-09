@@ -923,6 +923,64 @@ class TestGraphMerge:
         assert result.conflicts == []
         assert merged is not None
 
+    @pytest.mark.asyncio
+    async def test_promote_session_folds_into_branch(self):
+        from sentinel_worker.graph_merge import promote_session_to_branch
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                sess = await get_or_create_graph(session, "acme/repo", kind="session", session_id="dev-1", branch_name="f")
+                session.add(Node(id="n:s", graph_id=sess.id, kind="FUNCTION", name="s"))
+                session.add(Finding(
+                    graph_id=sess.id, vuln_type="x", severity="low", title="t",
+                    description="d", remediation="r", fingerprint="fp:promote",
+                ))
+                await session.flush()
+                await promote_session_to_branch(session, session_graph_id=sess.id, branch_graph_id=branch.id)
+            async with session.begin():
+                branch_node = await session.get(Node, {"graph_id": branch.id, "id": "n:s"})
+                sess_reloaded = await session.get(Graph, sess.id)
+                finding = await session.scalar(select(Finding).where(Finding.fingerprint == "fp:promote"))
+        assert branch_node is not None
+        assert sess_reloaded.status == "promoted"
+        assert sess_reloaded.promoted_at is not None
+        assert finding.graph_id == branch.id
+
+    @pytest.mark.asyncio
+    async def test_gc_sessions_removes_promoted_and_stale(self):
+        from datetime import timedelta
+
+        from sentinel_worker.graph_merge import gc_sessions
+        from sentinel_worker.models import now as _now
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                promoted = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-promoted")
+                promoted.status = "promoted"
+                session.add(Node(id="n:p", graph_id=promoted.id, kind="FUNCTION", name="p"))
+                stale = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-stale")
+                stale.created_at = _now() - timedelta(days=10)
+                fresh = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-fresh")
+                await session.flush()
+                removed = await gc_sessions(session, older_than=_now() - timedelta(days=7), include_promoted=True)
+            async with session.begin():
+                gone_promoted = await session.get(Graph, promoted.id)
+                gone_stale = await session.get(Graph, stale.id)
+                still_fresh = await session.get(Graph, fresh.id)
+                orphan_nodes = list(await session.scalars(select(Node).where(Node.graph_id == promoted.id)))
+        assert removed == 2
+        assert gone_promoted is None
+        assert gone_stale is None
+        assert still_fresh is not None
+        assert orphan_nodes == []
+
 
 # ===========================================================================
 # vm.py — forbidden tokens and egress rules

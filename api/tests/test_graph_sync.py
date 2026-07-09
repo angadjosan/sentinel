@@ -246,6 +246,84 @@ def test_graph_view_branch_missing_is_404(monkeypatch):
         assert resp.status_code == 404
 
 
+def test_merge_branch_by_name_merges_into_main(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post("/graph/upsert", headers=headers, json={"repo_name": repo, "graph_kind": "main", "nodes": [_NODE_A], "edges": []})
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x", "nodes": [_NODE_B], "edges": []},
+        )
+        resp = client.post("/graphs/merge-branch", headers=headers, json={"repo_name": repo, "branch_name": "feature/x"})
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["had_base"] is True
+        # After merge, main carries the branch's node too.
+        main_view = client.get("/graph", headers=headers, params={"repo_name": repo})
+        assert _NODE_B["id"] in {n["id"] for n in main_view.json()["nodes"]}
+
+
+def test_merge_branch_missing_is_404(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post("/graph/upsert", headers=headers, json={"repo_name": repo, "graph_kind": "main", "nodes": [_NODE_A], "edges": []})
+        resp = client.post("/graphs/merge-branch", headers=headers, json={"repo_name": repo, "branch_name": "nope"})
+        assert resp.status_code == 404
+
+
+def test_promote_session_into_branch(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x", "nodes": [_NODE_A], "edges": []},
+        )
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "session", "session_id": "dev-1", "branch_name": "feature/x", "nodes": [_NODE_B], "edges": []},
+        )
+        resp = client.post(
+            "/graphs/promote-session",
+            headers=headers,
+            json={"repo_name": repo, "branch_name": "feature/x", "session_id": "dev-1"},
+        )
+        assert resp.status_code == 200, resp.text
+        branch_view = client.get(
+            "/graph", headers=headers, params={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x"}
+        )
+        assert _NODE_B["id"] in {n["id"] for n in branch_view.json()["nodes"]}
+
+
+def test_session_gc_requires_admin_and_reclaims(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x", "nodes": [_NODE_A], "edges": []},
+        )
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "session", "session_id": "dev-1", "branch_name": "feature/x", "nodes": [_NODE_B], "edges": []},
+        )
+        client.post("/graphs/promote-session", headers=headers, json={"repo_name": repo, "branch_name": "feature/x", "session_id": "dev-1"})
+        resp = client.post("/admin/sessions/gc", headers=headers, json={"include_promoted": True})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["removed"] >= 1
+
+
 def test_upsert_requires_auth(monkeypatch):
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
     with TestClient(app) as client:

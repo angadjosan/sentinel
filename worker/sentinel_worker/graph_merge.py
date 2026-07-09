@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from dataclasses import dataclass, field
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import Edge, Finding, Graph, Node, now
@@ -149,3 +150,58 @@ async def merge_graph(db: AsyncSession, *, branch_graph_id: str, main_graph_id: 
     branch.status = "merged"
     branch.merged_at = now()
     return result
+
+
+async def promote_session_to_branch(db: AsyncSession, *, session_graph_id: str, branch_graph_id: str) -> MergeResult:
+    """Fold a dev session graph into its branch graph.
+
+    A session graph is a per-developer overlay on the branch, scoped to the
+    working diff. When the same diff lands in CI, its nodes/edges/findings are
+    promoted onto the branch graph (session wins — it is the newer state) and
+    the session is marked promoted so it can be GC'd. This is a 2-way overlay
+    apply, not a 3-way merge: the branch is the session's own parent, so there
+    is no independent third version to reconcile.
+    """
+    session_g = await db.get(Graph, session_graph_id)
+    branch_g = await db.get(Graph, branch_graph_id)
+    if session_g is None or branch_g is None:
+        raise ValueError("session or branch graph not found")
+    result = MergeResult()
+    for node in list(await db.scalars(select(Node).where(Node.graph_id == session_graph_id))):
+        await db.merge(_copy_node(node, branch_graph_id))
+        result.copied += 1
+    result.copied += await _append_missing_edges(db, src_graph_id=session_graph_id, dst_graph_id=branch_graph_id)
+    result.findings_repointed = await _repoint_findings(db, from_graph_id=session_graph_id, to_graph_id=branch_graph_id)
+    session_g.status = "promoted"
+    session_g.promoted_at = now()
+    return result
+
+
+async def gc_sessions(
+    db: AsyncSession,
+    *,
+    account_id: str | None = None,
+    older_than: datetime | None = None,
+    include_promoted: bool = True,
+) -> int:
+    """Delete session graphs (and their nodes/edges/findings) that are already
+    promoted or older than a cutoff. Session graphs are ephemeral by design;
+    nothing reclaimed them before, so they accumulated forever.
+
+    Returns the number of session graphs removed.
+    """
+    stmt = select(Graph).where(Graph.kind == "session")
+    if account_id is not None:
+        stmt = stmt.where(Graph.account_id == account_id)
+    removed = 0
+    for g in list(await db.scalars(stmt)):
+        stale = older_than is not None and g.created_at < older_than
+        promoted = include_promoted and g.status == "promoted"
+        if not (stale or promoted):
+            continue
+        await db.execute(delete(Finding).where(Finding.graph_id == g.id))
+        await db.execute(delete(Edge).where(Edge.graph_id == g.id))
+        await db.execute(delete(Node).where(Node.graph_id == g.id))
+        await db.delete(g)
+        removed += 1
+    return removed
