@@ -95,6 +95,43 @@ def _scrub_trace_value(value: object) -> object:
     return value
 
 
+async def _snapshot_base_graph(
+    db: AsyncSession, *, account_id: str, repo_id: str, source_graph_id: str, base_commit: str | None
+) -> Graph:
+    """Capture an immutable `kind="base"` copy of a graph's nodes and edges.
+
+    This is the merge base: main's state at branch-creation time. A branch
+    stores only the nodes it touches (a sparse overlay), so without this
+    snapshot there is nothing to diff current-main against to tell whether main
+    advanced under the branch. Base graphs are never parented into read chains
+    and are excluded from the graph list / overview.
+    """
+    base = Graph(account_id=account_id, repo_id=repo_id, kind="base", status="base", base_commit=base_commit)
+    db.add(base)
+    await db.flush()
+    for n in list(await db.scalars(select(Node).where(Node.graph_id == source_graph_id))):
+        db.add(
+            Node(
+                id=n.id, graph_id=base.id, kind=n.kind, name=n.name, file=n.file,
+                line_start=n.line_start, line_end=n.line_end, language=n.language,
+                trust_level=n.trust_level, auth_required=n.auth_required, privilege=n.privilege,
+                is_entry_point=n.is_entry_point, is_sink=n.is_sink, taint_uncertain=n.taint_uncertain,
+                parse_error=n.parse_error, label=n.label, intent=n.intent, commit_hash=n.commit_hash,
+                is_new=False, deleted=n.deleted,
+            )
+        )
+    for e in list(await db.scalars(select(Edge).where(Edge.graph_id == source_graph_id))):
+        db.add(
+            Edge(
+                graph_id=base.id, src=e.src, dst=e.dst, kind=e.kind, tainted=e.tainted,
+                sanitized=e.sanitized, taint_uncertain=e.taint_uncertain,
+                call_uncertainty=e.call_uncertainty, order_index=e.order_index,
+            )
+        )
+    await db.flush()
+    return base
+
+
 async def get_or_create_graph(
     db: AsyncSession,
     repo_name: str,
@@ -104,20 +141,20 @@ async def get_or_create_graph(
     kind: str = "main",
     branch_name: str | None = None,
     session_id: str | None = None,
+    base_commit: str | None = None,
 ) -> Graph:
     """Resolve (creating if needed) the graph for a repo.
 
-    `kind="main"` (the default, and the only kind ever created before this
-    signature grew branch/session support) behaves exactly as before — every
-    existing call site is unaffected. `kind="branch"` / `kind="session"`
-    resolve or create an overlay graph parented off main, per the versioning
-    model in non-code/README.md. NOTE: branch/session graphs currently share
-    the same global `nodes.id` primary key as main (see models.py) — writing a
-    node id that already exists in main from a branch/session graph is
-    rejected by callers (see /graph/upsert) rather than silently upserted,
-    because doing so would overwrite the main graph's row. A composite
-    (graph_id, id) key is required before branch/session graphs can safely
-    carry their own copies of nodes main already has.
+    `kind="main"` (the default) behaves exactly as before — every existing call
+    site is unaffected. `kind="branch"` / `kind="session"` resolve or create an
+    overlay graph parented off main, per the versioning model in
+    non-code/README.md. Nodes carry a composite (graph_id, id) key, so each
+    overlay holds its own copies of the nodes it touches.
+
+    When a branch graph is first created, an immutable base snapshot of main is
+    captured (see `_snapshot_base_graph`) and recorded as `base_graph_id` so the
+    branch can later be 3-way merged. `base_commit`, when supplied, records the
+    main commit the branch forked from for provenance.
     """
     account = None
     repo = None
@@ -156,7 +193,13 @@ async def get_or_create_graph(
             .where(Graph.status == "active")
         )
         if graph is None:
-            graph = Graph(account_id=account.id, repo_id=repo.id, kind="branch", branch_name=branch_name, parent_id=main_graph.id)
+            base = await _snapshot_base_graph(
+                db, account_id=account.id, repo_id=repo.id, source_graph_id=main_graph.id, base_commit=base_commit
+            )
+            graph = Graph(
+                account_id=account.id, repo_id=repo.id, kind="branch", branch_name=branch_name,
+                parent_id=main_graph.id, base_graph_id=base.id, base_commit=base_commit,
+            )
             db.add(graph)
             await db.flush()
         return graph

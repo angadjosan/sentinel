@@ -337,7 +337,7 @@ class TestConstructionDB:
                     ),
                 )
             async with session.begin():
-                route = await session.get(Node, "route:api.py:POST /items")
+                route = await session.get(Node, {"graph_id": graph.id, "id": "route:api.py:POST /items"})
         assert route is not None
         assert route.is_entry_point is True
 
@@ -362,7 +362,7 @@ class TestConstructionDB:
                     ),
                 )
             async with session.begin():
-                fn = await session.get(Node, "fn:utils.ts:validateInput")
+                fn = await session.get(Node, {"graph_id": graph.id, "id": "fn:utils.ts:validateInput"})
         assert fn is not None
         assert fn.language == "typescript"
 
@@ -379,7 +379,7 @@ class TestConstructionDB:
                 await session.flush()
                 await build_file_graph(session, graph.id, SourceFile(path="empty.py", content="", is_new=True))
             async with session.begin():
-                file_node = await session.get(Node, "file:empty.py")
+                file_node = await session.get(Node, {"graph_id": graph.id, "id": "file:empty.py"})
                 fns = list(await session.scalars(select(Node).where(Node.kind == "FUNCTION").where(Node.file == "empty.py")))
         assert file_node is not None
         assert fns == []
@@ -794,6 +794,192 @@ class TestGraphMerge:
                 branch_reloaded = await session.get(Graph, branch.id)
         assert branch_reloaded.status == "merged"
         assert branch_reloaded.merged_at is not None
+
+    @pytest.mark.asyncio
+    async def test_merge_graph_propagates_tombstone_to_main(self):
+        """A node deleted on the branch marks main's copy deleted on merge."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")
+                session.add_all([main, branch])
+                await session.flush()
+                # Same id lives in both graphs (composite key): live in main,
+                # tombstoned on the branch.
+                session.add(Node(id="n:gone", graph_id=main.id, kind="FUNCTION", name="gone"))
+                session.add(Node(id="n:gone", graph_id=branch.id, kind="FUNCTION", name="gone", deleted=True))
+                await session.flush()
+                await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                main_node = await session.get(Node, {"graph_id": main.id, "id": "n:gone"})
+        assert main_node is not None
+        assert main_node.deleted is True
+
+    @pytest.mark.asyncio
+    async def test_merge_graph_repoints_findings_onto_main(self):
+        """Findings recorded on the branch graph follow the merge onto main."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")
+                session.add_all([main, branch])
+                await session.flush()
+                finding = Finding(
+                    graph_id=branch.id,
+                    vuln_type="sqli",
+                    severity="high",
+                    title="SQL injection",
+                    description="d",
+                    remediation="r",
+                    fingerprint="fp:merge-repoint",
+                    confirmed=True,
+                )
+                session.add(finding)
+                await session.flush()
+                finding_id = finding.id
+                await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                reloaded = await session.get(Finding, finding_id)
+        assert reloaded.graph_id == main.id
+
+    @pytest.mark.asyncio
+    async def test_merge_3way_flags_conflict_when_main_advanced(self):
+        """When main changes a node the branch also changed since the base, the
+        merge records a conflict but still defers to the branch version."""
+        from sentinel_worker.graph_merge import merge_graph
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = await get_or_create_graph(session, "acme/repo")
+                session.add(Node(id="n:x", graph_id=main.id, kind="FUNCTION", name="x", label="v0"))
+                await session.flush()
+                # Base snapshot captured here has n:x == v0.
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                session.add(Node(id="n:x", graph_id=branch.id, kind="FUNCTION", name="x", label="branch-v"))
+                # Main advances the same node independently.
+                main_node = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+                main_node.label = "main-v"
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+        assert result.had_base is True
+        assert "n:x" in result.conflicts
+        assert merged.label == "branch-v"  # branch wins per spec
+
+    @pytest.mark.asyncio
+    async def test_merge_3way_no_conflict_when_main_untouched(self):
+        from sentinel_worker.graph_merge import merge_graph
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = await get_or_create_graph(session, "acme/repo")
+                session.add(Node(id="n:x", graph_id=main.id, kind="FUNCTION", name="x", label="v0"))
+                await session.flush()
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                session.add(Node(id="n:x", graph_id=branch.id, kind="FUNCTION", name="x", label="branch-v"))
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+        assert result.had_base is True
+        assert result.conflicts == []
+        assert merged.label == "branch-v"
+
+    @pytest.mark.asyncio
+    async def test_merge_without_base_falls_back_to_2way(self):
+        """A legacy branch graph with no recorded base still merges (no conflict
+        detection)."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")  # no base_graph_id
+                session.add_all([main, branch])
+                await session.flush()
+                session.add(Node(id="n:y", graph_id=branch.id, kind="FUNCTION", name="y"))
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:y"})
+        assert result.had_base is False
+        assert result.conflicts == []
+        assert merged is not None
+
+    @pytest.mark.asyncio
+    async def test_promote_session_folds_into_branch(self):
+        from sentinel_worker.graph_merge import promote_session_to_branch
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                sess = await get_or_create_graph(session, "acme/repo", kind="session", session_id="dev-1", branch_name="f")
+                session.add(Node(id="n:s", graph_id=sess.id, kind="FUNCTION", name="s"))
+                session.add(Finding(
+                    graph_id=sess.id, vuln_type="x", severity="low", title="t",
+                    description="d", remediation="r", fingerprint="fp:promote",
+                ))
+                await session.flush()
+                await promote_session_to_branch(session, session_graph_id=sess.id, branch_graph_id=branch.id)
+            async with session.begin():
+                branch_node = await session.get(Node, {"graph_id": branch.id, "id": "n:s"})
+                sess_reloaded = await session.get(Graph, sess.id)
+                finding = await session.scalar(select(Finding).where(Finding.fingerprint == "fp:promote"))
+        assert branch_node is not None
+        assert sess_reloaded.status == "promoted"
+        assert sess_reloaded.promoted_at is not None
+        assert finding.graph_id == branch.id
+
+    @pytest.mark.asyncio
+    async def test_gc_sessions_removes_promoted_and_stale(self):
+        from datetime import timedelta
+
+        from sentinel_worker.graph_merge import gc_sessions
+        from sentinel_worker.models import now as _now
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                promoted = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-promoted")
+                promoted.status = "promoted"
+                session.add(Node(id="n:p", graph_id=promoted.id, kind="FUNCTION", name="p"))
+                stale = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-stale")
+                stale.created_at = _now() - timedelta(days=10)
+                fresh = await get_or_create_graph(session, "acme/repo", kind="session", session_id="s-fresh")
+                await session.flush()
+                removed = await gc_sessions(session, older_than=_now() - timedelta(days=7), include_promoted=True)
+            async with session.begin():
+                gone_promoted = await session.get(Graph, promoted.id)
+                gone_stale = await session.get(Graph, stale.id)
+                still_fresh = await session.get(Graph, fresh.id)
+                orphan_nodes = list(await session.scalars(select(Node).where(Node.graph_id == promoted.id)))
+        assert removed == 2
+        assert gone_promoted is None
+        assert gone_stale is None
+        assert still_fresh is not None
+        assert orphan_nodes == []
 
 
 # ===========================================================================

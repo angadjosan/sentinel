@@ -31,9 +31,15 @@ class GraphQuery:
         tenant's node whenever two unrelated graphs produce the same
         deterministic id (e.g. two repos both have `fn:app.js:handler`).
         Every node lookup in this class must go through this method, not
-        `db.get`, until nodes get a composite (graph_id, id) key.
+        `db.get`. Tombstoned (deleted) nodes are treated as absent so a dangling
+        edge to a removed node resolves to nothing.
         """
-        return await self.db.scalar(select(Node).where(Node.id == node_id).where(Node.graph_id == self.graph_id))
+        return await self.db.scalar(
+            select(Node)
+            .where(Node.id == node_id)
+            .where(Node.graph_id == self.graph_id)
+            .where(Node.deleted.is_(False))
+        )
 
     async def neighbors(self, node_id: str, edge_kinds: list[str] | None = None, max_hops: int | None = None) -> list[Neighbor]:
         cap = max_hops if max_hops is not None else 50
@@ -85,10 +91,16 @@ class GraphQuery:
                 .where(Node.graph_id == self.graph_id)
                 .where(Node.kind == "PARAMETER")
                 .where(Node.trust_level == "untrusted")
+                .where(Node.deleted.is_(False))
             )
         )
         sinks = list(
-            await self.db.scalars(select(Node).where(Node.graph_id == self.graph_id).where(Node.is_sink.is_(True)))
+            await self.db.scalars(
+                select(Node)
+                .where(Node.graph_id == self.graph_id)
+                .where(Node.is_sink.is_(True))
+                .where(Node.deleted.is_(False))
+            )
         )
         all_paths: list[list[Node]] = []
         for source in sources:
@@ -252,6 +264,46 @@ class LayeredGraphQuery:
         if self._queries:
             return await self._queries[0].serialize_for_prompt(node_ids, max_hops=max_hops)
         return ""
+
+    async def materialized_nodes(self, limit: int | None = None) -> list[Node]:
+        """All nodes visible from this layer stack, higher layers shadowing lower.
+
+        Walks graph_ids in priority order (session → branch → main); the first
+        layer to define a node id wins. This is the whole-graph analogue of the
+        per-seed shadowing in `neighbors`, used to render a branch/main view.
+        """
+        seen: set[str] = set()
+        out: list[Node] = []
+        for gid in self.graph_ids:
+            for node in await self.db.scalars(select(Node).where(Node.graph_id == gid)):
+                if node.id in seen:
+                    continue
+                # First layer to define the id wins. A tombstone in a higher
+                # layer claims the id and hides any live copy below it.
+                seen.add(node.id)
+                if node.deleted:
+                    continue
+                out.append(node)
+                if limit is not None and len(out) >= limit:
+                    return out
+        return out
+
+    async def materialized_edges(self, limit: int | None = None) -> list[Edge]:
+        """All edges visible from this layer stack, deduped by (src, dst, kind,
+        call_uncertainty) — the same identity merge_graph uses — with higher
+        layers shadowing lower ones."""
+        seen: set[tuple[str, str, str, str | None]] = set()
+        out: list[Edge] = []
+        for gid in self.graph_ids:
+            for edge in await self.db.scalars(select(Edge).where(Edge.graph_id == gid)):
+                key = (edge.src, edge.dst, edge.kind, edge.call_uncertainty)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(edge)
+                if limit is not None and len(out) >= limit:
+                    return out
+        return out
 
     @classmethod
     async def for_graph(cls, db: AsyncSession, graph_id: str) -> "LayeredGraphQuery":

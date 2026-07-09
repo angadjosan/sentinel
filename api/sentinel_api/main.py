@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
-from sentinel_worker.graph_merge import merge_graph
+from sentinel_worker.graph_merge import gc_sessions, merge_graph, promote_session_to_branch
 from sentinel_worker.graph_query import LayeredGraphQuery
 from sentinel_worker.payload_guard import SourcePayloadError, assert_no_source_markers
 from sentinel_worker.scan import get_or_create_graph, trace_event
@@ -43,6 +43,10 @@ from .schemas import (
     FindingResponse,
     GraphResponse,
     GraphMergeRequest,
+    GraphMetaResponse,
+    MergeBranchRequest,
+    SessionGcRequest,
+    SessionPromoteRequest,
     GraphSubgraphResponse,
     GraphUpsertRequest,
     GraphUpsertResponse,
@@ -897,17 +901,100 @@ async def _cancel_run_for_principal(db: AsyncSession, run_id: str, principal: Pr
     return await run_response(db, run)
 
 
+async def _resolve_repo_graph(
+    db: AsyncSession,
+    principal: Principal,
+    repo_name: str,
+    graph_kind: str,
+    branch_name: str | None,
+) -> Graph:
+    """Resolve a repo's graph for a *read*. `main` is get-or-created (idempotent
+    and always expected); `branch`/`session` are looked up but never created on
+    a read path — viewing a nonexistent branch is a 404, not a fresh empty graph."""
+    main_graph = await get_or_create_graph(db, repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot read graph from another account")
+    if graph_kind == "main":
+        return main_graph
+    stmt = select(Graph).where(Graph.repo_id == main_graph.repo_id).where(Graph.kind == graph_kind)
+    if graph_kind == "branch":
+        if not branch_name:
+            raise HTTPException(status_code=400, detail="branch_name is required for graph_kind='branch'")
+        stmt = stmt.where(Graph.branch_name == branch_name).where(Graph.status == "active")
+    graph = await db.scalar(stmt)
+    if graph is None:
+        raise HTTPException(status_code=404, detail=f"no active {graph_kind} graph for that repo")
+    return graph
+
+
 @app.get("/graph", response_model=GraphResponse)
-async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal), limit: int = 250) -> GraphResponse:
-    node_stmt = select(Node).limit(limit)
-    edge_stmt = select(Edge).limit(limit)
+async def graph(
+    repo_name: str | None = None,
+    graph_kind: Literal["main", "branch", "session"] = "main",
+    branch_name: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+    limit: int = 250,
+) -> GraphResponse:
+    """Return the graph for display.
+
+    With `repo_name`, resolves that repo's graph (main by default, or a named
+    branch) and materializes it through the layered session→branch→main
+    resolver so the view reflects exactly one version — not a union of every
+    graph. Without `repo_name`, returns an account-wide overview of *main*
+    graphs only (branch/session overlays are excluded so ephemeral and isolated
+    versions no longer bleed into the overview)."""
+    if repo_name is not None:
+        graph = await _resolve_repo_graph(db, principal, repo_name, graph_kind, branch_name)
+        layered = await LayeredGraphQuery.for_graph(db, graph.id)
+        nodes = await layered.materialized_nodes(limit)
+        visible = {n.id for n in nodes}
+        edges = [e for e in await layered.materialized_edges(limit) if e.src in visible and e.dst in visible]
+        return GraphResponse(nodes=[node_response(n) for n in nodes], edges=[edge_response(e) for e in edges])
+
+    main_ids = select(Graph.id).where(Graph.kind == "main")
     if not _skip_tenant_filter(principal):
-        graph_ids = select(Graph.id).where(Graph.account_id == principal.account_id)
-        node_stmt = node_stmt.where(Node.graph_id.in_(graph_ids))
-        edge_stmt = edge_stmt.where(Edge.graph_id.in_(graph_ids))
+        main_ids = main_ids.where(Graph.account_id == principal.account_id)
+    node_stmt = select(Node).where(Node.graph_id.in_(main_ids)).where(Node.deleted.is_(False)).limit(limit)
     nodes = list(await db.scalars(node_stmt))
-    edges = list(await db.scalars(edge_stmt))
+    visible = {n.id for n in nodes}
+    edge_rows = list(await db.scalars(select(Edge).where(Edge.graph_id.in_(main_ids)).limit(limit)))
+    edges = [e for e in edge_rows if e.src in visible and e.dst in visible]
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.get("/graphs", response_model=list[GraphMetaResponse])
+async def list_graphs(
+    repo_name: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+    limit: int = 100,
+) -> list[GraphMetaResponse]:
+    """List the selectable graph versions for a repo: main plus active branch
+    graphs (most recent first). Powers the dashboard branch selector."""
+    main_graph = await get_or_create_graph(db, repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot read graphs from another account")
+    rows = list(
+        await db.scalars(
+            select(Graph)
+            .where(Graph.repo_id == main_graph.repo_id)
+            .where(Graph.kind.in_(("main", "branch")))
+            .where(Graph.status == "active")
+            .order_by(Graph.kind.desc(), Graph.created_at.desc())
+            .limit(limit)
+        )
+    )
+    return [
+        GraphMetaResponse(
+            id=g.id,
+            kind=g.kind,
+            branch_name=g.branch_name,
+            status=g.status,
+            created_at=g.created_at.isoformat(),
+        )
+        for g in rows
+    ]
 
 
 @app.get("/graph/subgraph", response_model=GraphSubgraphResponse)
@@ -1007,7 +1094,7 @@ async def graph_upsert(
     node_fields = (
         "kind", "name", "file", "line_start", "line_end", "language", "trust_level",
         "auth_required", "privilege", "is_entry_point", "is_sink", "taint_uncertain",
-        "parse_error", "label", "intent", "commit_hash", "is_new",
+        "parse_error", "label", "intent", "commit_hash", "is_new", "deleted",
     )
     for incoming in payload.nodes:
         existing = await _node_for_graph(db, incoming.id, graph.id)
@@ -1016,16 +1103,9 @@ async def graph_upsert(
                 setattr(existing, field_name, getattr(incoming, field_name))
             existing.updated_at = now()
         else:
-            foreign_owner = await db.scalar(select(Node.graph_id).where(Node.id == incoming.id))
-            if foreign_owner is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f"node {incoming.id!r} already exists in a different graph; "
-                        "node ids are a single global primary key today, so this repo cannot "
-                        "claim an id already used elsewhere (requires a composite node key migration)"
-                    ),
-                )
+            # Nodes now have a composite (graph_id, id) PK, so the same id can
+            # legitimately exist in another graph (main vs branch vs session).
+            # We scope by graph.id above, so this is a fresh node for THIS graph.
             db.add(Node(graph_id=graph.id, **incoming.model_dump()))
         nodes_upserted += 1
 
@@ -1054,15 +1134,101 @@ async def graph_upsert(
 
 
 @app.post("/admin/graphs/merge")
-async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str]:
+async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, object]:
     branch = await db.get(Graph, payload.branch_graph_id)
     main = await db.get(Graph, payload.main_graph_id)
     if branch is None or main is None:
         raise HTTPException(status_code=404, detail="branch or main graph not found")
     if not _skip_tenant_filter(principal) and (branch.account_id != principal.account_id or main.account_id != principal.account_id):
         raise HTTPException(status_code=403, detail="cannot merge graphs from another account")
-    copied = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
-    return {"branch_graph_id": payload.branch_graph_id, "main_graph_id": payload.main_graph_id, "copied": copied}
+    result = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
+    return {
+        "branch_graph_id": payload.branch_graph_id,
+        "main_graph_id": payload.main_graph_id,
+        "copied": result.copied,
+        "conflicts": result.conflicts,
+        "findings_repointed": result.findings_repointed,
+        "had_base": result.had_base,
+    }
+
+
+@app.post("/graphs/merge-branch")
+async def merge_branch_endpoint(
+    payload: MergeBranchRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)
+) -> dict[str, object]:
+    """Merge a branch graph into main, resolved by repo + branch name. This is
+    the CD entry point — invoked when a branch lands, so callers don't have to
+    know internal graph ids."""
+    main_graph = await get_or_create_graph(db, payload.repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot merge graphs for another account")
+    branch = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "branch")
+        .where(Graph.branch_name == payload.branch_name)
+        .where(Graph.status == "active")
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail="no active branch graph for that repo/branch")
+    result = await merge_graph(db, branch_graph_id=branch.id, main_graph_id=main_graph.id)
+    return {
+        "branch_graph_id": branch.id,
+        "main_graph_id": main_graph.id,
+        "copied": result.copied,
+        "conflicts": result.conflicts,
+        "findings_repointed": result.findings_repointed,
+        "had_base": result.had_base,
+    }
+
+
+@app.post("/graphs/promote-session")
+async def promote_session_endpoint(
+    payload: SessionPromoteRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)
+) -> dict[str, object]:
+    """Promote a dev session graph into its branch graph (same diff landed in CI)."""
+    main_graph = await get_or_create_graph(db, payload.repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot promote graphs for another account")
+    branch = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "branch")
+        .where(Graph.branch_name == payload.branch_name)
+        .where(Graph.status == "active")
+    )
+    if branch is None:
+        raise HTTPException(status_code=404, detail="no active branch graph for that repo/branch")
+    session_graph = await db.scalar(
+        select(Graph)
+        .where(Graph.repo_id == main_graph.repo_id)
+        .where(Graph.kind == "session")
+        .where(Graph.session_id == payload.session_id)
+    )
+    if session_graph is None:
+        raise HTTPException(status_code=404, detail="no session graph with that id")
+    result = await promote_session_to_branch(db, session_graph_id=session_graph.id, branch_graph_id=branch.id)
+    return {
+        "session_graph_id": session_graph.id,
+        "branch_graph_id": branch.id,
+        "copied": result.copied,
+        "findings_repointed": result.findings_repointed,
+    }
+
+
+@app.post("/admin/sessions/gc")
+async def gc_sessions_endpoint(
+    payload: SessionGcRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)
+) -> dict[str, int]:
+    """Reclaim session graphs: promoted ones, plus any older than the cutoff."""
+    older_than = now() - timedelta(days=payload.older_than_days) if payload.older_than_days is not None else None
+    removed = await gc_sessions(
+        db,
+        account_id=_graph_account_id(principal),
+        older_than=older_than,
+        include_promoted=payload.include_promoted,
+    )
+    return {"removed": removed}
 
 
 @app.get("/analytics/token-spend")

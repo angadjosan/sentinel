@@ -111,7 +111,7 @@ async def test_bootstrap_stores_source_separately_from_nodes():
             run = await bootstrap_repo(session, "repo", {"app.js": "const password = 'secret';"}, _llm=MockLLMClient())
         async with session.begin():
             graph = await session.get(Graph, run.graph_id)
-            node = await session.get(Node, "file:app.js")
+            node = await session.get(Node, {"graph_id": run.graph_id, "id": "file:app.js"})
             assert graph is not None
             source = await read_source_snapshot(session, repo_id=graph.repo_id, commit_hash="bootstrap", file_path="app.js")
     assert node is not None

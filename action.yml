@@ -196,6 +196,28 @@ runs:
         sarif_file: ${{ inputs.working-directory }}/${{ inputs.sarif }}
         category: sentinel
 
+    - name: Merge branch graph into main (on landing)
+      # When a PR lands, promote the branch graph into main so the cloud graph
+      # always reflects main. Only runs on a merged-PR close and only when an
+      # ingest URL/token are configured. Non-fatal: a merge hiccup never fails
+      # the pipeline.
+      if: ${{ inputs.ingest-url != '' && inputs.ingest-token != '' && github.event_name == 'pull_request' && github.event.pull_request.merged == true }}
+      shell: bash
+      env:
+        SENTINEL_TOKEN: ${{ inputs.ingest-token }}
+        INGEST_URL: ${{ inputs.ingest-url }}
+        REPO_NAME: ${{ inputs.repo-name }}
+        HEAD_REF: ${{ github.head_ref }}
+      run: |
+        set -uo pipefail
+        echo "Merging branch graph '${HEAD_REF}' into main…"
+        curl -sS -X POST "${INGEST_URL%/}/graphs/merge-branch" \
+          -H "Authorization: Bearer ${SENTINEL_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "$(printf '{"repo_name":"%s","branch_name":"%s"}' "${REPO_NAME}" "${HEAD_REF}")" \
+          && echo "" && echo "  merge requested." \
+          || echo "  merge request failed (non-fatal)."
+
     - name: Enforce fail-on gating
       shell: bash
       run: |

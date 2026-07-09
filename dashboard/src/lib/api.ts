@@ -104,6 +104,15 @@ export type GraphSnapshot = {
   edges: GraphEdge[];
 };
 
+/** One selectable graph version for a repo (main or an active branch). */
+export type GraphMeta = {
+  id: string;
+  kind: string;
+  branch_name: string | null;
+  status: string;
+  created_at: string;
+};
+
 export type AccountConfig = {
   account_id: string;
   provider: string;
@@ -241,8 +250,19 @@ export function findingAudit(id: string): Promise<SuppressionAudit[]> {
   return get<SuppressionAudit[]>(`/findings/${id}/audit`);
 }
 
-export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
-  return get<GraphSnapshot>(`/graph?limit=${limit}`);
+export function graphSnapshot(
+  limit = 500,
+  opts: { repoName?: string | null; graphKind?: string; branchName?: string | null } = {}
+): Promise<GraphSnapshot> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (opts.repoName) params.set("repo_name", opts.repoName);
+  if (opts.graphKind && opts.graphKind !== "main") params.set("graph_kind", opts.graphKind);
+  if (opts.branchName) params.set("branch_name", opts.branchName);
+  return get<GraphSnapshot>(`/graph?${params.toString()}`);
+}
+
+export function listGraphs(repoName: string): Promise<GraphMeta[]> {
+  return get<GraphMeta[]>(`/graphs?repo_name=${encodeURIComponent(repoName)}`);
 }
 
 export function findingGraph(id: string): Promise<GraphSnapshot> {

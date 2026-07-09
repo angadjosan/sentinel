@@ -396,7 +396,7 @@ async def _lookup_with_cache(db: AsyncSession, dependency: Dependency, source: A
 
 async def _dependency_reachability(db: AsyncSession, graph_id: str, dependency: Dependency, version_node_id: str) -> Reachability:
     package_node_id = f"dep:{dependency.name}"
-    package_node = await db.get(Node, package_node_id)
+    package_node = await db.get(Node, {"graph_id": graph_id, "id": package_node_id})
     if package_node is None:
         package_node = Node(
             id=package_node_id,

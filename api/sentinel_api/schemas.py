@@ -231,6 +231,39 @@ class GraphSubgraphResponse(BaseModel):
     edges: list[EdgeResponse]
 
 
+class GraphMetaResponse(BaseModel):
+    """One selectable graph version for a repo (main or an active branch)."""
+
+    id: str
+    kind: str
+    branch_name: str | None = None
+    status: str
+    created_at: str
+
+
+class SessionPromoteRequest(BaseModel):
+    """Promote a dev session graph into its branch graph (same diff landed in CI)."""
+
+    repo_name: str = Field(min_length=1)
+    branch_name: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+
+
+class SessionGcRequest(BaseModel):
+    """Reclaim session graphs. Removes promoted sessions and, if a cutoff is
+    given, any session older than `older_than_days`."""
+
+    older_than_days: int | None = None
+    include_promoted: bool = True
+
+
+class MergeBranchRequest(BaseModel):
+    """CD-triggered merge of a branch graph into main, resolved by name."""
+
+    repo_name: str = Field(min_length=1)
+    branch_name: str = Field(min_length=1)
+
+
 class GraphUpsertNode(BaseModel):
     """A graph node produced by a local scan.
 
@@ -257,6 +290,10 @@ class GraphUpsertNode(BaseModel):
     intent: str | None = Field(default=None, max_length=2000)
     commit_hash: str | None = None
     is_new: bool = False
+    # Tombstone: a branch/session scan sets this to record that the node was
+    # removed on that branch. It hides the node from reads and, when the branch
+    # merges into main, marks main's copy deleted (see graph_merge).
+    deleted: bool = False
 
 
 class GraphUpsertEdge(BaseModel):

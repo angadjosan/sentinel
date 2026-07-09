@@ -64,6 +64,14 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN ip_address TEXT"))
             if "refresh_token_hash" not in session_columns:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN refresh_token_hash TEXT"))
+            node_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(nodes)"))}
+            if "deleted" not in node_columns:
+                await conn.execute(text("ALTER TABLE nodes ADD COLUMN deleted BOOLEAN DEFAULT 0"))
+            graph_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(graphs)"))}
+            if "base_graph_id" not in graph_columns:
+                await conn.execute(text("ALTER TABLE graphs ADD COLUMN base_graph_id TEXT"))
+            if "promoted_at" not in graph_columns:
+                await conn.execute(text("ALTER TABLE graphs ADD COLUMN promoted_at TIMESTAMP"))
             # Repo pentest config (0004 flat columns + 0005 structured blob). create_all
             # covers fresh dev DBs; these ALTERs upgrade a pre-existing SQLite dev DB.
             repo_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(repos)"))}
