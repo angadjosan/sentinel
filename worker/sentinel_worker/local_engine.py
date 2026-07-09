@@ -29,11 +29,9 @@ from .construction import SourceFile, build_source_graph
 from .db import create_engine, create_sessionmaker
 from .migrations import apply_migrations
 from .models import Edge, Finding, Node
-from .pentest import PentestRequestContext, run_pentest
 from .scan import bootstrap_repo, get_or_create_graph, parse_unified_diff, review_plan, scan_diff
 from .security import is_env_var_file
 from .standalone import ScanFinding, ScanResult, _severity_rank
-from .vm import LocalSubprocessSandboxExecutor, PentestSandboxConfig
 
 _NODE_UPSERT_FIELDS = (
     "id", "kind", "name", "file", "line_start", "line_end", "language",
@@ -59,6 +57,34 @@ class LocalScanResult:
     delta: GraphDelta
     local_run_id: str | None = None
     local_trace_path: str | None = None
+    # Changed files that no framework adapter matched (AUDIT.md §6 W4 P5.4).
+    # Extracted from the scan's `adapter.coverage` trace event; surfaced to the
+    # user on stderr by the CLI so they know why route coverage may be thin.
+    adapter_unmatched_files: list[str] = field(default_factory=list)
+
+
+def _unmatched_adapter_files_from_trace(trace: str | None) -> list[str]:
+    """Pull the `adapter.coverage` event's `unmatched_files` out of a run trace.
+
+    The trace is NDJSON; one line is the adapter-coverage event emitted by
+    scan.py. Best-effort: any parse problem yields an empty list (a warning is
+    a nicety, never load-bearing)."""
+    if not trace:
+        return []
+    import json as _json
+
+    for line in trace.splitlines():
+        line = line.strip()
+        if not line or '"adapter.coverage"' not in line:
+            continue
+        try:
+            event = _json.loads(line)
+        except ValueError:
+            continue
+        unmatched = event.get("unmatched_files")
+        if isinstance(unmatched, list):
+            return [str(f) for f in unmatched]
+    return []
 
 
 def _save_local_trace(run_id: str, trace: str) -> str:
@@ -277,7 +303,13 @@ async def run_local_source_scan(
         )
         scan_result.findings.sort(key=lambda x: (-_severity_rank(x.severity), x.file or "", x.title))
         delta = GraphDelta(nodes=[_node_to_dict(n) for n in new_nodes], edges=[_edge_to_dict(e) for e in new_edges])
-        return LocalScanResult(scan=scan_result, delta=delta, local_run_id=local_run_id, local_trace_path=trace_path)
+        return LocalScanResult(
+            scan=scan_result,
+            delta=delta,
+            local_run_id=local_run_id,
+            local_trace_path=trace_path,
+            adapter_unmatched_files=_unmatched_adapter_files_from_trace(local_trace),
+        )
     finally:
         await engine.dispose()
         try:
@@ -383,138 +415,7 @@ async def run_local_plan_review(
             pass
 
 
-@dataclass
-class LocalPentestResult:
-    finding_id: str
-    confirmed: bool
-    status: str
-    evidence: str | None
-    entry_node_id: str | None
-    sink_node_id: str | None
-    payloads: list[str] = field(default_factory=list)
-    local_run_id: str | None = None
-    local_trace_path: str | None = None
-
-
-def fetch_cloud_finding(*, api_url: str, token: str | None, finding_id: str) -> dict:
-    """Fetch the target finding's metadata (no source) from the cloud."""
-    import httpx
-
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    resp = httpx.get(f"{api_url.rstrip('/')}/findings/{finding_id}", headers=headers, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def push_pentest_result(*, api_url: str, token: str | None, result: LocalPentestResult) -> dict:
-    """Report a local pentest run's outcome. Only the confirmation
-    status/evidence text and node pointers cross to the cloud — the app
-    booted, the payloads sent, and any secrets from .env.sentinel all stayed
-    on this machine (see PentestSandboxConfig / LocalSubprocessSandboxExecutor)."""
-    import httpx
-
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = httpx.post(
-        f"{api_url.rstrip('/')}/findings/{result.finding_id}/confirm",
-        json={
-            "confirmed": result.confirmed,
-            "status": result.status,
-            "evidence": result.evidence,
-            "entry_node_id": result.entry_node_id,
-            "sink_node_id": result.sink_node_id,
-        },
-        headers=headers,
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-async def run_local_pentest(
-    *,
-    repo_name: str,
-    repo_dir: str,
-    finding_id: str,
-    llm: SentinelLLMClient,
-    api_url: str,
-    api_token: str | None,
-    sanitizer_output: str = "",
-    behavioral_proof: str | None = None,
-    proof_detail: str = "",
-    boot: str | None = None,
-    healthcheck: str | None = None,
-    egress_allowlist: list[str] | None = None,
-) -> LocalPentestResult:
-    """Confirm a finding by attacking the app booted on this machine.
-
-    Pulls the finding + its graph context from the cloud (read-only,
-    pointers/metadata only), runs the pentest agent locally — source read
-    from `repo_dir`, payloads generated and sent by this process, sandbox
-    execution via `LocalSubprocessSandboxExecutor` (no Firecracker microVM
-    required; the app is already running on the developer's own machine, not
-    a shared multi-tenant host) — and returns the outcome for the caller to
-    push back via `push_pentest_result`. `.env.sentinel` secrets used to boot
-    the app are read locally by the boot command itself and never enter the
-    LLM's context or leave this process.
-    """
-    finding_data = fetch_cloud_finding(api_url=api_url, token=api_token, finding_id=finding_id)
-    seeds = [finding_data["node_id"]] if finding_data.get("node_id") else []
-    context = fetch_cloud_subgraph(api_url=api_url, token=api_token, repo_name=repo_name, seeds=seeds) if seeds else GraphDelta()
-
-    tmpdir = tempfile.mkdtemp(prefix="sentinel-local-pentest-")
-    db_path = Path(tmpdir) / "pentest.db"
-    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
-    try:
-        await apply_migrations(engine)
-        sessionmaker = create_sessionmaker(engine)
-        async with sessionmaker() as session:
-            async with session.begin():
-                graph = await get_or_create_graph(session, repo_name)
-                await _merge_cloud_context(session, graph_id=graph.id, context=context)
-
-                local_finding = Finding(
-                    id=finding_data["id"],
-                    graph_id=graph.id,
-                    node_id=finding_data.get("node_id"),
-                    vuln_type=finding_data["vuln_type"],
-                    severity=finding_data["severity"],
-                    title=finding_data["title"],
-                    description=finding_data["description"],
-                    remediation=finding_data["remediation"],
-                    status=finding_data["status"],
-                    fingerprint=finding_data["fingerprint"],
-                )
-                session.add(local_finding)
-                await session.flush()
-
-                request = PentestRequestContext(
-                    sanitizer_output=sanitizer_output,
-                    behavioral_proof=behavioral_proof,
-                    proof_detail=proof_detail,
-                    sandbox=PentestSandboxConfig(boot=boot, healthcheck=healthcheck, egress_allowlist=egress_allowlist or []),
-                    executor=LocalSubprocessSandboxExecutor(),
-                )
-                outcome = await run_pentest(session, local_finding, request, llm=llm, repo_dir=repo_dir)
-                local_run_id, local_trace = outcome.run.id, outcome.run.trace
-
-        trace_path = _save_local_trace(local_run_id, local_trace)
-        return LocalPentestResult(
-            finding_id=finding_id,
-            confirmed=outcome.oracle_result.confirmed,
-            status=outcome.finding.status,
-            evidence=outcome.finding.evidence,
-            entry_node_id=outcome.entry_node_id,
-            sink_node_id=local_finding.node_id,
-            payloads=outcome.payloads,
-            local_run_id=local_run_id,
-            local_trace_path=trace_path,
-        )
-    finally:
-        await engine.dispose()
-        try:
-            db_path.unlink(missing_ok=True)
-            Path(tmpdir).rmdir()
-        except OSError:
-            pass
+# NOTE: local pentest execution (LocalPentestResult, fetch_cloud_finding,
+# push_pentest_result, run_local_pentest) was removed per AUDIT.md §3 D4.
+# Pentest now runs on the cloud worker; the CLI enqueues via POST /pentest and
+# polls the run. See worker/sentinel_worker/pentest.py + runner.py (owned by W1).

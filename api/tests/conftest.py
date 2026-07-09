@@ -1,10 +1,26 @@
 """
 API test fixtures.
 
-All tests run without a real LLM. `_inject_mock_llm` (autouse) replaces
-`get_llm_for_graph` with a pattern-based mock that emits SAST findings
-whenever the diff content matches known-vulnerable patterns. This mirrors
-what a real model does while keeping tests deterministic and offline.
+SAST LLM mock — quarantined (AUDIT.md §6 W4 P3.4)
+-------------------------------------------------
+`_PatternLLM` regex-matches the diff and emits a finding when it sees a known
+vulnerable pattern. That is a *loose* mock: a test using it would pass even if
+the real SAST handler were deleted, because the mock — not the engine — decides
+the finding. It is therefore NOT autouse.
+
+Opt in explicitly via the `mock_sast_llm` fixture, and only for tests that
+genuinely exercise a cloud SAST path (i.e. a webhook that enqueues/runs a
+`kind=source` scan). As of the target architecture:
+
+  - SAST is local-only on the CLI machine (§1 invariant 1); the cloud worker no
+    longer runs `source`/`plan`/`init` tasks.
+  - The GitHub webhook no longer fetches diffs or enqueues cloud scans
+    (§3 D5 / Gate 2) — see test_github_webhook.py.
+
+So no API test currently needs this mock. It is retained, non-autouse, as a
+smoke harness for any future cloud-webhook SAST path. Do not re-enable it as
+autouse: the real SAST engine is covered by worker/tests/test_sast_fixture.py,
+which exercises the read_file/emit_finding tool boundary rather than a regex.
 """
 from __future__ import annotations
 
@@ -174,11 +190,19 @@ def seed_finding(
     return resp.json()
 
 
-def process_tasks(n: int = 1) -> None:
-    """Run n queued worker tasks inline using the test's patched DB and mock LLM.
+def process_tasks(n: int = 1, *, llm=None) -> None:
+    """Run n queued worker tasks inline using the test's patched DB.
 
-    Must be called inside a test that has the _isolated_db and _inject_mock_llm
-    autouse fixtures active (i.e., any API test).
+    Must be called inside a test that has the _isolated_db autouse fixture
+    active (i.e., any API test).
+
+    `llm`, when provided, is forwarded to `run_one_task` as the pentest/SAST
+    agent. Pass a stub (e.g. `NoFindingLLM()`) to keep pentest tasks fully
+    offline and deterministic — otherwise the worker's `_pentest_llm` would
+    resolve a real `local` provider client that tries to reach ollama on
+    localhost. Even without a stub the pentest still completes (the agent call
+    is caught and the run falls back to template payloads), but injecting one
+    avoids the network attempt entirely.
     """
     import asyncio
     from sentinel_api.deps import SessionLocal
@@ -188,7 +212,7 @@ def process_tasks(n: int = 1) -> None:
         for _ in range(n):
             async with SessionLocal() as session:
                 async with session.begin():
-                    await run_one_task(session, worker_id="test-worker")
+                    await run_one_task(session, worker_id="test-worker", _llm=llm)
 
     loop = asyncio.new_event_loop()
     try:
@@ -196,10 +220,31 @@ def process_tasks(n: int = 1) -> None:
     finally:
         loop.close()
 
-@pytest.fixture(autouse=True)
-def _inject_mock_llm(monkeypatch):
-    """Replace get_llm_for_graph with a mock for every API test."""
+
+class NoFindingLLM:
+    """Agent stub that reads nothing and emits nothing.
+
+    For a pentest task this drives `run_pentest` down the template-payload path
+    (no agent-supplied payloads) with zero network calls, so confirmation is
+    decided purely by the (mocked) HTTP target's own responses — the honest
+    oracle path (AUDIT.md §1 invariant 5)."""
+
+    async def call_with_tools(self, *, system=None, user=None, tools=None, tool_dispatcher=None, max_iterations=50, **kwargs):
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    async def call(self, *, system: str, user: str | None = None, data: str | None = None, **kwargs):
+        from sentinel_worker.agent import LLMCallResult
+        return LLMCallResult(content='{"annotations": []}', input_tokens=0, output_tokens=0, model="mock", provider="mock")
+
+@pytest.fixture
+def mock_sast_llm(monkeypatch):
+    """Opt-in (NOT autouse): replace get_llm_for_graph with the quarantined
+    `_PatternLLM` for tests that drive a cloud SAST path (e.g. a webhook smoke
+    test). See the module docstring for why this is not autouse — a loose regex
+    mock must not silently back every API test. Returns the mock for assertions."""
     async def _get_llm(*_args, **_kwargs):
         return _LLM
 
     monkeypatch.setattr("sentinel_worker.sast.get_llm_for_graph", _get_llm)
+    return _LLM

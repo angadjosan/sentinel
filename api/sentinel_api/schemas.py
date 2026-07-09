@@ -5,23 +5,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-class InitRequest(BaseModel):
-    repo_name: str = Field(min_length=1)
-    files: dict[str, str] = Field(default_factory=dict)
-
-
-class SourceRequest(BaseModel):
-    repo_name: str = Field(min_length=1)
-    diff: str
-    run_context: str = "local"
-    base_ref: str | None = None
-    paths: list[str] = Field(default_factory=list)
-
-
-class PlanRequest(BaseModel):
-    repo_name: str = Field(min_length=1)
-    content: str
-    with_retry: bool = False
+# NOTE: InitRequest / SourceRequest / PlanRequest were removed. They carried
+# source code, unified diffs, or plan text in the request body for the legacy
+# cloud-SAST routes (/init, /source, /plan), which the local-AI-calls model
+# forbids (§1: source/diffs never leave the CLI machine on the scan path). The
+# CLI now runs those locally and pushes back only graph deltas + findings.
 
 
 class IngestFinding(BaseModel):
@@ -168,11 +156,6 @@ class TraceAccessLogResponse(BaseModel):
     created_at: str
 
 
-class SourceResponse(BaseModel):
-    run: RunResponse
-    findings: list[FindingResponse]
-
-
 class EnqueueResponse(BaseModel):
     task_id: str
     run: RunResponse
@@ -224,13 +207,6 @@ class AccountConfigPatch(BaseModel):
 class GraphMergeRequest(BaseModel):
     branch_graph_id: str = Field(min_length=1)
     main_graph_id: str = Field(min_length=1)
-
-
-class SourceReadResponse(BaseModel):
-    repo_name: str
-    commit_hash: str
-    file_path: str
-    content: str
 
 
 class NodeResponse(BaseModel):
@@ -335,6 +311,28 @@ class RepoResponse(BaseModel):
     account_id: str
     remote_url: str | None = None
     created_at: str
+
+
+# --- Repo pentest reachability config (AUDIT.md §3 D1 — dual mode) [W1] ---
+
+
+class RepoPentestConfigResponse(BaseModel):
+    repo_id: str
+    pentest_mode: Literal["staging", "local_worker"]
+    staging_base_url: str | None = None
+    healthcheck_path: str | None = None
+    boot: str | None = None
+    healthcheck: str | None = None
+    egress_allowlist: list[str] = Field(default_factory=list)
+
+
+class RepoPentestConfigPatch(BaseModel):
+    pentest_mode: Literal["staging", "local_worker"] | None = None
+    staging_base_url: str | None = None
+    healthcheck_path: str | None = None
+    boot: str | None = None
+    healthcheck: str | None = None
+    egress_allowlist: list[str] | None = None
 
 
 class SuppressionReviewRequest(BaseModel):

@@ -5,27 +5,44 @@
 > claims), it still describes the **old** cloud-upload architecture. That
 > architecture no longer exists. The current model, in one paragraph:
 >
-> All analysis — diff computation, the five-pass graph construction, the SAST/
-> plan/pentest LLM calls — runs **locally**, in a Python engine
-> (`worker/sentinel_worker/local_cli.py`) the CLI spawns as a subprocess. The
-> LLM call is made on the developer's own machine with a key stored only in
-> their system keychain (`sentinel config set api-key`) — the server rejects
-> a `PATCH /config` request that includes one. Source code and diffs are
-> never transmitted anywhere. The only things that reach the cloud are: the
-> **code graph** (`POST /graph/upsert` — node/edge pointers and short semantic
-> labels, never source text), **findings** (`POST /findings/ingest`), and a
-> **pentest confirmation outcome** (`POST /findings/{id}/confirm`, evidence
-> text + node pointers only). `GET /graph/subgraph` lets the local engine pull
-> existing graph context (read-only, same no-source guarantee) to enrich the
-> SAST bootstrap for functions outside the current diff. Run traces (every
-> prompt, every tool call) are written locally to `~/.sentinel/runs/<id>.jsonl`
-> and never uploaded; the cloud only ever sees a redacted summary. Pentest
-> boots the target app locally too (no Firecracker microVM — the app is
-> already on the developer's own machine, not a shared multi-tenant host).
+> **SAST is local; pentest is cloud.** The scan path — diff computation, the
+> five-pass graph construction, the SAST/plan LLM calls — runs **locally**, in
+> a Python engine (`worker/sentinel_worker/local_cli.py`) the CLI spawns as a
+> subprocess. The SAST LLM call is made on the developer's own machine with a
+> key stored only in their system keychain (`sentinel config set api-key`) —
+> the server rejects a `PATCH /config` request that includes one. Source code
+> and diffs are never transmitted on the scan path. The only things that reach
+> the cloud from a scan are: the **code graph** (`POST /graph/upsert` —
+> node/edge pointers and short semantic labels, never source text) and
+> **findings** (`POST /findings/ingest`). `GET /graph/subgraph` lets the local
+> engine pull existing graph context (read-only, same no-source guarantee) to
+> enrich the SAST bootstrap for functions outside the current diff. SAST run
+> traces (every prompt, every tool call) are written locally to
+> `~/.sentinel/runs/<id>.jsonl` and never uploaded; the cloud only sees a
+> redacted summary.
+>
+> **Pentest runs on the cloud worker, not on the developer's machine.**
+> `sentinel pentest` enqueues a `kind=pentest` task (`POST /pentest`) and polls
+> (`sentinel runs watch`) until terminal. The worker reaches a running instance
+> of the app in one of two modes (repo config, `pentest_mode`):
+> **`staging`** (hosted default) — HTTP payloads to a configured
+> `staging_base_url`; **`local_worker`** (self-hosted) — the worker boots the
+> app itself in a subprocess sandbox via `boot`/`healthcheck`. There is **no
+> Firecracker microVM** and no local-machine pentest. The pentest agent's LLM
+> credential is server-side (`SENTINEL_PENTEST_LLM_API_KEY` on the worker, or an
+> encrypted per-account `pentest_api_key`) — separate from the developer's
+> local SAST key. Phase 1 pentest is HTTP-only and uses the cloud graph +
+> finding metadata for context; **no source is uploaded for pentest.** The
+> worker writes the confirmation and a `CONFIRMED_EXPLOIT` edge directly; a
+> finding is `confirmed` only on an HTTP/behavioral proof or sanitizer output,
+> never on agent judgment alone.
+>
 > Read the sections below for the *design rationale* (the five-pass graph
 > pipeline, the context-loading strategy, the confirmation oracle) — they're
 > still accurate — but treat any claim about *where the codebase or diff is
-> sent* as superseded by the paragraph above.
+> sent*, or about pentest booting the app *locally* / in a *Firecracker
+> microVM*, as superseded by the two paragraphs above. The current pentest
+> host is the cloud worker (staging HTTP probe by default).
 
 # Problem
 

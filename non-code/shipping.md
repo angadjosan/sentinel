@@ -29,9 +29,19 @@ No release branches needed — tag directly on main.
 
 ## GitHub App ("click install")
 
+> ⚠️ **Retired flow — do not implement as written below.** The original design had
+> the API pull the PR diff and run SAST **in the cloud** (`enqueue_task(kind="source")`),
+> which stores the customer's diff in `tasks.payload` and source in the cloud DB.
+> That violates the SAST-privacy invariant (source/diffs never leave the CLI/CI
+> machine on the scan path). PR SAST now runs **in CI** via `action.yml` /
+> `worker/sentinel_worker/standalone.py`: the runner scans locally and posts back
+> only graph deltas + findings via `POST /graph/upsert` and `POST /findings/ingest`.
+> The `/webhook/github` endpoint still verifies signatures but no longer fetches
+> diffs or enqueues scans. The sections below are kept only as historical context.
+
 Users go to your GitHub App page, click **Install**, select repos, and Sentinel automatically runs on every PR — no workflow file, no npm, no config needed. It's how Dependabot, Snyk, and Codecov work.
 
-Flow:
+Flow (historical — see warning above; superseded by `action.yml` CI SAST):
 1. GitHub sends a `pull_request` webhook to your API when a PR opens or updates
 2. Your API pulls the diff via GitHub API, runs the existing scan pipeline
 3. Posts findings back as a GitHub **Check Run** (the green/red status block on the PR)

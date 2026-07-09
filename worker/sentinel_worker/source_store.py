@@ -1,3 +1,14 @@
+"""Encrypted source-snapshot storage.
+
+Scope note (AUDIT.md §1 invariant 1, P2.3): source snapshots are NOT written to
+the cloud on the CLI scan path. The CLI's local engine runs SAST against an
+ephemeral local SQLite DB and only pushes graph deltas + findings to the cloud;
+`store_source_snapshot` in that path writes to the throwaway local DB, not the
+hosted one. The legacy cloud-SAST callers (GitHub webhook `kind=source` /
+`init` runner tasks) that persisted snapshots server-side have been removed. The
+remaining server-side reader is the pentest agent's `read_file`/`grep_source`
+tools (see tools.py), gated by mode=local_worker with a mounted repo (§3 D3).
+"""
 from __future__ import annotations
 
 import base64

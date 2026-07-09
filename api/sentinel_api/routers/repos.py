@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +16,8 @@ from ..schemas import (
     EnqueueResponse,
     PentestRequest,
     RepoCreateRequest,
+    RepoPentestConfigPatch,
+    RepoPentestConfigResponse,
     RepoResponse,
     RunResponse,
 )
@@ -112,6 +115,70 @@ async def create_repo(
     )
 
 
+def _decode_egress_allowlist(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [str(host) for host in value] if isinstance(value, list) else []
+
+
+def _pentest_config_response(repo: Repo) -> RepoPentestConfigResponse:
+    return RepoPentestConfigResponse(
+        repo_id=repo.id,
+        pentest_mode=repo.pentest_mode or "staging",
+        staging_base_url=repo.staging_base_url,
+        healthcheck_path=repo.healthcheck_path,
+        boot=repo.boot,
+        healthcheck=repo.healthcheck,
+        egress_allowlist=_decode_egress_allowlist(repo.egress_allowlist),
+    )
+
+
+@router.get("/{repo_id}/pentest-config", response_model=RepoPentestConfigResponse)
+async def get_pentest_config(
+    repo_id: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> RepoPentestConfigResponse:
+    repo = await _get_repo(db, repo_id, principal)
+    return _pentest_config_response(repo)
+
+
+@router.patch("/{repo_id}/pentest-config", response_model=RepoPentestConfigResponse)
+async def update_pentest_config(
+    repo_id: str,
+    payload: RepoPentestConfigPatch,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> RepoPentestConfigResponse:
+    repo = await _get_repo(db, repo_id, principal)
+    if payload.pentest_mode is not None:
+        repo.pentest_mode = payload.pentest_mode
+    if payload.staging_base_url is not None:
+        repo.staging_base_url = payload.staging_base_url or None
+    if payload.healthcheck_path is not None:
+        repo.healthcheck_path = payload.healthcheck_path or None
+    if payload.boot is not None:
+        repo.boot = payload.boot or None
+    if payload.healthcheck is not None:
+        repo.healthcheck = payload.healthcheck or None
+    if payload.egress_allowlist is not None:
+        repo.egress_allowlist = json.dumps(payload.egress_allowlist, sort_keys=True)
+
+    # Per §3 D1, staging mode must have a base URL to probe against.
+    effective_mode = repo.pentest_mode or "staging"
+    if effective_mode == "staging" and not repo.staging_base_url:
+        raise HTTPException(status_code=422, detail="staging_base_url is required when pentest_mode is 'staging'")
+    if effective_mode == "local_worker" and not repo.boot:
+        raise HTTPException(status_code=422, detail="boot is required when pentest_mode is 'local_worker'")
+
+    await db.flush()
+    return _pentest_config_response(repo)
+
+
 # NOTE: /{repo_id}/init, /source, and /scan were removed — they took source
 # code / diffs in the request body, which the local-AI-calls model forbids.
 # See main.py's equivalent note next to /tasks/claim.
@@ -138,22 +205,8 @@ async def pentest_scan(
     return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
 
 
-@router.post("/{repo_id}/plan", response_model=EnqueueResponse)
-async def plan_review(
-    repo_id: str,
-    payload: PlanRequest,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
-) -> EnqueueResponse:
-    repo = await _get_repo(db, repo_id, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=repo.name,
-        kind="plan",
-        payload={"repo_name": repo.name, "content": payload.content, "with_retry": payload.with_retry},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
+# NOTE: POST /{repo_id}/plan was removed. Plan/design-doc review took the plan
+# text in the request body and enqueued a cloud `kind=plan` task, which no
+# longer exists — the CLI runs plan review locally via the local engine and
+# only pushes back findings. (The old handler also referenced an unimported
+# PlanRequest, i.e. it would have NameError'd on first call.)

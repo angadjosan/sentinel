@@ -15,13 +15,13 @@ export function FindingList({ findings, showActions = true, keyboard = false }: 
   const [active, setActive] = useState(-1);
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  function run(fn: (id: string) => Promise<void>, id: string, message?: string) {
+  function run(action: () => Promise<void>, message: string) {
     startTransition(async () => {
       try {
-        await fn(id);
-        if (message) toast(message);
-      } catch {
-        toast("Action failed", "error");
+        await action();
+        toast(message);
+      } catch (error) {
+        toast(error instanceof Error ? error.message : "Action failed", "error");
       }
       router.refresh();
     });
@@ -36,7 +36,7 @@ export function FindingList({ findings, showActions = true, keyboard = false }: 
       if (e.key === "j" || e.key === "ArrowDown") { e.preventDefault(); setActive((v) => Math.min(v + 1, findings.length - 1)); }
       else if (e.key === "k" || e.key === "ArrowUp") { e.preventDefault(); setActive((v) => Math.max(v - 1, 0)); }
       else if ((e.key === "o" || e.key === "Enter") && active >= 0) { e.preventDefault(); router.push(`/findings/${findings[active].id}`); }
-      else if (e.key === "e" && active >= 0) { const f = findings[active]; if (f.status !== "suppressed" && f.status !== "suppression_pending") run(suppressFindingAction, f.id, "Finding suppressed"); }
+      else if (e.key === "e" && active >= 0) { const f = findings[active]; if (f.status !== "suppressed" && f.status !== "suppression_pending") run(() => suppressFindingAction(f.id, "Suppressed from the triage inbox"), "Finding suppressed"); }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -73,11 +73,11 @@ export function FindingList({ findings, showActions = true, keyboard = false }: 
               <div className="actions">
                 {finding.status === "suppression_pending" ? (
                   <>
-                    <button className="icon sm" title="Approve suppression" disabled={pending} onClick={() => run(approveSuppressionAction, finding.id, "Suppression approved")}><Check size={15} /></button>
-                    <button className="icon sm" title="Reject suppression" disabled={pending} onClick={() => run(rejectSuppressionAction, finding.id, "Suppression rejected")}><X size={15} /></button>
+                    <button className="icon sm" title="Approve suppression" disabled={pending} onClick={() => run(() => approveSuppressionAction(finding.id, "Approved from the triage inbox"), "Suppression approved")}><Check size={15} /></button>
+                    <button className="icon sm" title="Reject suppression" disabled={pending} onClick={() => run(() => rejectSuppressionAction(finding.id, "Rejected from the triage inbox"), "Suppression rejected")}><X size={15} /></button>
                   </>
                 ) : (
-                  <button className="icon sm" title="Suppress finding" disabled={pending || finding.status === "suppressed"} onClick={() => run(suppressFindingAction, finding.id, "Finding suppressed")}><Ban size={15} /></button>
+                  <button className="icon sm" title="Suppress finding" disabled={pending || finding.status === "suppressed"} onClick={() => run(() => suppressFindingAction(finding.id, "Suppressed from the triage inbox"), "Finding suppressed")}><Ban size={15} /></button>
                 )}
               </div>
             ) : (

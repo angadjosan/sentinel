@@ -24,6 +24,15 @@ test = [
   "respx>=0.21,<1",
 ]
 
+[tool.pytest.ini_options]
+# The API imports `sentinel_worker` from the sibling `worker/` package. Pin the
+# co-located worker source onto sys.path so the suite always exercises THIS
+# checkout — not a stale editable install that may point at a different
+# worktree (the Conductor pip-editable caveat; see AUDIT.md §Reconciliation).
+# Removes the need to pass PYTHONPATH=../worker by hand in local runs and CI.
+pythonpath = ["../worker"]
+asyncio_default_fixture_loop_scope = "function"
+
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"

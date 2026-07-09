@@ -1,16 +1,13 @@
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const SENTINEL_DIR = join(homedir(), ".sentinel");
 const PID_DIR = join(SENTINEL_DIR, "pids");
 const LOG_DIR = join(SENTINEL_DIR, "logs");
 const WORKER_CONN_FILE = join(SENTINEL_DIR, "worker-conn.json");
-
-const WORKER_IMAGE = "ghcr.io/sentineldev/sentinel-worker:latest";
-const WORKER_CONTAINER_NAME = "sentinel-worker";
 
 function ensureDirs(): void {
   mkdirSync(PID_DIR, { recursive: true });
@@ -61,7 +58,7 @@ function removePid(name: string): void {
   } catch {}
 }
 
-// ── Worker connection info (written at login, read by ensureWorkerContainer) ──
+// ── Worker connection info (written at login; consumed by self-hosted worker setup) ──
 
 export interface WorkerConn {
   databaseUrl: string;
@@ -83,65 +80,13 @@ export function readWorkerConn(): WorkerConn | null {
   }
 }
 
-// ── Docker worker ─────────────────────────────────────────────────────────────
+// NOTE: The Docker worker helpers (ensureWorkerContainer / isWorkerContainerRunning
+// / workerDockerArgs) were removed. Under the target architecture the CLI runs
+// SAST locally in-process and the hosted worker runs pentest in the cloud, so
+// `sentinel up` spawns a local Python API + worker (see startBackend) rather than
+// pulling a container image. No product path invoked the Docker helpers.
 
-export function workerDockerArgs(opts: {
-  image: string;
-  databaseUrl: string;
-  accountId: string;
-  anthropicKey?: string;
-  openaiKey?: string;
-}): string[] {
-  const env: string[] = [
-    `DATABASE_URL=${opts.databaseUrl}`,
-    `SENTINEL_ACCOUNT_ID=${opts.accountId}`,
-    `SENTINEL_WORKER_ID=local-${opts.accountId}`,
-  ];
-  if (opts.anthropicKey) env.push(`ANTHROPIC_API_KEY=${opts.anthropicKey}`);
-  if (opts.openaiKey) env.push(`OPENAI_API_KEY=${opts.openaiKey}`);
-  const argv = ["run", "--rm", `--name=${WORKER_CONTAINER_NAME}`, "-d"];
-  for (const e of env) argv.push("-e", e);
-  argv.push(opts.image);
-  return argv;
-}
-
-function isWorkerContainerRunning(): boolean {
-  const result = spawnSync("docker", [
-    "ps", "--filter", `name=${WORKER_CONTAINER_NAME}`, "--format", "{{.Names}}",
-  ], { encoding: "utf8" });
-  return result.stdout?.includes(WORKER_CONTAINER_NAME) ?? false;
-}
-
-async function ensureWorkerContainer(): Promise<void> {
-  if (isWorkerContainerRunning()) return;
-
-  const conn = readWorkerConn();
-  if (!conn) {
-    throw new Error('Run `sentinel auth login` first to configure your worker connection.');
-  }
-
-  const dockerResult = spawnSync("docker", ["version"], { encoding: "utf8" });
-  if (dockerResult.error || dockerResult.status !== 0) {
-    throw new Error(
-      "Docker is required to run scans locally. " +
-        "Install Docker Desktop, or set apiUrl to a backend that runs its own worker."
-    );
-  }
-
-  const argv = workerDockerArgs({
-    image: WORKER_IMAGE,
-    databaseUrl: conn.databaseUrl,
-    accountId: conn.accountId,
-    anthropicKey: conn.anthropicKey,
-    openaiKey: conn.openaiKey,
-  });
-  const proc = spawnSync("docker", argv, { encoding: "utf8" });
-  if (proc.status !== 0) {
-    throw new Error(`Failed to start worker container: ${proc.stderr}`);
-  }
-}
-
-// ── Legacy localhost spawning (kept for self-hosted local dev) ─────────────────
+// ── Localhost spawning (self-hosted local dev via `sentinel up`) ────────────────
 
 export function resolveVenvPython(): string {
   // Prefer explicit override, then walk up from cwd looking for a .venv.

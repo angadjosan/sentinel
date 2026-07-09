@@ -48,7 +48,7 @@ Three deployment tiers in ascending complexity. Complete each tier before starti
 ### A6 — Developer experience
 - [ ] `sentinel doctor` — validate environment (tree-sitter grammars installed, DB reachable, API key valid, Firecracker binary present if enabled)
 - [ ] `--dry-run` flag on `sentinel scan` for CI preview without persisting findings
-- [ ] Publish CLI to npm (`@sentinel/cli`) with a `prepublish` build step, or provide a clear `npm install -g` install path
+- [ ] Publish CLI to npm (package name `sentineldev`, installs the `sentinel` command) with a `prepublish` build step, or provide a clear `npm install -g` install path
 - [ ] Remediation plan generation — `pull` command schema exists but LLM call is not implemented
 - [ ] `sentinel plan` — NLP extraction of referenced functions and graph subgraph loading are stubs
 - [ ] Notification system — `notifications.py` exists but not integrated; wire up email and Slack/Teams webhook

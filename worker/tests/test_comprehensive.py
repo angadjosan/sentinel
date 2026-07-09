@@ -1180,10 +1180,25 @@ class TestOracleAdditional:
         assert result.confirmed is True
         assert result.kind == "memory_safety"
 
-    def test_empty_sanitizer_string_with_valid_behavioral_confirms(self):
-        """Empty sanitizer string should fall through to behavioral proof check."""
+    def test_behavioral_proof_alone_does_not_confirm_without_external_evidence(self):
+        """AUDIT.md §1 invariant 5 (W1 oracle hardening): a behavioral proof on the
+        agent's word alone — no sanitizer output, no HTTP evidence — must NOT
+        confirm. This previously asserted the opposite (a fake-green test that
+        would have passed even with the runtime oracle gutted); realigned to the
+        hardened contract (see also worker/tests/test_oracle.py)."""
         from sentinel_worker.oracle import ConfirmationOracle
         result = ConfirmationOracle().evaluate("", "privilege_escalated", "via suid binary")
+        assert result.confirmed is False
+        assert result.kind is None
+
+    def test_behavioral_proof_confirms_when_backed_by_http_evidence(self):
+        """The same behavioral proof DOES confirm once the target's own HTTP
+        response is supplied as external evidence."""
+        from sentinel_worker.oracle import ConfirmationOracle
+        result = ConfirmationOracle().evaluate(
+            "", "privilege_escalated", "via suid binary",
+            http_evidence="HTTP/1.1 200 role=admin granted",
+        )
         assert result.confirmed is True
         assert result.kind == "behavioral"
 

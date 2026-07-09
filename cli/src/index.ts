@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -11,12 +12,13 @@ import { clearApiKey, readApiKey, readLlmApiKey, writeApiKey, writeCredential, w
 import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff } from "./diff/git.js";
-import { ensureBackend, startBackend, stopBackend, backendStatus } from "./backend/ensure.js";
-import { runLocalInit, runLocalPentest, runLocalPlanReview, runLocalSourceScan } from "./engine/localEngine.js";
+import { ensureBackend, startBackend, stopBackend, backendStatus, isHealthy, resolveVenvPython } from "./backend/ensure.js";
+import { runLocalInit, runLocalPlanReview, runLocalSourceScan } from "./engine/localEngine.js";
+import { printAdapterWarnings } from "./output/adapterWarnings.js";
 
 const program = new Command();
 
-program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.0");
+program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.1");
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
@@ -137,6 +139,8 @@ program
       console.log(`  ${finding.title}`);
       if (finding.remediation) console.log(`  fix: ${finding.remediation}`);
     }
+    // AUDIT.md §6 W4 P5.4: surface files no framework adapter matched (stderr).
+    printAdapterWarnings(result.adapter_unmatched_files);
     console.log(`${result.finding_count} finding(s) · pushed ${result.graph_nodes_pushed} graph node(s), ${result.graph_edges_pushed} edge(s)`);
     if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
     process.exitCode = exitCode;
@@ -144,12 +148,12 @@ program
 
 program
   .command("scan")
-  .description("Run source scan locally, then pentest each finding unless skipped")
+  .description("Run source scan locally, then enqueue a cloud pentest for each finding unless skipped")
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
-  .option("--no-pentest", "Skip pentest")
-  .option("--pentest-concurrency <count>", "Maximum concurrent pentest jobs", "4")
+  .option("--no-pentest", "Skip enqueueing cloud pentests")
+  .option("--pentest-concurrency <count>", "Maximum concurrent enqueue requests", "4")
   .action(async (paths: string[], options) => {
     const config = loadConfig();
     validateConfigForScan(config);
@@ -178,19 +182,23 @@ program
       console.log(`${chalk.red(finding.severity.toUpperCase())} ${finding.vuln_type} ${finding.fingerprint.slice(0, 8)}`);
       console.log(`  ${finding.title}`);
     }
+    // AUDIT.md §6 W4 P5.4: surface files no framework adapter matched (stderr).
+    printAdapterWarnings(result.adapter_unmatched_files);
 
     const findingIds = result.push.findings?.finding_ids ?? [];
     if (options.pentest && findingIds.length > 0) {
+      // AUDIT.md §3 D4 / P1.3: enqueue one cloud pentest per ingested finding
+      // ID. No local pentest loop — the cloud worker executes each pentest.
+      const client = new SentinelApiClient(config);
       const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
-      const pentestResults = await runLimited(findingIds, concurrency, async (findingId) =>
-        runLocalPentest({
-          config, repoDir: root, apiToken, llmApiKey, findingId,
-          boot: config.boot, healthcheck: config.healthcheck, egressAllowlist: config.egress_allowlist,
-        })
-      );
-      for (const r of pentestResults) {
-        console.log(`pentest ${r.finding_id}: ${r.status} confirmed=${r.confirmed}`);
+      const enqueued = await runLimited(findingIds, concurrency, async (findingId) => {
+        const r = await client.enqueuePentest({ findingId });
+        return { findingId, runId: r.run.id, taskId: r.task_id };
+      });
+      for (const e of enqueued) {
+        console.log(`pentest enqueued: finding ${e.findingId} -> run ${e.runId} (task ${e.taskId})`);
       }
+      console.log(`enqueued ${enqueued.length} cloud pentest run(s); watch with 'sentinel runs watch <run-id>'`);
     } else if (options.pentest && result.findings.length > 0) {
       console.log("(pentest skipped: findings were not pushed to the cloud, so no finding IDs are available — check network/auth)");
     }
@@ -281,39 +289,33 @@ program
 
 program
   .command("pentest")
-  .description("Attempt to confirm a finding by attacking the app booted on this machine")
+  .description("Confirm a finding by enqueueing a cloud pentest run and polling until it completes")
   .argument("[target...]", "Finding ID, natural-language target, or empty to auto-select")
   .option("--sanitizer-output <text>", "Sanitizer output")
   .option("--behavioral-proof <kind>", "Behavioral proof kind")
   .option("--proof-detail <text>", "Behavioral proof detail", "")
   .action(async (targetParts: string[], options) => {
+    // AUDIT.md §3 D4: `sentinel pentest` never runs a pentest on this machine.
+    // The cloud worker owns pentest execution (§1 invariant 4); the CLI only
+    // enqueues (POST /pentest) and polls the run until it reaches a terminal
+    // state, then prints the finding's confirmation status/evidence.
     const config = loadConfig();
-    validateConfigForScan(config);
     await ensureBackend(config.apiUrl);
-    const root = findRepoRoot();
     const client = new SentinelApiClient(config);
     const target = parsePentestTarget(targetParts);
-    const findingId = target.findingId ?? (await resolvePentestTargetId(client, target.description));
-    if (!findingId) {
-      throw new Error("No open finding matched. Run `sentinel list` to see finding IDs.");
-    }
-    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
-    const result = await runLocalPentest({
-      config,
-      repoDir: root,
-      apiToken,
-      llmApiKey,
-      findingId,
+    // Let the cloud resolve a natural-language target when no ID is given
+    // (POST /pentest accepts `description`); only pre-resolve an explicit ID.
+    const enqueued = await client.enqueuePentest({
+      findingId: target.findingId,
+      description: target.description,
       sanitizerOutput: options.sanitizerOutput,
       behavioralProof: options.behavioralProof,
       proofDetail: options.proofDetail,
-      boot: config.boot,
-      healthcheck: config.healthcheck,
-      egressAllowlist: config.egress_allowlist,
     });
-    console.log(`${result.finding_id}\t${result.status}\tconfirmed=${result.confirmed}`);
-    if (result.evidence) console.log(result.evidence);
-    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
+    const findingId = target.findingId;
+    console.log(`enqueued cloud pentest: run ${enqueued.run.id} (task ${enqueued.task_id})`);
+    await watchRunToTerminal(client, enqueued.run.id);
+    await printPentestOutcome(client, findingId);
   });
 
 const suppress = program.command("suppress").description("Suppress or remove suppressions");
@@ -408,15 +410,7 @@ runs
     const config = loadConfig();
     await ensureBackend(config.apiUrl);
     const client = new SentinelApiClient(config);
-    for await (const event of client.runEvents(id)) {
-      console.log(event);
-      try {
-        const parsed = JSON.parse(event) as { kind?: string; status?: string };
-        if (parsed.kind === "run.completed" || parsed.kind === "complete" || parsed.status === "failed" || parsed.status === "cancelled") break;
-      } catch {
-        // Non-JSON trace lines are still useful to display.
-      }
-    }
+    await watchRunToTerminal(client, id);
   });
 runs
   .command("cancel")
@@ -451,7 +445,17 @@ config
     }
 
     const serverSyncKeys = new Set(["provider", "model", "api_endpoint"]);
-    const allowed = new Set(["apiUrl", "repoName", "provider", "model", "boot", "healthcheck", "api_endpoint", "repo_id"]);
+    // AUDIT.md §3 D1 — these live on the cloud Repo (pentest reachability
+    // config) and are synced via PATCH /repos/{id}/pentest-config. `boot`,
+    // `healthcheck`, and `egress_allowlist` double as repo pentest config now
+    // that pentest runs on the cloud worker (§3 D4), not this machine.
+    const pentestConfigKeys = new Set([
+      "staging_base_url", "pentest_mode", "healthcheck_path", "boot", "healthcheck", "egress_allowlist",
+    ]);
+    const allowed = new Set([
+      "apiUrl", "repoName", "provider", "model", "boot", "healthcheck", "api_endpoint", "repo_id",
+      "staging_base_url", "pentest_mode", "healthcheck_path", "egress_allowlist",
+    ]);
 
     if (key.startsWith("firecracker.")) {
       setFirecrackerConfigValue(current, key.slice("firecracker.".length), value);
@@ -462,8 +466,11 @@ config
     if (!allowed.has(key)) {
       throw new Error(`Unsupported config key ${key}`);
     }
-    current[key] = value;
-    writeConfig(ConfigSchema.parse(current), root);
+    // egress_allowlist is a comma-separated list locally; everything else is a scalar.
+    const parsedValue: unknown = key === "egress_allowlist" ? value.split(",").map((s) => s.trim()).filter(Boolean) : value;
+    current[key] = parsedValue;
+    const parsedConfig = ConfigSchema.parse(current);
+    writeConfig(parsedConfig, root);
 
     if (serverSyncKeys.has(key)) {
       await ensureBackend(loadConfig(root).apiUrl);
@@ -471,8 +478,114 @@ config
       patch[key] = value;
       await client.patchConfig(patch as { provider?: string; model?: string; api_endpoint?: string | null });
       console.log(`set ${key} (local + server)`);
+    } else if (pentestConfigKeys.has(key)) {
+      // Sync pentest reachability config to the cloud Repo (P1.4). Requires
+      // repo_id in local config — the cloud is the source of truth the worker
+      // reads at pentest time (§3 D1).
+      const repoId = parsedConfig.repo_id;
+      if (!repoId) {
+        console.log(`set ${key} (local only — set 'repo_id' in sentinel.config.json to sync pentest config to the cloud)`);
+        return;
+      }
+      await ensureBackend(loadConfig(root).apiUrl);
+      const patch: Record<string, unknown> = { [key]: parsedValue };
+      await client.patchPentestConfig(repoId, patch);
+      console.log(`set ${key} (local + cloud repo pentest config)`);
     } else {
       console.log(`set ${key}`);
+    }
+  });
+
+// AUDIT.md P4.1 — pre-flight checks. Exits non-zero with actionable messages
+// when something the CLI needs is missing or misconfigured (§5 Gate 4).
+program
+  .command("doctor")
+  .description("Run pre-flight checks: git repo, config, cloud health, auth, local engine, LLM key, pentest config")
+  .action(async () => {
+    const checks: Array<{ ok: boolean; warn?: boolean; label: string; detail?: string }> = [];
+    const record = (ok: boolean, label: string, detail?: string, warn = false) => checks.push({ ok, warn, label, detail });
+
+    // 1. git repo
+    const root = findRepoRoot();
+    const inGitRepo = existsSync(join(root, ".git"));
+    record(inGitRepo, "git repository", inGitRepo ? root : "no .git found — run `sentinel` from inside a git repo");
+
+    // 2. config
+    let config: ReturnType<typeof loadConfig> | undefined;
+    try {
+      config = loadConfig(root);
+      const hasConfigFile = existsSync(configPath(root));
+      record(true, "config", hasConfigFile ? configPath(root) : "using defaults (no sentinel.config.json — run `sentinel init`)", !hasConfigFile);
+    } catch (error) {
+      record(false, "config", `invalid config: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    const apiUrl = config?.apiUrl ?? "https://sentinel-steel-xi.vercel.app";
+
+    // 3. cloud health
+    const healthy = await isHealthy(apiUrl, 3000);
+    record(healthy, "cloud API reachable", healthy ? apiUrl : `${apiUrl} not reachable — start it with 'sentinel up' or check apiUrl`);
+
+    // 4. auth
+    if (config) {
+      const token = await readApiKey(config);
+      record(Boolean(token), "authenticated", token ? "credential present" : "no credential — run `sentinel auth login`");
+    }
+
+    // 5. local engine (SAST runs here — §1)
+    const pythonBin = resolveVenvPython();
+    let engineOk = false;
+    let engineDetail = "";
+    try {
+      const proc = spawnSync(pythonBin, ["-c", "import sentinel_worker.local_cli"], { encoding: "utf8" });
+      engineOk = proc.status === 0;
+      engineDetail = engineOk
+        ? `${pythonBin}`
+        : `cannot import sentinel_worker (${pythonBin}) — install it with 'pip install ./worker' or set SENTINEL_PYTHON`;
+    } catch (error) {
+      engineDetail = `local engine check failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    record(engineOk, "local analysis engine", engineDetail);
+
+    // 6. LLM key (SAST uses a local key — §3 D2; never sent to the cloud)
+    if (config) {
+      const llmKey = await readLlmApiKey(config);
+      const localProvider = config.provider === "local" || config.provider === "mock";
+      const keyOk = Boolean(llmKey) || localProvider;
+      record(
+        keyOk,
+        "LLM API key (local SAST)",
+        keyOk
+          ? (llmKey ? "key present (local keychain)" : `provider '${config.provider}' needs no key`)
+          : "no LLM key — run `sentinel config set api-key <key>`",
+        !keyOk
+      );
+
+      // 7. pentest reachability config (§3 D1 — cloud worker executes pentest)
+      const hasPentestConfig = Boolean(config.staging_base_url) || config.pentest_mode === "local_worker" || Boolean(config.boot);
+      record(
+        hasPentestConfig,
+        "pentest config (cloud worker)",
+        hasPentestConfig
+          ? `mode=${config.pentest_mode ?? "staging"}${config.staging_base_url ? ` url=${config.staging_base_url}` : ""}`
+          : "no staging_base_url — `sentinel pentest` will have no target. Set it with `sentinel config set staging_base_url <url>`",
+        true // pentest config is a warning, not a hard failure — SAST still works without it
+      );
+    }
+
+    let hardFailures = 0;
+    for (const c of checks) {
+      // A check flagged `warn` is advisory (never a hard failure); render it
+      // yellow whether or not it passed. Only ok && !warn is green.
+      const status = c.warn ? chalk.yellow("warn") : c.ok ? chalk.green("ok  ") : chalk.red("FAIL");
+      console.log(`[${status}] ${c.label}${c.detail ? `: ${c.detail}` : ""}`);
+      if (!c.ok && !c.warn) hardFailures += 1;
+    }
+    if (hardFailures > 0) {
+      console.log(chalk.red(`\n${hardFailures} check(s) failed.`));
+      process.exitCode = 1;
+    } else {
+      console.log(chalk.green("\nAll required checks passed."));
     }
   });
 
@@ -548,6 +661,38 @@ function absoluteUrl(apiUrl: string, pathOrUrl: string): string {
   return new URL(pathOrUrl, apiUrl).toString();
 }
 
+/** Stream a run's trace to stdout until it reaches a terminal state. */
+async function watchRunToTerminal(client: SentinelApiClient, runId: string): Promise<void> {
+  for await (const event of client.runEvents(runId)) {
+    console.log(event);
+    try {
+      const parsed = JSON.parse(event) as { kind?: string; status?: string };
+      if (parsed.kind === "run.completed" || parsed.kind === "complete" || parsed.status === "failed" || parsed.status === "cancelled") break;
+    } catch {
+      // Non-JSON trace lines are still useful to display.
+    }
+  }
+}
+
+/**
+ * After a cloud pentest run finishes, print the finding's confirmation status
+ * and evidence. The cloud worker writes finding.confirmed/status/evidence
+ * directly (AUDIT.md §3 D6), so the CLI just reads it back.
+ */
+async function printPentestOutcome(client: SentinelApiClient, findingId?: string): Promise<void> {
+  if (!findingId) {
+    console.log("pentest run finished. Run `sentinel list` to see the confirmed/not_reproducible status.");
+    return;
+  }
+  try {
+    const finding = await client.finding(findingId);
+    console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
+    if (finding.evidence) console.log(finding.evidence);
+  } catch {
+    console.log(`pentest run finished for finding ${findingId}. Run \`sentinel list\` to see the status.`);
+  }
+}
+
 async function runLimited<T, R>(items: T[], concurrency: number, task: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
@@ -577,32 +722,6 @@ function parsePentestTarget(parts: string[]): { findingId?: string; description?
     return { findingId: target };
   }
   return { description: target };
-}
-
-const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-
-// Client-side mirror of the server's retired /pentest description-matching:
-// term-overlap score against title+description+vuln_type, else just the
-// highest-severity open finding. No source is involved — just finding metadata.
-async function resolvePentestTargetId(client: SentinelApiClient, description?: string): Promise<string | undefined> {
-  const findings = await client.findings({ status: "open" });
-  if (findings.length === 0) return undefined;
-  if (!description) {
-    return [...findings].sort((a, b) => (SEVERITY_RANK[a.severity] ?? 5) - (SEVERITY_RANK[b.severity] ?? 5))[0]?.id;
-  }
-  const terms = description
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 2);
-  const scored = findings
-    .map((f) => {
-      const haystack = `${f.id} ${f.vuln_type} ${f.title} ${f.description} ${f.file ?? ""}`.toLowerCase();
-      const score = terms.reduce((n, term) => n + (haystack.includes(term) ? 1 : 0), 0);
-      return { finding: f, score };
-    })
-    .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score || (SEVERITY_RANK[a.finding.severity] ?? 5) - (SEVERITY_RANK[b.finding.severity] ?? 5));
-  return scored[0]?.finding.id;
 }
 
 function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {

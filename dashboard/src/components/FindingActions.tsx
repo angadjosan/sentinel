@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Ban, Crosshair, RotateCcw, Link2, Check } from "lucide-react";
 import type { Finding } from "../lib/api";
 import { toast } from "./Toast";
-import { startPentestAction, suppressWithReasonAction, unsuppressFindingAction } from "../app/findings/actions";
+import { startPentestAction, suppressFindingAction, unsuppressFindingAction } from "../app/findings/actions";
 
 export function FindingActions({ finding }: { finding: Finding }) {
   const router = useRouter();
@@ -19,10 +19,14 @@ export function FindingActions({ finding }: { finding: Finding }) {
 
   function suppress() {
     startTransition(async () => {
-      await suppressWithReasonAction(finding.id, reason);
-      setShowSuppress(false);
-      setReason("");
-      toast("Finding suppressed");
+      try {
+        await suppressFindingAction(finding.id, reason);
+        setShowSuppress(false);
+        setReason("");
+        toast("Finding suppressed");
+      } catch (error) {
+        toast(error instanceof Error ? error.message : "Could not suppress", "error");
+      }
       router.refresh();
     });
   }
@@ -73,10 +77,13 @@ export function FindingActions({ finding }: { finding: Finding }) {
 
       {showSuppress ? (
         <div className="panel" style={{ padding: 12, display: "grid", gap: 8 }}>
-          <textarea placeholder="Reason for suppression (required — recorded in the audit trail)" value={reason} onChange={(e) => setReason(e.target.value)} style={{ minHeight: 64 }} />
-          <div className="form-actions">
-            <button onClick={() => setShowSuppress(false)}>Cancel</button>
-            <button className="primary" onClick={suppress} disabled={pending || !reason.trim()}>Suppress finding</button>
+          <textarea placeholder="Reason for suppression (required, min 10 chars — recorded in the audit trail)" value={reason} onChange={(e) => setReason(e.target.value)} style={{ minHeight: 64 }} />
+          <div className="spread">
+            <span className="muted" style={{ fontSize: 12 }}>{reason.trim().length < 10 ? `${10 - Math.min(10, reason.trim().length)} more characters needed` : "Recorded in the audit trail"}</span>
+            <div className="actions">
+              <button onClick={() => setShowSuppress(false)}>Cancel</button>
+              <button className="primary" onClick={suppress} disabled={pending || reason.trim().length < 10}>Suppress finding</button>
+            </div>
           </div>
         </div>
       ) : null}

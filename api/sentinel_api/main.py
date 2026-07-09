@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import re
 import secrets
 import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -26,12 +23,10 @@ from sentinel_worker.graph_query import LayeredGraphQuery
 from sentinel_worker.payload_guard import SourcePayloadError, assert_no_source_markers
 from sentinel_worker.scan import get_or_create_graph, trace_event
 from sentinel_worker.security import compute_fingerprint
-from sentinel_worker.source_store import read_source_snapshot
 from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
 from sentinel_worker.trace_store import read_run_trace
 
 from .auth import Principal, create_token, current_principal, require_admin
-from .deps import get_db, get_tenant_db, init_schema
 from .deps import get_db, init_schema
 from .routers.auth import router as auth_router
 from .routers.repos import router as repos_router
@@ -53,15 +48,11 @@ from .schemas import (
     GraphUpsertResponse,
     IngestRequest,
     IngestResponse,
-    InitRequest,
     NodeResponse,
     PentestConfirmRequest,
     PentestRequest,
-    PlanRequest,
     RemediationResponse,
     RunResponse,
-    SourceRequest,
-    SourceReadResponse,
     SuppressRequest,
     SuppressionAuditResponse,
     SuppressionReviewRequest,
@@ -121,9 +112,6 @@ def _skip_tenant_filter(principal: "Principal") -> bool:
     tenant isolation — both conditions must hold simultaneously.
     """
     return _is_dev_mode() and principal.account_id == "dev"
-
-
-COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
@@ -266,26 +254,22 @@ async def metrics(principal: Principal = Depends(require_admin)) -> PlainTextRes
     return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
 
-def _github_install_account_id(installation_id: int) -> str:
-    """Deterministic account id per GitHub App installation, stable across webhook deliveries.
-
-    Using uuid5 (rather than a DB lookup-by-name) gives a valid-UUID account id so Postgres
-    tenant-schema routing (see sentinel_worker.db._schema_name) applies to GitHub App scans too.
-    """
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"sentinel-github-app-installation:{installation_id}"))
-
-
 @app.post("/webhook/github")
 async def github_webhook(request: Request) -> dict[str, bool]:
-    """Receives GitHub App webhooks, enqueues a scan for opened/updated PRs, and posts a pending Check Run.
+    """Verifies GitHub App webhook signatures and acknowledges delivery.
 
-    No CLI, no workflow file, no config — installing the App is enough. See non-code/shipping.md.
+    This endpoint no longer runs SAST in the cloud: the legacy path fetched the PR
+    diff and enqueued a `kind=source` task, storing the customer's diff in
+    `tasks.payload` and source snapshots in the cloud DB. That violates the SAST
+    privacy invariant (§1: source/diffs never leave the CLI machine on the scan
+    path). PR SAST + ingest now runs in CI via `action.yml` / `standalone.py`,
+    which scans locally in the runner and posts back only graph deltas + findings.
+
+    The signature check is kept so a misconfigured App install fails loudly rather
+    than silently, and so we can reintroduce CI-notification behaviour later (§7).
     """
     from sentinel_worker.github_app import (
         GitHubAppNotConfiguredError,
-        create_check_run,
-        fetch_pr_diff,
-        get_installation_token,
         verify_webhook_signature,
         webhook_secret,
     )
@@ -298,36 +282,7 @@ async def github_webhook(request: Request) -> dict[str, bool]:
     if not verify_webhook_signature(secret, request.headers.get("x-hub-signature-256"), body):
         raise HTTPException(status_code=401, detail="invalid webhook signature")
 
-    payload = json.loads(body)
-    event = request.headers.get("x-github-event")
-
-    if event == "pull_request" and payload.get("action") in ("opened", "synchronize"):
-        pr = payload["pull_request"]
-        installation_id = payload["installation"]["id"]
-        repo_full_name = payload["repository"]["full_name"]
-        head_sha = pr["head"]["sha"]
-
-        token = await get_installation_token(installation_id)
-        check_run_id = await create_check_run(token, repo_full_name, head_sha)
-        diff = await fetch_pr_diff(token, repo_full_name, pr["number"])
-
-        account_id = _github_install_account_id(installation_id)
-        async with contextlib.asynccontextmanager(get_tenant_db)(account_id) as db:
-            await enqueue_task(
-                db,
-                repo_name=repo_full_name,
-                kind="source",
-                payload={
-                    "diff": diff,
-                    "run_context": "ci",
-                    "check_run_id": check_run_id,
-                    "installation_id": installation_id,
-                    "repo": repo_full_name,
-                    "sha": head_sha,
-                },
-                account_id=account_id,
-            )
-
+    # Deliberately no diff fetch and no scan enqueue — see docstring above.
     return {"ok": True}
 
 
@@ -678,13 +633,15 @@ async def confirm_pentest_result(
     finding_id: str,
     payload: PentestConfirmRequest,
     db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
+    principal: Principal = Depends(require_admin),
 ) -> FindingResponse:
-    """Apply a local pentest run's outcome to a finding.
+    """DEPRECATED (AUDIT.md §3 D6): admin-only during migration.
 
-    `sentinel pentest` runs entirely on the developer's machine — against the
-    app booted locally, with secrets from `.env.sentinel` never leaving that
-    process — and posts only the confirmation outcome and evidence text here.
+    Confirmation is now written directly by the cloud worker inside
+    `run_pentest` (oracle-gated on HTTP/sanitizer proof, AUDIT.md §1 invariant
+    5). This public endpoint is retained admin-only as a manual override during
+    migration and must not be called by the CLI. It never receives source,
+    diffs, or secrets — only outcome + evidence text + node pointers.
     """
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
@@ -1088,24 +1045,11 @@ async def graph_upsert(
     return GraphUpsertResponse(graph_id=graph.id, nodes_upserted=nodes_upserted, edges_upserted=edges_upserted)
 
 
-@app.get("/source-files/{repo_name}/{commit_hash}/{file_path:path}", response_model=SourceReadResponse)
-async def read_source_file(repo_name: str, commit_hash: str, file_path: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> SourceReadResponse:
-    if not COMMIT_HASH_RE.match(commit_hash) and commit_hash != "bootstrap":
-        raise HTTPException(status_code=400, detail="invalid commit hash")
-    normalized = os.path.normpath(file_path)
-    if normalized.startswith("..") or normalized.startswith("/"):
-        raise HTTPException(status_code=400, detail="invalid file path")
-    stmt = select(Repo).where(Repo.name == repo_name)
-    if not _skip_tenant_filter(principal):
-        stmt = stmt.where(Repo.account_id == principal.account_id)
-    repo = await db.scalar(stmt)
-    if repo is None:
-        raise HTTPException(status_code=404, detail="repo not found")
-    try:
-        content = await read_source_snapshot(db, repo_id=repo.id, commit_hash=commit_hash, file_path=normalized)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="source file not found") from exc
-    return SourceReadResponse(repo_name=repo.name, commit_hash=commit_hash, file_path=normalized, content=content)
+# NOTE: GET /source-files/... was removed. It served decrypted source snapshots
+# over HTTP, which only made sense for the legacy cloud-SAST path. Under the
+# target architecture the CLI reads source locally and the cloud never needs to
+# hand source back. The pentest agent's read_file tool reads snapshots directly
+# via sentinel_worker.source_store, not through this endpoint.
 
 
 @app.post("/admin/graphs/merge")

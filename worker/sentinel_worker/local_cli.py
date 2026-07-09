@@ -22,10 +22,8 @@ from pathlib import Path
 
 from .local_engine import (
     GraphDelta,
-    push_pentest_result,
     push_results_to_cloud,
     run_local_init,
-    run_local_pentest,
     run_local_plan_review,
     run_local_source_scan,
 )
@@ -81,19 +79,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_llm_args(plan)
     _add_common_cloud_args(plan)
 
-    pentest = sub.add_parser("pentest", help="Confirm a finding by attacking the app booted on this machine.")
-    pentest.add_argument("--repo-name", required=True)
-    pentest.add_argument("--repo-dir", default=".")
-    pentest.add_argument("--finding-id", required=True)
-    pentest.add_argument("--sanitizer-output", default="")
-    pentest.add_argument("--behavioral-proof")
-    pentest.add_argument("--proof-detail", default="")
-    pentest.add_argument("--boot", help="Command to boot the app (argv-style, no shell metacharacters).")
-    pentest.add_argument("--healthcheck", help="Command that exits 0 when the app is ready.")
-    pentest.add_argument("--egress-allowlist", action="append", default=[])
-    _add_common_llm_args(pentest)
-    pentest.add_argument("--api-url", required=True, help="Sentinel cloud API base URL — the finding to confirm lives there.")
-    pentest.add_argument("--api-token")
+    # NOTE: the `pentest` subcommand was removed (AUDIT.md §3 D4). Pentest is no
+    # longer run on this machine — `sentinel pentest` in the Node CLI enqueues a
+    # cloud pentest (POST /pentest) and the cloud worker executes it.
 
     return p
 
@@ -198,6 +186,8 @@ def run(argv: list[str] | None = None) -> int:
                     "finding_count": len(result.scan.findings),
                     "graph_nodes_pushed": len(result.delta.nodes),
                     "graph_edges_pushed": len(result.delta.edges),
+                    # AUDIT.md §6 W4 P5.4: files no framework adapter matched.
+                    "adapter_unmatched_files": result.adapter_unmatched_files,
                     "local_run_id": result.local_run_id,
                     "local_trace_path": result.local_trace_path,
                     "push": push_response,
@@ -246,45 +236,6 @@ def run(argv: list[str] | None = None) -> int:
             )
         )
         return 1 if scan.findings else 0
-
-    if args.command == "pentest":
-        result = asyncio.run(
-            run_local_pentest(
-                repo_name=args.repo_name,
-                repo_dir=args.repo_dir,
-                finding_id=args.finding_id,
-                llm=llm,
-                api_url=args.api_url,
-                api_token=args.api_token,
-                sanitizer_output=args.sanitizer_output,
-                behavioral_proof=args.behavioral_proof,
-                proof_detail=args.proof_detail,
-                boot=args.boot,
-                healthcheck=args.healthcheck,
-                egress_allowlist=args.egress_allowlist,
-            )
-        )
-        try:
-            push_response = push_pentest_result(api_url=args.api_url, token=args.api_token, result=result)
-        except Exception as exc:  # noqa: BLE001 — a push failure must not discard the local pentest outcome
-            sys.stderr.write(f"sentinel: WARNING failed to push pentest result to the cloud: {exc}\n")
-            push_response = {"error": str(exc)}
-        sys.stderr.write(f"sentinel: pentest {'confirmed' if result.confirmed else 'not reproducible'} — {result.status}\n")
-        print(
-            json.dumps(
-                {
-                    "finding_id": result.finding_id,
-                    "confirmed": result.confirmed,
-                    "status": result.status,
-                    "evidence": result.evidence,
-                    "payloads": result.payloads,
-                    "local_run_id": result.local_run_id,
-                    "local_trace_path": result.local_trace_path,
-                    "push": push_response,
-                }
-            )
-        )
-        return 0
 
     return 2
 

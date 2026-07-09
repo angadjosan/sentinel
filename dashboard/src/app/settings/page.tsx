@@ -1,9 +1,10 @@
 import Link from "next/link";
 import { BadgeCheck, GitBranch, KeyRound, ShieldCheck, Cpu, CircleDollarSign, Users, Terminal, SlidersHorizontal } from "lucide-react";
-import { accountConfig, currentUser, listFindings, listMembers, listRepos, listSessions, type AuthUser, type Repo } from "../../lib/api";
+import { accountConfig, currentUser, getRepoPentestConfig, listFindings, listMembers, listRepos, listSessions, type AuthUser, type Repo } from "../../lib/api";
 import { SeverityBadge, relativeTime } from "../../components/ui";
 import { SubmitButton } from "../../components/SubmitButton";
 import { SettingsNav } from "../../components/nav/SettingsNav";
+import { RepoPentestConfigForm } from "../../components/RepoPentestConfigForm";
 import {
   approveDeviceCodeAction,
   approveSuppressionAction,
@@ -36,6 +37,15 @@ export default async function SettingsPage() {
     listMembers().catch((): AuthUser[] => [])
   ]);
   const pending = findings.filter((f) => f.status === "suppression_pending");
+
+  // GET /repos omits pentest fields; pull each repo's config so the form pre-fills.
+  const pentestConfigs = await Promise.all(repos.map((r) => getRepoPentestConfig(r.id).catch(() => null)));
+  const reposWithConfig: Repo[] = repos.map((repo, index) => {
+    const config = pentestConfigs[index];
+    return config
+      ? { ...repo, pentest_mode: config.pentest_mode, staging_base_url: config.staging_base_url, healthcheck_path: config.healthcheck_path, boot: config.boot, healthcheck: config.healthcheck, egress_allowlist: config.egress_allowlist }
+      : repo;
+  });
 
   return (
     <>
@@ -128,6 +138,22 @@ export default async function SettingsPage() {
                 </form>
               </div>
             </div>
+            {repos.length ? (
+              <div className="panel" style={{ marginTop: 14 }}>
+                <div className="panel-header"><h2>Pentest configuration</h2><span className="muted">where the cloud worker reaches each repo</span></div>
+                <div className="panel-body stack" style={{ gap: 20 }}>
+                  {reposWithConfig.map((repo) => (
+                    <div key={repo.id} className="stack" style={{ gap: 10 }}>
+                      <div className="spread">
+                        <div className="cell-strong"><GitBranch size={13} className="dim" style={{ marginRight: 7, verticalAlign: "-2px" }} />{repo.name}</div>
+                        <span className={`chip ${repo.staging_base_url || repo.boot ? "accent" : ""}`}>{repo.staging_base_url || repo.boot ? repo.pentest_mode : "not configured"}</span>
+                      </div>
+                      <RepoPentestConfigForm repo={repo} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section id="members" className="settings-section">
@@ -230,8 +256,8 @@ export default async function SettingsPage() {
                           <td><Link className="row-link" href={`/findings/${f.id}`}>{f.title}</Link><div className="muted" style={{ fontSize: 12 }}>{f.vuln_type.replace(/_/g, " ")}</div></td>
                           <td style={{ textAlign: "right" }}>
                             <div className="actions" style={{ justifyContent: "flex-end" }}>
-                              <form action={approveSuppressionAction}><input type="hidden" name="finding_id" value={f.id} /><button className="primary sm" type="submit">Approve</button></form>
-                              <form action={rejectSuppressionAction}><input type="hidden" name="finding_id" value={f.id} /><button className="danger sm" type="submit">Reject</button></form>
+                              <form action={approveSuppressionAction}><input type="hidden" name="finding_id" value={f.id} /><input type="hidden" name="reason" value="Suppression approved by admin in the dashboard" /><button className="primary sm" type="submit">Approve</button></form>
+                              <form action={rejectSuppressionAction}><input type="hidden" name="finding_id" value={f.id} /><input type="hidden" name="reason" value="Suppression rejected by admin in the dashboard" /><button className="danger sm" type="submit">Reject</button></form>
                             </div>
                           </td>
                         </tr>
