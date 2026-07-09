@@ -77,13 +77,13 @@ async def run_sast(
                     finding_data.get("vuln_type", "unknown"),
                 )
                 if fp not in suppressed_fps:
-                    # Only set node_id if the node actually exists — plan scans
-                    # have no graph nodes, so a synthetic id like "file:plan.txt"
-                    # would violate the FK constraint on findings.node_id.
+                    # Only set node_id if the node actually exists in this graph
+                    # — plan scans have no graph nodes, so a synthetic id like
+                    # "file:plan.txt" would point findings.node_id at nothing.
                     from .models import Node as _Node
                     raw_node_id = finding_data.get("node_id")
                     if raw_node_id:
-                        node_exists = await db.get(_Node, raw_node_id)
+                        node_exists = await db.get(_Node, {"graph_id": graph.id, "id": raw_node_id})
                         node_id = raw_node_id if node_exists is not None else None
                     else:
                         node_id = None
