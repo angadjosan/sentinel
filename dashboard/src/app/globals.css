@@ -327,6 +327,16 @@ a {
   width: 100%;
 }
 
+.settings-form textarea {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  min-width: 0;
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+
 .settings-form .checkbox-row {
   align-items: center;
   display: flex;
@@ -400,6 +410,14 @@ a {
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.table tr.row-highlight td {
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.table tr.row-highlight td:first-child {
+  box-shadow: inset 3px 0 0 var(--danger, #ef4444);
 }
 
 .badge {

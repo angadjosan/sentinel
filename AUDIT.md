@@ -1,7 +1,7 @@
 # Sentinel — Architecture Audit & Implementation Plan
 
-**Date:** July 7, 2026  
-**Status:** Actionable handoff document  
+**Date:** July 7, 2026 (implemented & reconciled July 8, 2026)  
+**Status:** ✅ **Resolved** — all five workstreams (W1–W5) landed and were reconciled into one tree; §5 Gates 0–4 pass. See **§11 Resolution** for what was verified (incl. a real-socket live E2E smoke) and what remains deferred (§7 backlog).  
 **Audience:** You + subagents implementing in parallel
 
 ---
@@ -105,13 +105,15 @@ Dashboard / sentinel list / pull ◄──────── findings + runs + g
 
 ## §2 Audit summary (current vs target)
 
-| Area | Score | Headline |
-|------|-------|----------|
-| CLI local SAST | ~80% | Core path works (`local_engine`, `local_cli`, ingest/upsert) |
-| Cloud graph | ~85% | Works; global node PK collision risk |
-| Cloud findings | ~90% | Works |
-| Cloud pentest | ~15% | API exists; worker unwired; execution stubbed; CLI runs pentest locally (wrong) |
-| Docs / tests / UX | ~40% | Three architectures coexist |
+Scores below are the **original** audit (July 7). The **Now** column is the reconciled state (July 8, all gates passing).
+
+| Area | Then | Now | Headline |
+|------|------|-----|----------|
+| CLI local SAST | ~80% | ✅ | Unchanged target path; SQLi ground-truth fixture test added (W4) |
+| Cloud graph | ~85% | ✅ | Works (node PK composite-key hardening still §7 backlog) |
+| Cloud findings | ~90% | ✅ | Works |
+| Cloud pentest | ~15% | ✅ | Worker executes `kind=pentest`; HTTP dispatch + hardened oracle; confirmed on target's own response, verified live over real sockets (§11) |
+| Docs / tests / UX | ~40% | ✅ | One architecture; dashboard + README tell the truth; no fake-green tests |
 
 **Root cause:** PR #13 local-first refactor moved pentest to CLI while cloud enqueue path rotted. Legacy cloud-worker SAST + GitHub webhook diff storage still exists.
 
@@ -239,37 +241,37 @@ Run these **after merging** workstreams — not before starting them. Individual
 
 ### Gate 0 — Cloud pentest executes *(needs W1 merged)*
 
-- [ ] `runner.py` handles `kind=pentest` without raising
-- [ ] Worker test: enqueue → claim → complete updates finding
-- [ ] HTTP payloads sent to configurable base URL (test server)
-- [ ] Oracle rejects `behavioral_proof` without HTTP/sanitizer evidence
-- [ ] Pentest run row exists with `kind=pentest` and trace in Postgres
+- [x] `runner.py` handles `kind=pentest` without raising
+- [x] Worker test: enqueue → claim → complete updates finding
+- [x] HTTP payloads sent to configurable base URL (test server)
+- [x] Oracle rejects `behavioral_proof` without HTTP/sanitizer evidence
+- [x] Pentest run row exists with `kind=pentest` and trace in Postgres
 
 ### Gate 1 — CLI integrated *(needs W1 + W2 merged)*
 
-- [ ] `sentinel pentest <id>` never spawns local pentest subprocess
-- [ ] CLI polls until run terminal; prints confirmed/not_reproducible
-- [ ] `scan --pentest` enqueues one cloud pentest per ingested finding ID
-- [ ] Repo pentest config readable from cloud API
+- [x] `sentinel pentest <id>` never spawns local pentest subprocess
+- [x] CLI polls until run terminal; prints confirmed/not_reproducible
+- [x] `scan --pentest` enqueues one cloud pentest per ingested finding ID
+- [x] Repo pentest config readable from cloud API
 
 ### Gate 2 — Legacy removed *(needs W3 merged)*
 
-- [ ] GitHub webhook does not store diff in task payload
-- [ ] `POST /repos/{id}/plan` deleted or fixed; no `NameError`
-- [ ] README does not claim local pentest
-- [ ] `local_cli pentest` subcommand removed
+- [x] GitHub webhook does not store diff in task payload
+- [x] `POST /repos/{id}/plan` deleted or fixed; no `NameError`
+- [x] README does not claim local pentest
+- [x] `local_cli pentest` subcommand removed
 
 ### Gate 3 — Tests trustworthy *(needs W4 merged)*
 
-- [ ] At least one test fails if `runner.py` pentest handler removed
-- [ ] No test named `*confirmed*` that only asserts `status=queued`
-- [ ] SQLi fixture test exists in `worker/tests/`
+- [x] At least one test fails if `runner.py` pentest handler removed
+- [x] No test named `*confirmed*` that only asserts `status=queued`
+- [x] SQLi fixture test exists in `worker/tests/`
 
 ### Gate 4 — Customer-ready docs/UX *(needs W5 merged)*
 
-- [ ] `sentinel doctor` exits non-zero with actionable messages
-- [ ] Dashboard Team page explains SAST local / pentest cloud split
-- [ ] Package name consistent (`sentineldev` everywhere or documented alias)
+- [x] `sentinel doctor` exits non-zero with actionable messages
+- [x] Dashboard Team page explains SAST local / pentest cloud split
+- [x] Package name consistent (`sentineldev` everywhere or documented alias)
 
 ---
 
@@ -539,3 +541,34 @@ One person solo: same five workstreams, but run them **serially** — still use 
 | W5 | UX + docs | Dashboard + README tell the truth |
 
 Hand off one **W1–W5** prompt block per subagent on day 1. Integration smoke when all are merged.
+
+---
+
+## §11 Resolution (July 8, 2026)
+
+All five workstreams were implemented in parallel and **reconciled into a single tree** (no separate branches; shared-file edits to `runner.py` / `schemas.py` / `main.py` merged in place and verified). One reconciliation commit captures the whole thing.
+
+### Gates — all pass (§5)
+
+| Gate | Owner | Result |
+|------|-------|--------|
+| 0 — Cloud pentest executes | W1 | ✅ runner handles `kind=pentest`; enqueue→claim→confirm; HTTP dispatch; oracle rejects agent-only proof; regression guard empirically fails if the handler is deleted |
+| 1 — CLI integrated | W1+W2 | ✅ no local pentest subprocess; enqueue+poll; `scan --pentest` fans out per finding; repo config readable over the API — **proven live** (below) |
+| 2 — Legacy removed | W3 | ✅ webhook stores no diff; `/repos/{id}/plan` gone; `local_cli pentest` gone; README describes cloud pentest only |
+| 3 — Tests trustworthy | W4 | ✅ SQLi ground-truth fixture; no fake-green `*confirmed*` tests; handler-removal regression proven |
+| 4 — Docs/UX | W5 | ✅ `sentinel doctor` exits non-zero; dashboard explains SAST-local/pentest-cloud; `sentineldev` name + `--version` consistent |
+
+**Combined suites (one tree):** worker 227 passed · api 61 passed (full suite green with `respx` installed) · cli 18 passed · dashboard production build ✓.
+
+### Live E2E smoke (Gate 1, deployed-equivalent)
+
+Because a cloud deploy isn't available here, Gate 1 was proven over **real sockets** instead of a hosted stack (`.context/live_smoke.py`): a real uvicorn API + a real vulnerable staging HTTP server, sharing one DB. Flow, all over HTTP: seed graph+finding → `PATCH`/`GET /repos/{id}/pentest-config` → `POST /pentest` → the **real worker** dispatches real payloads → the target leaks a `psycopg2` SQL error on `' OR '1'='1` → oracle confirms on the **target's own response** → `finding.confirmed=true` + `CONFIRMED_EXPLOIT` edge. Confirmation was asserted to be backed by an actual SQLi request reaching the target (invariant 5), not just a DB flag.
+
+### Environment fix
+
+`api/pyproject.toml` now pins `pythonpath = ["../worker"]` so the API suite always imports the **co-located** `sentinel_worker`, not a stale editable install pointing at another worktree (the Conductor pip-editable caveat). No more hand-set `PYTHONPATH` in local runs or CI.
+
+### Still deferred (not regressions — out of the plan's scope)
+
+- **§7 post-MVP backlog** untouched by design: P5.1 node-ID composite key, P5.2 GitHub-App→CI-only notification, P5.3 LLM remediation in `pull`, P5.5 real 3-way graph merge. (P5.4 adapter warnings *was* pulled in by W4.)
+- **LLM-driven pentest payloads** were not exercised live — no pentest LLM is configured in this environment, so the run correctly fell back to **template payloads** (the designed Phase-1 path per §3 D3). A real deploy with `SENTINEL_PENTEST_LLM_API_KEY` set would additionally exercise agent-generated payloads.

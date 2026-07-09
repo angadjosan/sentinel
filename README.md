@@ -17,6 +17,7 @@ Sentinel's answer is contextual reasoning over exploitability. Pattern matching 
 - [Install the CLI](#install-the-cli)
 - [Self-host the backend](#self-host-the-backend)
 - [Running a scan](#running-a-scan)
+- [Pentest (cloud)](#pentest-cloud)
 - [CI integration](#ci-integration)
 - [Using an LLM provider](#using-an-llm-provider)
 - [sentinel.config.json reference](#sentinelconfigjson-reference)
@@ -97,11 +98,11 @@ Every command below runs its analysis — diff parsing, graph construction, the 
 - **`sentinel auth login`** — authenticate the CLI against the backend that stores the shared graph and findings.
 
 **On every diff:**
-- **`sentinel source`** — update the graph incrementally and run SAST, SCA, and secret scanning in parallel. Exits `1` if findings are returned, making it a drop-in CI gate.
-- **`sentinel scan`** — run `source` + automated pentesting of each finding.
+- **`sentinel source`** — update the graph incrementally and run SAST, SCA, and secret scanning in parallel, all locally. Exits `1` if findings are returned, making it a drop-in CI gate.
+- **`sentinel scan`** — run `source` locally, then enqueue a **cloud** pentest for each finding. SAST stays on your machine; pentest execution happens on the cloud worker.
 
 **Deep investigation:**
-- **`sentinel pentest`** — attempt to confirm a finding with runtime oracle evidence — sanitizer output or behavioral proof, not just agent judgment.
+- **`sentinel pentest`** — enqueue a cloud pentest to confirm a finding with runtime oracle evidence — an HTTP/behavioral proof or sanitizer output, not just agent judgment. The **cloud worker** runs it against your configured staging URL; the CLI enqueues the job and polls until it's done. See [Pentest (cloud)](#pentest-cloud).
 - **`sentinel plan`** — review a design doc for security issues before any code is written.
 
 **Managing findings:**
@@ -114,10 +115,10 @@ Every command below runs its analysis — diff parsing, graph construction, the 
 ## Install the CLI
 
 ```bash
-npm install -g @sentinel/cli
+npm install -g sentineldev
 ```
 
-Requires Node.js v20 or later. Verify with `node --version`.
+The npm package is named **`sentineldev`**; it installs the `sentinel` command. Requires Node.js v20 or later. Verify with `node --version`.
 
 To install from source instead:
 
@@ -264,6 +265,55 @@ sentinel scan --dry-run              # preview what files would be scanned
 sentinel list                        # list all open findings
 sentinel pull <id>                   # full description + step-by-step fix
 ```
+
+---
+
+## Pentest (cloud)
+
+SAST tells you a finding *looks* exploitable. Pentest *proves* it. Unlike everything else in Sentinel, **pentest runs on the cloud worker, not on your machine** — the worker needs to reach a running instance of your app, generate payloads, and observe the app's behavior for a runtime oracle.
+
+`sentinel pentest` never spawns a local pentest: it enqueues a `kind=pentest` task and polls until the run is terminal.
+
+```
+sentinel pentest [id]
+  └─ POST /pentest ──────────────► cloud worker claims the task
+  └─ sentinel runs watch ───────► worker sends HTTP payloads to your staging URL
+                                   → confirms finding only on HTTP/behavioral proof
+                                     or sanitizer output (never agent judgment alone)
+```
+
+### Reachability: two modes
+
+The worker needs to reach your app. Configure this **per repo** — on the dashboard **Team → Pentest Configuration**, or with `sentinel config set` (synced to the cloud repo):
+
+| Mode | When | Config |
+|---|---|---|
+| **`staging`** (default) | Hosted worker (Vercel/Railway). The worker sends HTTP probes to a URL it can reach. | `staging_base_url`, `healthcheck_path` |
+| **`local_worker`** | Self-hosted `docker compose` worker. The worker boots the app itself in a subprocess sandbox on the worker host. | `boot`, `healthcheck`, `egress_allowlist` |
+
+```bash
+# Staging mode (hosted): point the worker at a reachable deployment
+sentinel config set pentest_mode staging
+sentinel config set staging_base_url https://staging.your-app.com
+sentinel config set healthcheck_path /health
+
+# Self-hosted worker: let the worker boot the app
+sentinel config set pentest_mode local_worker
+sentinel config set boot "docker compose up -d"
+sentinel config set healthcheck "curl -sf http://localhost:3000/health"
+```
+
+The hosted worker cannot reach `localhost` on your machine — use `staging` mode against a deployed environment, or run a self-hosted worker for `local_worker` mode.
+
+### Pentest LLM credential
+
+The pentest agent's LLM key lives **on the worker**, not on your machine — set `SENTINEL_PENTEST_LLM_API_KEY` in the worker environment (or an admin can set an encrypted `pentest_api_key` on the account from the dashboard). This is deliberately **separate** from your local SAST key: the worker never sees your SAST key, and your machine never sees the pentest key.
+
+### Confirmation
+
+A finding is marked `confirmed` **only** with a runtime oracle: an HTTP/behavioral proof (data exfiltrated, auth bypassed, command executed) or a sanitizer stack trace. The agent asserting "this is exploitable" is not sufficient. The worker writes the confirmation and a `CONFIRMED_EXPLOIT` edge directly; evidence text is visible in the dashboard finding detail and via `sentinel pull <id>`.
+
+Phase 1 pentest is HTTP-only and uses the cloud graph plus finding metadata for context — **no source is uploaded for pentest.**
 
 ---
 
@@ -422,15 +472,18 @@ Written by `sentinel init` into your repo root. Commit this file — it contains
 |---|---|---|---|
 | `apiUrl` | string | hosted backend | Backend URL for the shared code graph + findings (not used for AI calls) |
 | `repoName` | string | directory name | Display name for this repo |
-| `provider` | string | `local` | LLM provider: `local` (Ollama), `anthropic`, `openai` — the call always runs on this machine |
+| `provider` | string | `local` | LLM provider: `local` (Ollama), `anthropic`, `openai` — the SAST call always runs on this machine |
 | `model` | string | — | Model name |
-| `boot` | string | — | Command to start your app for pentesting (runs locally) |
-| `healthcheck` | string | — | Command that exits 0 when app is ready |
-| `env.from` | string | — | Path to env file loaded into the local pentest process |
-| `egress_allowlist` | string[] | `[]` | Hosts the local pentest sandbox may contact |
-| `firecracker.*` | — | — | Unused. Pentest runs in a local subprocess sandbox now (the app is already on your machine, not a shared host) — kept for schema back-compat only. |
+| `pentest_mode` | string | `staging` | Where the **cloud** worker reaches your app: `staging` (HTTP probe) or `local_worker` (self-hosted worker boots the app). Synced to the cloud repo. |
+| `staging_base_url` | string | — | (`staging` mode) Base URL the cloud worker sends pentest payloads to. |
+| `healthcheck_path` | string | — | (`staging` mode) Path the worker probes to confirm the app is up, e.g. `/health`. |
+| `boot` | string | — | (`local_worker` mode) Command the **worker host** runs to start the app. |
+| `healthcheck` | string | — | (`local_worker` mode) Command that exits 0 when the app is ready. |
+| `egress_allowlist` | string[] | `[]` | (`local_worker` mode) Hosts the worker sandbox may contact. |
 
-Example:
+These pentest fields are **synced to the cloud repo** (`sentinel init` / `sentinel config set`) because the cloud worker — not your machine — runs the pentest. See [Pentest (cloud)](#pentest-cloud).
+
+Example (`staging` mode, the hosted default):
 
 ```json
 {
@@ -438,10 +491,9 @@ Example:
   "repoName": "my-app",
   "provider": "local",
   "model": "llama3.2",
-  "boot": "docker compose up -d",
-  "healthcheck": "curl -sf http://localhost:3000/health",
-  "egress_allowlist": ["localhost"],
-  "env": { "from": ".env.sentinel" }
+  "pentest_mode": "staging",
+  "staging_base_url": "https://staging.my-app.com",
+  "healthcheck_path": "/health"
 }
 ```
 
@@ -517,17 +569,19 @@ sentinel source [--staged] [--base <ref>] [paths...]
 
 ### `sentinel scan [paths...]`
 
-Full scan: `source` + automated pentesting of each finding, all locally.
+Full scan: runs `source` **locally**, then enqueues a **cloud** pentest for each ingested finding and polls until they finish. SAST stays on your machine; pentest runs on the cloud worker (see [Pentest (cloud)](#pentest-cloud)).
 
 ```bash
 sentinel scan [--staged] [--base <ref>] [--no-pentest] [--pentest-concurrency <n>] [paths...]
 ```
 
+`--no-pentest` scans locally and skips the cloud pentest step entirely.
+
 ---
 
 ### `sentinel pentest [target...]`
 
-Confirm a finding with runtime oracle evidence. Boots your app **locally** (via `boot`/`healthcheck` in `sentinel.config.json`), and the pentest agent generates payloads, runs them against it, and checks for sanitizer output or behavioral proof — all on this machine. Only the confirmation outcome and evidence text are pushed to the backend.
+Confirm a finding with runtime oracle evidence. Unlike SAST, **pentest runs on the cloud worker, not on your machine.** `sentinel pentest` enqueues a `kind=pentest` task (`POST /pentest`) and then polls (`sentinel runs watch`) until the run reaches a terminal state, printing the finding status and evidence. The worker sends HTTP payloads to your configured staging URL and confirms only on an HTTP/behavioral proof or sanitizer output — never on agent judgment alone.
 
 ```bash
 sentinel pentest                                         # auto-select
@@ -535,7 +589,7 @@ sentinel pentest abc123ef-...                            # by finding ID
 sentinel pentest "SQL injection in user login handler"   # by description
 ```
 
-Requires `boot` and `healthcheck` to be set in `sentinel.config.json`.
+Requires the repo's **pentest reachability** to be configured — a reachable `staging_base_url` (hosted worker, the default), or `boot`/`healthcheck` for a self-hosted `local_worker`. See [Pentest (cloud)](#pentest-cloud). The worker's LLM credential is server-side (`SENTINEL_PENTEST_LLM_API_KEY`) — separate from your local SAST key, which the worker never sees.
 
 ---
 
@@ -605,8 +659,9 @@ sentinel config set <key> <value>  # update a value
 ```
 
 Keys synced to the backend (metadata only, for the dashboard): `provider`, `model`, `api_endpoint`
+Keys synced to the cloud **repo** (the worker needs them to run pentest): `pentest_mode`, `staging_base_url`, `healthcheck_path`, `boot`, `healthcheck`, `egress_allowlist`
 Keys stored **only** in the system keychain, never sent anywhere: `api-key`
-Local-only keys: `apiUrl`, `repoName`, `boot`, `healthcheck`
+Local-only keys: `apiUrl`, `repoName`
 
 ---
 
@@ -738,13 +793,24 @@ On your machine (or a CI runner):
       │                 └──────────────────┘
       │
       │  graph delta (pointers + labels, never source) + findings
+      │  + POST /pentest (enqueue) ; sentinel runs watch (poll)
       ▼
 ┌─────────────────────┐   SQL   ┌──────────────┐
 │  Backend API          │ ─────► │  Postgres    │
 │  (FastAPI) — graph,   │        │  (graph,     │
-│  findings, auth only  │        │  findings)   │
+│  findings, auth,      │        │  findings,   │
+│  pentest enqueue      │        │  runs)       │
 └─────────────────────┘         └──────────────┘
-      ▲
+      ▲    │                          ▲
+      │    │ claims kind=pentest       │ writes confirmation
+      │    ▼                          │ + CONFIRMED_EXPLOIT
+      │  ┌──────────────────────┐      │
+      │  │  Cloud Worker          │──────┘
+      │  │  runs pentest:         │   HTTP payloads
+      │  │  SENTINEL_PENTEST_     │ ─────────────────► ┌──────────────┐
+      │  │  LLM_API_KEY           │                    │  Your staging │
+      │  └──────────────────────┘                     │  URL (app)    │
+      │                                                └──────────────┘
       │  SSR fetches (findings, graph, run summaries — never source)
 ┌──────────────────┐
 │  Dashboard         │
@@ -754,11 +820,11 @@ On your machine (or a CI runner):
 
 **Key design decisions:**
 
-- **Source never leaves your machine.** `sentinel init`/`source`/`scan`/`plan`/`pentest` all run their analysis — diff parsing, graph construction, the LLM call itself — in the local engine process. The CLI spawns it, pipes the diff over stdin, and parses one JSON result line from stdout.
-- **The LLM call happens locally**, with a key you configure (`sentinel config set api-key`) that lives only in your system keychain. The backend cannot see it, store it, or make a call on your behalf — `PATCH /config` rejects an `api_key` field outright.
-- **Only the code graph and findings sync to the backend.** Graph nodes store pointers (`file`, `line_start`, `line_end`) and short LLM-written labels — never source text. `POST /graph/upsert` and `POST /findings/ingest` are the only write paths; there is no endpoint that accepts a diff or file contents anymore.
-- **Pentest runs locally too** — the app boots on your machine (via `boot`/`healthcheck`), payloads are generated and sent by the local engine, and only the confirmation outcome (`POST /findings/{id}/confirm`) crosses to the backend.
-- **Run traces stay local.** The full trace (every prompt, every tool call) is written to `~/.sentinel/runs/<id>.jsonl` and never uploaded. The backend only ever sees a redacted summary (token spend, event kinds).
+- **Source never leaves your machine for SAST.** `sentinel init`/`source`/`scan`/`plan` all run their analysis — diff parsing, graph construction, the SAST LLM call itself — in the local engine process. The CLI spawns it, pipes the diff over stdin, and parses one JSON result line from stdout.
+- **The SAST LLM call happens locally**, with a key you configure (`sentinel config set api-key`) that lives only in your system keychain. The backend cannot see it, store it, or make a call on your behalf — `PATCH /config` rejects an `api_key` field outright.
+- **Only the code graph and findings sync to the backend.** Graph nodes store pointers (`file`, `line_start`, `line_end`) and short LLM-written labels — never source text. `POST /graph/upsert` and `POST /findings/ingest` are the only write paths for the scan; there is no endpoint that accepts a diff or file contents.
+- **Pentest runs in the cloud** — not on your machine. `sentinel pentest` enqueues a `kind=pentest` task (`POST /pentest`); the cloud worker sends HTTP payloads to your configured staging URL, applies a runtime oracle, and writes the confirmation directly. Its LLM credential (`SENTINEL_PENTEST_LLM_API_KEY`) lives on the worker, separate from your local SAST key. See [Pentest (cloud)](#pentest-cloud).
+- **Run traces stay local for local runs.** A SAST run's full trace (every prompt, every tool call) is written to `~/.sentinel/runs/<id>.jsonl` and never uploaded; the backend only sees a redacted summary (token spend, event kinds). Cloud pentest runs are traced on the worker, with the same scrubbed-summary discipline.
 - The code graph is stored in **Postgres**, keyed by account/repo. `sentinel init` builds it once locally and pushes it; subsequent scans push only the delta for changed nodes.
 - Findings are **fingerprinted** on `file + vuln_type` so suppressions survive line-number shifts and minor refactors.
 - LLM calls enforce **channel separation** — instructions live in the system prompt, analyzed code lives in the user prompt. They never mix.

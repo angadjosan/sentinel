@@ -115,6 +115,36 @@ export type AccountConfigPatch = {
   source_retention_days?: number;
 };
 
+// Repo pentest configuration (§3 D1 — dual mode). The cloud worker runs the
+// pentest against `staging_base_url` (hosted default) or, for self-hosted
+// deployments, boots the app on the worker host via `boot`/`healthcheck`.
+export type PentestMode = "staging" | "local_worker";
+
+export type Repo = {
+  id: string;
+  name: string;
+  account_id: string;
+  remote_url: string | null;
+  created_at: string;
+  // Pentest config — present once the repo has been configured.
+  pentest_mode?: PentestMode;
+  staging_base_url?: string | null;
+  healthcheck_path?: string | null;
+  boot?: string | null;
+  healthcheck?: string | null;
+  egress_allowlist?: string[];
+};
+
+// Field names are locked by §3 D1 — do not invent new ones.
+export type RepoPentestConfigPatch = {
+  pentest_mode?: PentestMode;
+  staging_base_url?: string | null;
+  healthcheck_path?: string | null;
+  boot?: string | null;
+  healthcheck?: string | null;
+  egress_allowlist?: string[];
+};
+
 import { getSessionToken } from "./session";
 
 const apiUrl = process.env.SENTINEL_API_INTERNAL_URL ?? process.env.NEXT_PUBLIC_SENTINEL_API_URL ?? "http://localhost:8000";
@@ -182,6 +212,19 @@ export function graphSnapshot(limit = 500): Promise<GraphSnapshot> {
 
 export function findingGraph(id: string): Promise<GraphSnapshot> {
   return get<GraphSnapshot>(`/findings/${id}/graph`);
+}
+
+export function listRepos(): Promise<Repo[]> {
+  return get<Repo[]>("/repos");
+}
+
+export function getRepo(id: string): Promise<Repo> {
+  return get<Repo>(`/repos/${id}`);
+}
+
+// PATCH the repo's pentest configuration. Only §3 D1 fields are sent.
+export function updateRepoPentestConfig(id: string, patch: RepoPentestConfigPatch): Promise<Repo> {
+  return send<Repo>(`/repos/${id}`, "PATCH", patch);
 }
 
 export function accountConfig(): Promise<AccountConfig> {
