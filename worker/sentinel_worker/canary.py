@@ -127,6 +127,39 @@ class CanarytokensProvider:
         return CanaryToken(id=str(response["id"]), value=str(response["value"]), kind=kind)
 
 
+class CanarytokensClient:
+    """Concrete HTTP client for a Canarytokens-style service (canarytokens.org
+    or a self-hosted Thinkst instance). Injected into CanarytokensProvider.
+
+    ``create_token`` provisions a live canary and maps the response onto the
+    fields the provider needs. Field names are mapped defensively across the
+    common response shapes; point ``base_url`` at your instance and pass an
+    alert destination (email/webhook) via ``memo``/config when wiring live.
+    """
+
+    def __init__(self, http_client: Any, *, alert_email: str | None = None, timeout: float = 15.0) -> None:
+        self._http = http_client  # httpx.Client-compatible (sync .post)
+        self._alert_email = alert_email
+        self._timeout = timeout
+
+    def create_token(self, *, base_url: str, api_token: str, kind: str, index: int) -> dict[str, str]:
+        # Canarytokens provisions a token via a form POST to /generate; the
+        # response carries the token id and its tripwire value (a hostname/URL).
+        data = {"memo": f"sentinel-pentest-{kind}-{index}", "type": "http"}
+        if self._alert_email:
+            data["email"] = self._alert_email
+        headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
+        response = self._http.post(f"{base_url.rstrip('/')}/generate", data=data, headers=headers, timeout=self._timeout)
+        response.raise_for_status()
+        body = response.json()
+        token_id = str(body.get("token") or body.get("canarytoken") or body.get("id") or "")
+        value = str(body.get("hostname") or body.get("url") or body.get("value") or token_id)
+        if not token_id or not value:
+            raise ValueError("canarytokens response missing token id/value")
+        logger.info("canary.minted_live", token_id=token_id, kind=kind)
+        return {"id": token_id, "value": value}
+
+
 def mint_canaries(config: CanaryConfig, provider: CanaryProvider) -> list[CanaryToken]:
     """Mint ``config.count`` tokens, cycling through kinds generic/aws_key/url."""
     tokens: list[CanaryToken] = []
