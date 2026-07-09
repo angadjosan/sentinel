@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Edge, Graph, Node, now
+from .models import Edge, Finding, Graph, Node, now
 
 
 async def merge_graph(db: AsyncSession, *, branch_graph_id: str, main_graph_id: str) -> int:
+    """Merge a branch graph into main.
+
+    Semantics (see non-code/README.md, "Branch graph merge semantics"):
+    - Nodes: last-write-wins upsert of the branch's nodes onto main. The branch
+      only holds the nodes it added or changed, so untouched main nodes are left
+      alone. Tombstones ride along — a branch node with `deleted=True` upserts
+      main's copy as deleted, so removals actually land instead of leaving stale
+      nodes in main forever.
+    - Edges: append-only. Edges present on the branch but not on main are added;
+      nothing is deleted, so `CONFIRMED_EXPLOIT` edges from either side survive.
+    - Findings: re-pointed from the branch graph onto main, so a finding
+      confirmed on the branch follows the code into main instead of dangling on
+      a dead branch graph.
+    """
     branch = await db.get(Graph, branch_graph_id)
     main = await db.get(Graph, main_graph_id)
     if branch is None or main is None:
@@ -34,6 +48,7 @@ async def merge_graph(db: AsyncSession, *, branch_graph_id: str, main_graph_id: 
             intent=node.intent,
             commit_hash=node.commit_hash,
             is_new=False,
+            deleted=node.deleted,
         )
         await db.merge(merged)
         copied += 1
@@ -62,6 +77,11 @@ async def merge_graph(db: AsyncSession, *, branch_graph_id: str, main_graph_id: 
                 )
             )
             copied += 1
+    # Re-point findings recorded against the branch graph onto main so confirmed
+    # exploits follow the merged code instead of dangling on the dead branch.
+    await db.execute(
+        update(Finding).where(Finding.graph_id == branch_graph_id).values(graph_id=main_graph_id)
+    )
     branch.status = "merged"
     branch.merged_at = now()
     return copied

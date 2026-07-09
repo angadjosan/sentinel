@@ -182,6 +182,10 @@ class Node(Base):
     intent: Mapped[str | None] = mapped_column(Text, nullable=True)
     commit_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     is_new: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Tombstone: True means the node was removed on the branch/session that owns
+    # this row. Hidden from all reads; merge_graph propagates it onto main so
+    # deletions actually land instead of leaving stale nodes forever.
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

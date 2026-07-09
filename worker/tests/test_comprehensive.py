@@ -795,6 +795,61 @@ class TestGraphMerge:
         assert branch_reloaded.status == "merged"
         assert branch_reloaded.merged_at is not None
 
+    @pytest.mark.asyncio
+    async def test_merge_graph_propagates_tombstone_to_main(self):
+        """A node deleted on the branch marks main's copy deleted on merge."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")
+                session.add_all([main, branch])
+                await session.flush()
+                # Same id lives in both graphs (composite key): live in main,
+                # tombstoned on the branch.
+                session.add(Node(id="n:gone", graph_id=main.id, kind="FUNCTION", name="gone"))
+                session.add(Node(id="n:gone", graph_id=branch.id, kind="FUNCTION", name="gone", deleted=True))
+                await session.flush()
+                await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                main_node = await session.get(Node, {"graph_id": main.id, "id": "n:gone"})
+        assert main_node is not None
+        assert main_node.deleted is True
+
+    @pytest.mark.asyncio
+    async def test_merge_graph_repoints_findings_onto_main(self):
+        """Findings recorded on the branch graph follow the merge onto main."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")
+                session.add_all([main, branch])
+                await session.flush()
+                finding = Finding(
+                    graph_id=branch.id,
+                    vuln_type="sqli",
+                    severity="high",
+                    title="SQL injection",
+                    description="d",
+                    remediation="r",
+                    fingerprint="fp:merge-repoint",
+                    confirmed=True,
+                )
+                session.add(finding)
+                await session.flush()
+                finding_id = finding.id
+                await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                reloaded = await session.get(Finding, finding_id)
+        assert reloaded.graph_id == main.id
+
 
 # ===========================================================================
 # vm.py — forbidden tokens and egress rules

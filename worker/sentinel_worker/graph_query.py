@@ -31,9 +31,15 @@ class GraphQuery:
         tenant's node whenever two unrelated graphs produce the same
         deterministic id (e.g. two repos both have `fn:app.js:handler`).
         Every node lookup in this class must go through this method, not
-        `db.get`, until nodes get a composite (graph_id, id) key.
+        `db.get`. Tombstoned (deleted) nodes are treated as absent so a dangling
+        edge to a removed node resolves to nothing.
         """
-        return await self.db.scalar(select(Node).where(Node.id == node_id).where(Node.graph_id == self.graph_id))
+        return await self.db.scalar(
+            select(Node)
+            .where(Node.id == node_id)
+            .where(Node.graph_id == self.graph_id)
+            .where(Node.deleted.is_(False))
+        )
 
     async def neighbors(self, node_id: str, edge_kinds: list[str] | None = None, max_hops: int | None = None) -> list[Neighbor]:
         cap = max_hops if max_hops is not None else 50
@@ -85,10 +91,16 @@ class GraphQuery:
                 .where(Node.graph_id == self.graph_id)
                 .where(Node.kind == "PARAMETER")
                 .where(Node.trust_level == "untrusted")
+                .where(Node.deleted.is_(False))
             )
         )
         sinks = list(
-            await self.db.scalars(select(Node).where(Node.graph_id == self.graph_id).where(Node.is_sink.is_(True)))
+            await self.db.scalars(
+                select(Node)
+                .where(Node.graph_id == self.graph_id)
+                .where(Node.is_sink.is_(True))
+                .where(Node.deleted.is_(False))
+            )
         )
         all_paths: list[list[Node]] = []
         for source in sources:
@@ -266,7 +278,11 @@ class LayeredGraphQuery:
             for node in await self.db.scalars(select(Node).where(Node.graph_id == gid)):
                 if node.id in seen:
                     continue
+                # First layer to define the id wins. A tombstone in a higher
+                # layer claims the id and hides any live copy below it.
                 seen.add(node.id)
+                if node.deleted:
+                    continue
                 out.append(node)
                 if limit is not None and len(out) >= limit:
                     return out

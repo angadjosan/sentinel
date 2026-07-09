@@ -62,6 +62,9 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN ip_address TEXT"))
             if "refresh_token_hash" not in session_columns:
                 await conn.execute(text("ALTER TABLE sessions ADD COLUMN refresh_token_hash TEXT"))
+            node_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(nodes)"))}
+            if "deleted" not in node_columns:
+                await conn.execute(text("ALTER TABLE nodes ADD COLUMN deleted BOOLEAN DEFAULT 0"))
         rows = await conn.execute(text("SELECT version FROM schema_migrations"))
         applied = {row[0] for row in rows}
         if CURRENT_SCHEMA_VERSION in applied:

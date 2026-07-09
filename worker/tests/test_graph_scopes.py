@@ -75,3 +75,23 @@ async def test_session_requires_session_id(db):
 async def test_unknown_kind_rejected(db):
     with pytest.raises(ValueError):
         await get_or_create_graph(db, "acme/repo", kind="bogus")
+
+
+@pytest.mark.asyncio
+async def test_materialized_nodes_shadows_tombstone(db):
+    """A tombstone in a higher layer hides the live copy below it, but the lower
+    layer viewed on its own still shows the node."""
+    from sentinel_worker.graph_query import LayeredGraphQuery
+    from sentinel_worker.models import Node
+
+    main = await get_or_create_graph(db, "acme/repo")
+    branch = await get_or_create_graph(db, "acme/repo", kind="branch", branch_name="feature/x")
+    db.add(Node(id="n:x", graph_id=main.id, kind="FUNCTION", name="x"))
+    db.add(Node(id="n:x", graph_id=branch.id, kind="FUNCTION", name="x", deleted=True))
+    await db.flush()
+
+    branch_layered = await LayeredGraphQuery.for_graph(db, branch.id)
+    assert "n:x" not in {n.id for n in await branch_layered.materialized_nodes()}
+
+    main_layered = await LayeredGraphQuery.for_graph(db, main.id)
+    assert "n:x" in {n.id for n in await main_layered.materialized_nodes()}

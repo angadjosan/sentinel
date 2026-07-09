@@ -282,6 +282,10 @@ class GraphUpsertNode(BaseModel):
     intent: str | None = Field(default=None, max_length=2000)
     commit_hash: str | None = None
     is_new: bool = False
+    # Tombstone: a branch/session scan sets this to record that the node was
+    # removed on that branch. It hides the node from reads and, when the branch
+    # merges into main, marks main's copy deleted (see graph_merge).
+    deleted: bool = False
 
 
 class GraphUpsertEdge(BaseModel):

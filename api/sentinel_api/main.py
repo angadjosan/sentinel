@@ -944,16 +944,18 @@ async def graph(
         graph = await _resolve_repo_graph(db, principal, repo_name, graph_kind, branch_name)
         layered = await LayeredGraphQuery.for_graph(db, graph.id)
         nodes = await layered.materialized_nodes(limit)
-        edges = await layered.materialized_edges(limit)
+        visible = {n.id for n in nodes}
+        edges = [e for e in await layered.materialized_edges(limit) if e.src in visible and e.dst in visible]
         return GraphResponse(nodes=[node_response(n) for n in nodes], edges=[edge_response(e) for e in edges])
 
     main_ids = select(Graph.id).where(Graph.kind == "main")
     if not _skip_tenant_filter(principal):
         main_ids = main_ids.where(Graph.account_id == principal.account_id)
-    node_stmt = select(Node).where(Node.graph_id.in_(main_ids)).limit(limit)
-    edge_stmt = select(Edge).where(Edge.graph_id.in_(main_ids)).limit(limit)
+    node_stmt = select(Node).where(Node.graph_id.in_(main_ids)).where(Node.deleted.is_(False)).limit(limit)
     nodes = list(await db.scalars(node_stmt))
-    edges = list(await db.scalars(edge_stmt))
+    visible = {n.id for n in nodes}
+    edge_rows = list(await db.scalars(select(Edge).where(Edge.graph_id.in_(main_ids)).limit(limit)))
+    edges = [e for e in edge_rows if e.src in visible and e.dst in visible]
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
 
 
@@ -1088,7 +1090,7 @@ async def graph_upsert(
     node_fields = (
         "kind", "name", "file", "line_start", "line_end", "language", "trust_level",
         "auth_required", "privilege", "is_entry_point", "is_sink", "taint_uncertain",
-        "parse_error", "label", "intent", "commit_hash", "is_new",
+        "parse_error", "label", "intent", "commit_hash", "is_new", "deleted",
     )
     for incoming in payload.nodes:
         existing = await _node_for_graph(db, incoming.id, graph.id)
