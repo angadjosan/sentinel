@@ -35,6 +35,22 @@ export type TraceAccessLog = {
   created_at: string;
 };
 
+export type Repo = {
+  id: string;
+  name: string;
+  account_id: string;
+  remote_url: string | null;
+  created_at: string;
+};
+
+export type FindingTrendPoint = {
+  date: string;
+  severity: Finding["severity"];
+  count: number;
+};
+
+export type EnqueueResult = { task_id: string; run: Run };
+
 export type PullFinding = {
   finding: Finding;
   node: {
@@ -156,12 +172,41 @@ async function errorDetail(response: Response): Promise<string> {
   return text || `${response.status} ${response.statusText}`;
 }
 
-export function listFindings(filters: { status?: string; severity?: string } = {}): Promise<Finding[]> {
+export function listRepos(): Promise<Repo[]> {
+  return get<Repo[]>("/repos");
+}
+
+export function createRepo(payload: { name: string; remote_url?: string | null }): Promise<Repo> {
+  return send<Repo>("/repos", "POST", payload);
+}
+
+export function listFindings(filters: { status?: string; severity?: string; repo?: string } = {}): Promise<Finding[]> {
   const params = new URLSearchParams();
   if (filters.status) params.set("status", filters.status);
   if (filters.severity) params.set("severity", filters.severity);
+  if (filters.repo) params.set("repo_name", filters.repo);
   const suffix = params.toString();
   return get<Finding[]>(`/findings${suffix ? `?${suffix}` : ""}`);
+}
+
+export function findingTrends(): Promise<FindingTrendPoint[]> {
+  return get<FindingTrendPoint[]>("/analytics/finding-trends");
+}
+
+export function unsuppressFinding(id: string, reason: string): Promise<Finding> {
+  return send<Finding>(`/findings/${id}/unsuppress`, "POST", { reason });
+}
+
+export function removeSuppression(id: string): Promise<Finding> {
+  return send<Finding>(`/findings/${id}/suppress`, "DELETE");
+}
+
+export function startPentest(payload: { finding_id?: string; repo_name?: string; description?: string }): Promise<EnqueueResult> {
+  return send<EnqueueResult>("/pentest", "POST", payload);
+}
+
+export function reviewPlan(repoId: string, payload: { content: string; with_retry?: boolean }): Promise<EnqueueResult> {
+  return send<EnqueueResult>(`/repos/${repoId}/plan`, "POST", payload);
 }
 
 export function getFinding(id: string): Promise<Finding> {
@@ -297,6 +342,10 @@ export function logoutRequest(): Promise<{ status: string }> {
 
 export function currentUser(): Promise<AuthUser> {
   return get<AuthUser>("/auth/me");
+}
+
+export function listMembers(): Promise<AuthUser[]> {
+  return get<AuthUser[]>("/auth/members");
 }
 
 export function listSessions(): Promise<SessionInfo[]> {

@@ -1,7 +1,13 @@
+import { PageHeaderSkeleton, MetricsSkeleton, RowsSkeleton } from "../components/Skeleton";
+
 export default function Loading() {
   return (
-    <div style={{ padding: "2rem", textAlign: "center" }}>
-      <p>Loading...</p>
-    </div>
+    <>
+      <PageHeaderSkeleton />
+      <MetricsSkeleton />
+      <div style={{ marginTop: 14 }}>
+        <RowsSkeleton count={5} />
+      </div>
+    </>
   );
 }

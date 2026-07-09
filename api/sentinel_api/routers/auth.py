@@ -292,6 +292,16 @@ async def me(db: AsyncSession = Depends(get_db), principal: Principal = Depends(
     return await _user_response(db, actor)
 
 
+@router.get("/members", response_model=list[AuthUserResponse])
+async def list_members(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> list[AuthUserResponse]:
+    """List the users in the caller's account (team roster)."""
+    actor = await _resolve_actor(db, principal)
+    rows = await db.scalars(
+        select(User).where(User.account_id == actor.account_id).order_by(User.created_at.asc())
+    )
+    return [await _user_response(db, user) for user in rows]
+
+
 # ── Sessions ────────────────────────────────────────────────────────────────────
 
 

@@ -64,6 +64,27 @@ async def _get_repo(db: AsyncSession, repo_id: str, principal: Principal) -> Rep
     return repo
 
 
+@router.get("", response_model=list[RepoResponse])
+async def list_repos(
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+) -> list[RepoResponse]:
+    stmt = select(Repo).order_by(Repo.created_at.desc())
+    if not _skip_tenant_filter(principal):
+        stmt = stmt.where(Repo.account_id == principal.account_id)
+    rows = await db.scalars(stmt)
+    return [
+        RepoResponse(
+            id=repo.id,
+            name=repo.name,
+            account_id=repo.account_id,
+            remote_url=repo.remote_url,
+            created_at=repo.created_at.isoformat(),
+        )
+        for repo in rows
+    ]
+
+
 @router.post("", response_model=RepoResponse, status_code=201)
 async def create_repo(
     payload: RepoCreateRequest,

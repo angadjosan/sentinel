@@ -11,6 +11,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.62.8",
     "@xyflow/react": "^12.11.0",
+    "geist": "^1.7.2",
     "jose": "^5.9.6",
     "lucide-react": "^0.468.0",
     "next": "^15.1.4",
