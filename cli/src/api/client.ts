@@ -330,6 +330,20 @@ export class SentinelApiClient {
     return this.request<Run>(`/runs/${id}`, { method: "DELETE" });
   }
 
+  mergeBranch(repoName: string, branchName: string) {
+    return this.request<{
+      branch_graph_id: string;
+      main_graph_id: string;
+      copied: number;
+      conflicts: string[];
+      findings_repointed: number;
+      had_base: boolean;
+    }>("/graphs/merge-branch", {
+      method: "POST",
+      body: JSON.stringify({ repo_name: repoName, branch_name: branchName }),
+    });
+  }
+
   async trace(id: string): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs());

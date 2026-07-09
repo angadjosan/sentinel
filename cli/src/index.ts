@@ -18,6 +18,14 @@ import { printAdapterWarnings } from "./output/adapterWarnings.js";
 
 const program = new Command();
 
+/** The current git branch, or null if it can't be determined (e.g. detached HEAD). */
+function currentBranch(): string | null {
+  const r = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { encoding: "utf8" });
+  if (r.status !== 0) return null;
+  const branch = r.stdout.trim();
+  return branch && branch !== "HEAD" ? branch : null;
+}
+
 program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.1");
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
@@ -205,6 +213,32 @@ program
     console.log(`scan: ${result.finding_count} finding(s)`);
     if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
     process.exitCode = exitCode;
+  });
+
+program
+  .command("merge")
+  .description("Merge this branch's graph into main (run in CD when a branch lands)")
+  .option("--branch <name>", "Branch to merge (defaults to the current git branch)")
+  .action(async (options) => {
+    const config = loadConfig();
+    await ensureBackend(config.apiUrl);
+    const branch = options.branch ?? currentBranch();
+    if (!branch) {
+      console.error("could not determine the branch to merge; pass --branch <name>");
+      process.exitCode = 1;
+      return;
+    }
+    const client = new SentinelApiClient(config);
+    const result = await client.mergeBranch(config.repoName, branch);
+    console.log(
+      `merged branch '${branch}' into main: ${result.copied} node/edge change(s), ` +
+        `${result.findings_repointed} finding(s) re-pointed${result.had_base ? "" : " (no base — 2-way)"}`
+    );
+    if (result.conflicts.length > 0) {
+      const shown = result.conflicts.slice(0, 10).join(", ");
+      const more = result.conflicts.length > 10 ? "…" : "";
+      console.log(chalk.yellow(`  ${result.conflicts.length} conflict(s) — branch version kept: ${shown}${more}`));
+    }
   });
 
 program
