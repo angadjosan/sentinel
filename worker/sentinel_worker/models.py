@@ -135,6 +135,11 @@ class Repo(Base):
     boot: Mapped[str | None] = mapped_column(Text, nullable=True)
     healthcheck: Mapped[str | None] = mapped_column(Text, nullable=True)
     egress_allowlist: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON-encoded list[str]
+    # Structured pentest config (JSON): {sandbox, egress, secrets, canary,
+    # attack_safety}. Superset of the flat columns above; the worker reads this
+    # to build the gVisor sandbox, egress policy, canary seeding, credential
+    # broker, and attack-safety controls. Absent -> safe defaults (staging HTTP).
+    pentest_config: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

@@ -125,6 +125,16 @@ def _decode_egress_allowlist(raw: str | None) -> list[str]:
     return [str(host) for host in value] if isinstance(value, list) else []
 
 
+def _decode_pentest_config(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _pentest_config_response(repo: Repo) -> RepoPentestConfigResponse:
     return RepoPentestConfigResponse(
         repo_id=repo.id,
@@ -134,7 +144,18 @@ def _pentest_config_response(repo: Repo) -> RepoPentestConfigResponse:
         boot=repo.boot,
         healthcheck=repo.healthcheck,
         egress_allowlist=_decode_egress_allowlist(repo.egress_allowlist),
+        pentest_config=_decode_pentest_config(getattr(repo, "pentest_config", None)),
     )
+
+
+def _local_worker_has_target(repo: Repo) -> bool:
+    """local_worker needs a bootable target: either the flat `boot` command or a
+    structured target (OCI image / compose / boot) in pentest_config.sandbox."""
+    if repo.boot:
+        return True
+    cfg = _decode_pentest_config(getattr(repo, "pentest_config", None)) or {}
+    target = (cfg.get("sandbox") or {}).get("target") or {}
+    return bool(target.get("image") or target.get("compose") or target.get("boot"))
 
 
 @router.get("/{repo_id}/pentest-config", response_model=RepoPentestConfigResponse)
@@ -167,13 +188,15 @@ async def update_pentest_config(
         repo.healthcheck = payload.healthcheck or None
     if payload.egress_allowlist is not None:
         repo.egress_allowlist = json.dumps(payload.egress_allowlist, sort_keys=True)
+    if payload.pentest_config is not None:
+        repo.pentest_config = json.dumps(payload.pentest_config, sort_keys=True) or None
 
     # Per §3 D1, staging mode must have a base URL to probe against.
     effective_mode = repo.pentest_mode or "staging"
     if effective_mode == "staging" and not repo.staging_base_url:
         raise HTTPException(status_code=422, detail="staging_base_url is required when pentest_mode is 'staging'")
-    if effective_mode == "local_worker" and not repo.boot:
-        raise HTTPException(status_code=422, detail="boot is required when pentest_mode is 'local_worker'")
+    if effective_mode == "local_worker" and not _local_worker_has_target(repo):
+        raise HTTPException(status_code=422, detail="local_worker requires a target: set `boot` or sandbox.target (image/compose/boot) in pentest_config")
 
     await db.flush()
     return _pentest_config_response(repo)

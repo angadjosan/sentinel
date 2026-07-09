@@ -9,12 +9,38 @@ HEX_RE = re.compile(r"^[a-fA-F0-9]+$")
 UUID_RE = re.compile(r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$")
 ENV_FILE_RE = re.compile(r"(^|/)\.env(\..+)?$", re.IGNORECASE)
 
+# Broader secret-bearing files the agent must never see (rec #8 — the name-based
+# .env block was too narrow: `config.env`, `secrets.json`, key material, and
+# credential stores would slip through). Positive isolation (synthetic env +
+# credential broker) is the primary defense; this filter is defense-in-depth.
+SECRET_FILE_RE = re.compile(
+    r"""(^|/)(
+          \.env(\..+)?                      # .env, .env.local, .env.production
+        | [^/]*\.env                        # config.env, app.env
+        | secrets?(\..+)?                   # secrets.json, secret.yaml
+        | credentials?(\..+)?               # credentials, credential.json
+        | \.npmrc | \.pypirc | \.netrc      # package/registry auth
+        | \.htpasswd
+        | id_rsa | id_dsa | id_ecdsa | id_ed25519   # private SSH keys
+        | .*\.(pem|key|pfx|p12|keystore|jks|asc)     # key / cert material
+        | .*service[-_]?account.*\.json     # GCP service-account keys
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
 SAFE_SECRET_EXAMPLES = {"AKIAIOSFODNN7EXAMPLE"}
 
 
 def is_env_var_file(path: str) -> bool:
     """True for .env-style files (.env, .env.local, .env.example, nested), which the SAST LLM must never see."""
     return bool(ENV_FILE_RE.search(path))
+
+
+def is_secret_file(path: str) -> bool:
+    """True for any secret-bearing file the agent must never read (broader than
+    .env: key material, credential stores, registry-auth files, service-account
+    keys). Supersedes is_env_var_file for gating read_file/grep_source."""
+    return bool(ENV_FILE_RE.search(path)) or bool(SECRET_FILE_RE.search(path))
 
 
 def compute_fingerprint(repo_id: str, file_path: str, vuln_type: str) -> str:

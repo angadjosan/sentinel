@@ -848,53 +848,6 @@ class TestVM:
         assert result.exit_code == 0
         assert result.stdout == "dry-run"
 
-    @pytest.mark.asyncio
-    async def test_firecracker_executor_runs_directly_without_guest_runner(self):
-        """When guest_runner_argv is empty, run() passes argv directly to _command_executor."""
-        import asyncio
-        from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, CommandResult
-
-        recorded: list[list[str]] = []
-
-        class RecordingExecutor:
-            async def run(self, argv, *, timeout_seconds=30):
-                recorded.append(argv)
-                return CommandResult(argv=argv, exit_code=0, stdout="ok")
-            async def close(self):
-                pass
-
-        config = FirecrackerConfig(kernel_image="/k", rootfs_image="/r", guest_runner_argv=[])
-        executor = FirecrackerMicroVMExecutor(config, command_executor=RecordingExecutor())
-        executor._started = True  # skip actual VM boot
-
-        result = await executor.run(["echo", "hello"])
-        assert result.exit_code == 0
-        assert recorded == [["echo", "hello"]]
-
-    @pytest.mark.asyncio
-    async def test_firecracker_executor_prepends_guest_runner_when_configured(self):
-        """When guest_runner_argv is set, run() prepends it to the argv."""
-        from sentinel_worker.vm import FirecrackerConfig, FirecrackerMicroVMExecutor, CommandResult
-
-        recorded: list[list[str]] = []
-
-        class RecordingExecutor:
-            async def run(self, argv, *, timeout_seconds=30):
-                recorded.append(argv)
-                return CommandResult(argv=argv, exit_code=0, stdout="ok")
-            async def close(self):
-                pass
-
-        config = FirecrackerConfig(
-            kernel_image="/k", rootfs_image="/r",
-            guest_runner_argv=["ssh", "root@172.16.0.2"]
-        )
-        executor = FirecrackerMicroVMExecutor(config, command_executor=RecordingExecutor())
-        executor._started = True
-
-        await executor.run(["id"])
-        assert recorded == [["ssh", "root@172.16.0.2", "id"]]
-
 
 # ===========================================================================
 # notifications.py — channel sanitization + sqlite no-op

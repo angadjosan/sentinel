@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import graph_query as gq
 from . import source_store
 from .models import Node, SourceFileSnapshot
-from .security import is_env_var_file
+from .security import is_secret_file
 
 log = structlog.get_logger(__name__)
 
@@ -381,7 +381,7 @@ async def _dispatch_tool_inner(
         if repo_dir is not None:
             for path in _iter_local_files(repo_dir):
                 rel_path = path.relative_to(repo_dir).as_posix()
-                if is_env_var_file(rel_path):
+                if is_secret_file(rel_path):
                     continue
                 if file_re and not file_re.search(rel_path):
                     continue
@@ -402,7 +402,7 @@ async def _dispatch_tool_inner(
         )
         snapshots = list(await db.scalars(stmt))
         for snap in snapshots:
-            if is_env_var_file(snap.file_path):
+            if is_secret_file(snap.file_path):
                 continue
             if file_re and not file_re.search(snap.file_path):
                 continue
