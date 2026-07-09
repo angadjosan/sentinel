@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { ArrowRight, DoorOpen, Crosshair, ShieldAlert, HelpCircle, GitBranch, Layers } from "lucide-react";
-import { graphSnapshot, type GraphNode } from "../../lib/api";
+import { graphSnapshot, listGraphs, type GraphNode, type GraphMeta } from "../../lib/api";
 import { GraphExplorer } from "../../components/GraphExplorer";
 import { getSelectedRepo } from "../../lib/repo";
 
@@ -12,10 +12,14 @@ const KINDS = [
   { key: "FILE", color: "var(--info)" }
 ];
 
-export default async function GraphPage({ searchParams }: { searchParams: Promise<{ q?: string; view?: string }> }) {
-  const { q, view } = await searchParams;
+export default async function GraphPage({ searchParams }: { searchParams: Promise<{ q?: string; view?: string; branch?: string }> }) {
+  const { q, view, branch } = await searchParams;
   const selectedRepo = await getSelectedRepo();
-  const graph = await graphSnapshot(500).catch(() => ({ nodes: [], edges: [] }));
+  const graphKind = branch ? "branch" : "main";
+  const [graph, branches] = await Promise.all([
+    graphSnapshot(500, { repoName: selectedRepo, graphKind, branchName: branch }).catch(() => ({ nodes: [], edges: [] })),
+    selectedRepo ? listGraphs(selectedRepo).catch(() => [] as GraphMeta[]) : Promise.resolve([] as GraphMeta[])
+  ]);
   const query = (q ?? "").trim().toLowerCase();
   const nodes = query
     ? graph.nodes.filter((node) => [node.id, node.name, node.kind, node.file, node.intent].some((value) => value?.toLowerCase().includes(query)))
@@ -31,10 +35,11 @@ export default async function GraphPage({ searchParams }: { searchParams: Promis
   const uncertain = edges.filter((e) => e.taint_uncertain || e.call_uncertainty).length;
 
   const linkFor = (patch: Record<string, string | undefined>) => {
-    const next = { q, view, ...patch };
+    const next = { q, view, branch, ...patch };
     const params = new URLSearchParams();
     if (next.q) params.set("q", next.q);
     if (next.view) params.set("view", next.view);
+    if (next.branch) params.set("branch", next.branch);
     const s = params.toString();
     return `/graph${s ? `?${s}` : ""}`;
   };
@@ -45,10 +50,17 @@ export default async function GraphPage({ searchParams }: { searchParams: Promis
         <div>
           <div className="eyebrow">Attack surface</div>
           <h1>Graph</h1>
-          <div className="sub">{nodes.length} nodes · {edges.length} edges — entry points, sinks, and the tainted paths between them</div>
+          <div className="sub">
+            {nodes.length} nodes · {edges.length} edges — entry points, sinks, and the tainted paths between them
+            {selectedRepo ? <> · <span className="mono">{branch ? `branch: ${branch}` : "main"}</span></> : null}
+          </div>
         </div>
         <div className="toolbar-actions">
-          {selectedRepo ? <span className="chip warn" title="The graph spans every repo in the account"><Layers size={12} /> all repos</span> : null}
+          {selectedRepo ? (
+            <BranchSelector branches={branches} current={branch} linkFor={linkFor} />
+          ) : (
+            <span className="chip warn" title="Showing the main graph of every repo in the account — select a repo to view a single branch"><Layers size={12} /> all repos · main</span>
+          )}
           <form action="/graph" className="search">
             <input name="q" defaultValue={q ?? ""} placeholder="Search nodes…" style={{ minWidth: 220 }} />
             {view ? <input type="hidden" name="view" value={view} /> : null}
@@ -85,6 +97,21 @@ export default async function GraphPage({ searchParams }: { searchParams: Promis
         <ListView nodes={nodes} edges={edges} entryPoints={entryPoints} sinks={sinks} />
       )}
     </>
+  );
+}
+
+function BranchSelector({ branches, current, linkFor }: { branches: GraphMeta[]; current?: string; linkFor: (patch: Record<string, string | undefined>) => string; }) {
+  const branchGraphs = branches.filter((g) => g.kind === "branch" && g.branch_name);
+  return (
+    <div className="wrap" style={{ gap: 6, alignItems: "center" }}>
+      <GitBranch size={12} className="muted" />
+      <Link href={linkFor({ branch: undefined })} className={`chip ${current ? "" : "active"}`}>main</Link>
+      {branchGraphs.map((g) => (
+        <Link key={g.id} href={linkFor({ branch: g.branch_name! })} className={`chip ${current === g.branch_name ? "active" : ""}`} title={`branch graph · ${g.branch_name}`}>
+          {g.branch_name}
+        </Link>
+      ))}
+    </div>
   );
 }
 

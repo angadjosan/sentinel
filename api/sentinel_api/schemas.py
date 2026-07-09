@@ -246,6 +246,16 @@ class GraphSubgraphResponse(BaseModel):
     edges: list[EdgeResponse]
 
 
+class GraphMetaResponse(BaseModel):
+    """One selectable graph version for a repo (main or an active branch)."""
+
+    id: str
+    kind: str
+    branch_name: str | None = None
+    status: str
+    created_at: str
+
+
 class GraphUpsertNode(BaseModel):
     """A graph node produced by a local scan.
 

@@ -253,6 +253,42 @@ class LayeredGraphQuery:
             return await self._queries[0].serialize_for_prompt(node_ids, max_hops=max_hops)
         return ""
 
+    async def materialized_nodes(self, limit: int | None = None) -> list[Node]:
+        """All nodes visible from this layer stack, higher layers shadowing lower.
+
+        Walks graph_ids in priority order (session → branch → main); the first
+        layer to define a node id wins. This is the whole-graph analogue of the
+        per-seed shadowing in `neighbors`, used to render a branch/main view.
+        """
+        seen: set[str] = set()
+        out: list[Node] = []
+        for gid in self.graph_ids:
+            for node in await self.db.scalars(select(Node).where(Node.graph_id == gid)):
+                if node.id in seen:
+                    continue
+                seen.add(node.id)
+                out.append(node)
+                if limit is not None and len(out) >= limit:
+                    return out
+        return out
+
+    async def materialized_edges(self, limit: int | None = None) -> list[Edge]:
+        """All edges visible from this layer stack, deduped by (src, dst, kind,
+        call_uncertainty) — the same identity merge_graph uses — with higher
+        layers shadowing lower ones."""
+        seen: set[tuple[str, str, str, str | None]] = set()
+        out: list[Edge] = []
+        for gid in self.graph_ids:
+            for edge in await self.db.scalars(select(Edge).where(Edge.graph_id == gid)):
+                key = (edge.src, edge.dst, edge.kind, edge.call_uncertainty)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(edge)
+                if limit is not None and len(out) >= limit:
+                    return out
+        return out
+
     @classmethod
     async def for_graph(cls, db: AsyncSession, graph_id: str) -> "LayeredGraphQuery":
         """Build a layered query for a graph by walking its parent chain."""

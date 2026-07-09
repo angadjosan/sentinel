@@ -154,9 +154,10 @@ def test_upsert_rejects_oversized_intent_field(monkeypatch):
         assert resp.status_code == 422
 
 
-def test_branch_graph_write_colliding_with_main_node_id_is_rejected(monkeypatch):
-    """Documents the discovered gap: node ids are a single global primary key,
-    so a branch graph cannot yet hold its own copy of a node main already has.
+def test_branch_graph_holds_own_copy_of_main_node_id(monkeypatch):
+    """With the composite (graph_id, id) node key, a branch graph carries its
+    own copy of a node id that main already has, and the layered read overlays
+    the branch version on top of main — main itself is unchanged.
     """
     monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
     headers = _headers()
@@ -169,6 +170,7 @@ def test_branch_graph_write_colliding_with_main_node_id_is_rejected(monkeypatch)
         )
         assert main_resp.status_code == 200, main_resp.text
 
+        branch_node = {**_NODE_A, "label": "login route (branch override)", "is_new": True}
         branch_resp = client.post(
             "/graph/upsert",
             headers=headers,
@@ -176,11 +178,72 @@ def test_branch_graph_write_colliding_with_main_node_id_is_rejected(monkeypatch)
                 "repo_name": repo,
                 "graph_kind": "branch",
                 "branch_name": "feature/x",
-                "nodes": [{**_NODE_A, "is_new": True}],
+                "nodes": [branch_node],
                 "edges": [],
             },
         )
-        assert branch_resp.status_code == 409
+        assert branch_resp.status_code == 200, branch_resp.text
+        assert branch_resp.json()["graph_id"] != main_resp.json()["graph_id"]
+
+        # Branch view overlays the branch's version of the node.
+        branch_view = client.get(
+            "/graph",
+            headers=headers,
+            params={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x"},
+        )
+        assert branch_view.status_code == 200, branch_view.text
+        branch_nodes = {n["id"]: n for n in branch_view.json()["nodes"]}
+        assert branch_nodes[_NODE_A["id"]]["label"] == "login route (branch override)"
+
+        # Main view is unaffected — still the original label.
+        main_view = client.get("/graph", headers=headers, params={"repo_name": repo})
+        assert main_view.status_code == 200, main_view.text
+        main_nodes = {n["id"]: n for n in main_view.json()["nodes"]}
+        assert main_nodes[_NODE_A["id"]]["label"] == "login route"
+
+
+def test_graph_view_defaults_to_selected_repo_main(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "main", "nodes": [_NODE_A, _NODE_B], "edges": [_EDGE]},
+        )
+        resp = client.get("/graph", headers=headers, params={"repo_name": repo})
+        assert resp.status_code == 200, resp.text
+        node_ids = {n["id"] for n in resp.json()["nodes"]}
+        assert node_ids == {_NODE_A["id"], _NODE_B["id"]}
+
+
+def test_graphs_list_returns_main_and_active_branches(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post("/graph/upsert", headers=headers, json={"repo_name": repo, "graph_kind": "main", "nodes": [_NODE_A], "edges": []})
+        client.post(
+            "/graph/upsert",
+            headers=headers,
+            json={"repo_name": repo, "graph_kind": "branch", "branch_name": "feature/x", "nodes": [{**_NODE_A, "is_new": True}], "edges": []},
+        )
+        resp = client.get("/graphs", headers=headers, params={"repo_name": repo})
+        assert resp.status_code == 200, resp.text
+        kinds = {(g["kind"], g["branch_name"]) for g in resp.json()}
+        assert ("main", None) in kinds
+        assert ("branch", "feature/x") in kinds
+
+
+def test_graph_view_branch_missing_is_404(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    headers = _headers()
+    repo = f"sync-repo-{uuid4().hex}"
+    with TestClient(app) as client:
+        client.post("/graph/upsert", headers=headers, json={"repo_name": repo, "graph_kind": "main", "nodes": [_NODE_A], "edges": []})
+        resp = client.get("/graph", headers=headers, params={"repo_name": repo, "graph_kind": "branch", "branch_name": "nope"})
+        assert resp.status_code == 404
 
 
 def test_upsert_requires_auth(monkeypatch):

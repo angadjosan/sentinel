@@ -43,6 +43,7 @@ from .schemas import (
     FindingResponse,
     GraphResponse,
     GraphMergeRequest,
+    GraphMetaResponse,
     GraphSubgraphResponse,
     GraphUpsertRequest,
     GraphUpsertResponse,
@@ -896,17 +897,98 @@ async def _cancel_run_for_principal(db: AsyncSession, run_id: str, principal: Pr
     return await run_response(db, run)
 
 
+async def _resolve_repo_graph(
+    db: AsyncSession,
+    principal: Principal,
+    repo_name: str,
+    graph_kind: str,
+    branch_name: str | None,
+) -> Graph:
+    """Resolve a repo's graph for a *read*. `main` is get-or-created (idempotent
+    and always expected); `branch`/`session` are looked up but never created on
+    a read path — viewing a nonexistent branch is a 404, not a fresh empty graph."""
+    main_graph = await get_or_create_graph(db, repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot read graph from another account")
+    if graph_kind == "main":
+        return main_graph
+    stmt = select(Graph).where(Graph.repo_id == main_graph.repo_id).where(Graph.kind == graph_kind)
+    if graph_kind == "branch":
+        if not branch_name:
+            raise HTTPException(status_code=400, detail="branch_name is required for graph_kind='branch'")
+        stmt = stmt.where(Graph.branch_name == branch_name).where(Graph.status == "active")
+    graph = await db.scalar(stmt)
+    if graph is None:
+        raise HTTPException(status_code=404, detail=f"no active {graph_kind} graph for that repo")
+    return graph
+
+
 @app.get("/graph", response_model=GraphResponse)
-async def graph(db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal), limit: int = 250) -> GraphResponse:
-    node_stmt = select(Node).limit(limit)
-    edge_stmt = select(Edge).limit(limit)
+async def graph(
+    repo_name: str | None = None,
+    graph_kind: Literal["main", "branch", "session"] = "main",
+    branch_name: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+    limit: int = 250,
+) -> GraphResponse:
+    """Return the graph for display.
+
+    With `repo_name`, resolves that repo's graph (main by default, or a named
+    branch) and materializes it through the layered session→branch→main
+    resolver so the view reflects exactly one version — not a union of every
+    graph. Without `repo_name`, returns an account-wide overview of *main*
+    graphs only (branch/session overlays are excluded so ephemeral and isolated
+    versions no longer bleed into the overview)."""
+    if repo_name is not None:
+        graph = await _resolve_repo_graph(db, principal, repo_name, graph_kind, branch_name)
+        layered = await LayeredGraphQuery.for_graph(db, graph.id)
+        nodes = await layered.materialized_nodes(limit)
+        edges = await layered.materialized_edges(limit)
+        return GraphResponse(nodes=[node_response(n) for n in nodes], edges=[edge_response(e) for e in edges])
+
+    main_ids = select(Graph.id).where(Graph.kind == "main")
     if not _skip_tenant_filter(principal):
-        graph_ids = select(Graph.id).where(Graph.account_id == principal.account_id)
-        node_stmt = node_stmt.where(Node.graph_id.in_(graph_ids))
-        edge_stmt = edge_stmt.where(Edge.graph_id.in_(graph_ids))
+        main_ids = main_ids.where(Graph.account_id == principal.account_id)
+    node_stmt = select(Node).where(Node.graph_id.in_(main_ids)).limit(limit)
+    edge_stmt = select(Edge).where(Edge.graph_id.in_(main_ids)).limit(limit)
     nodes = list(await db.scalars(node_stmt))
     edges = list(await db.scalars(edge_stmt))
     return GraphResponse(nodes=[node_response(node) for node in nodes], edges=[edge_response(edge) for edge in edges])
+
+
+@app.get("/graphs", response_model=list[GraphMetaResponse])
+async def list_graphs(
+    repo_name: str,
+    db: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(current_principal),
+    limit: int = 100,
+) -> list[GraphMetaResponse]:
+    """List the selectable graph versions for a repo: main plus active branch
+    graphs (most recent first). Powers the dashboard branch selector."""
+    main_graph = await get_or_create_graph(db, repo_name, account_id=_graph_account_id(principal))
+    if not _skip_tenant_filter(principal) and main_graph.account_id != principal.account_id:
+        raise HTTPException(status_code=403, detail="cannot read graphs from another account")
+    rows = list(
+        await db.scalars(
+            select(Graph)
+            .where(Graph.repo_id == main_graph.repo_id)
+            .where(Graph.kind.in_(("main", "branch")))
+            .where(Graph.status == "active")
+            .order_by(Graph.kind.desc(), Graph.created_at.desc())
+            .limit(limit)
+        )
+    )
+    return [
+        GraphMetaResponse(
+            id=g.id,
+            kind=g.kind,
+            branch_name=g.branch_name,
+            status=g.status,
+            created_at=g.created_at.isoformat(),
+        )
+        for g in rows
+    ]
 
 
 @app.get("/graph/subgraph", response_model=GraphSubgraphResponse)
