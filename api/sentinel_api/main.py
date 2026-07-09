@@ -827,6 +827,7 @@ async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), p
             "boot": payload.boot,
             "healthcheck": payload.healthcheck,
             "egress_allowlist": payload.egress_allowlist,
+            "pentest_config": json.dumps(payload.pentest_config, sort_keys=True) if payload.pentest_config else None,
         },
         account_id=_graph_account_id(principal),
     )

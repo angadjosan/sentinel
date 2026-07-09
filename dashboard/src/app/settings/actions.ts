@@ -79,7 +79,7 @@ export async function updateRepoPentestConfigAction(formData: FormData) {
     patch.healthcheck = null;
     patch.egress_allowlist = [];
   } else {
-    // Self-hosted worker boots the app in a subprocess sandbox (§3 D1).
+    // Self-hosted worker boots the app under a gVisor sandbox (§3 D1).
     patch.boot = stringValue(formData.get("boot"));
     patch.healthcheck = stringValue(formData.get("healthcheck"));
     patch.egress_allowlist = parseAllowlist(formData.get("egress_allowlist"));

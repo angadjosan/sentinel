@@ -11,16 +11,16 @@ findings.node_id) — a single-column FK cannot target a composite key.
 Referential integrity for those columns is enforced at the application layer,
 which already writes edges/findings with the same graph_id as their nodes.
 
-Revision ID: 0005_composite_node_key
-Revises: 0004_repo_pentest_config
+Revision ID: 0006_composite_node_key
+Revises: 0005_repo_pentest_config_blob
 Create Date: 2026-07-09
 """
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0005_composite_node_key"
-down_revision = "0004_repo_pentest_config"
+revision = "0006_composite_node_key"
+down_revision = "0005_repo_pentest_config_blob"
 branch_labels = None
 depends_on = None
 

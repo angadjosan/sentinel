@@ -491,12 +491,6 @@ config
       "staging_base_url", "pentest_mode", "healthcheck_path", "egress_allowlist",
     ]);
 
-    if (key.startsWith("firecracker.")) {
-      setFirecrackerConfigValue(current, key.slice("firecracker.".length), value);
-      writeConfig(ConfigSchema.parse(current), root);
-      console.log(`set ${key}`);
-      return;
-    }
     if (!allowed.has(key)) {
       throw new Error(`Unsupported config key ${key}`);
     }
@@ -523,6 +517,10 @@ config
       }
       await ensureBackend(loadConfig(root).apiUrl);
       const patch: Record<string, unknown> = { [key]: parsedValue };
+      // Also sync the structured gVisor sandbox config (sandbox/egress/secrets/
+      // canary/attack_safety) edited in the JSON, so the worker sees it.
+      const blob = buildPentestConfigBlob(current);
+      if (blob) patch.pentest_config = blob;
       await client.patchPentestConfig(repoId, patch);
       console.log(`set ${key} (local + cloud repo pentest config)`);
     } else {
@@ -758,29 +756,13 @@ function parsePentestTarget(parts: string[]): { findingId?: string; description?
   return { description: target };
 }
 
-function setFirecrackerConfigValue(config: Record<string, unknown>, key: string, value: string): void {
-  const current = (config.firecracker && typeof config.firecracker === "object" ? config.firecracker : {}) as Record<string, unknown>;
-  if (key === "enabled" || key === "smt") {
-    current[key] = value === "true";
-  } else if (key === "vcpu_count" || key === "mem_size_mib") {
-    current[key] = Number(value);
-  } else if (key === "guest_runner_argv") {
-    current[key] = value.split(/\s+/).filter(Boolean);
-  } else if (
-    [
-      "kernel_image",
-      "rootfs_image",
-      "api_socket",
-      "firecracker_bin",
-      "boot_args",
-      "network_interface_id",
-      "host_dev_name",
-      "guest_mac"
-    ].includes(key)
-  ) {
-    current[key] = value;
-  } else {
-    throw new Error(`Unsupported firecracker config key ${key}`);
+// The structured gVisor sandbox blocks (sandbox/egress/secrets/canary/
+// attack_safety) are edited directly in sentinel.config.json and synced to the
+// cloud Repo as one `pentest_config` object the worker reads at pentest time.
+export function buildPentestConfigBlob(config: Record<string, unknown>): Record<string, unknown> | undefined {
+  const blob: Record<string, unknown> = {};
+  for (const key of ["sandbox", "egress", "secrets", "canary", "attack_safety"]) {
+    if (config[key] !== undefined) blob[key] = config[key];
   }
-  config.firecracker = current;
+  return Object.keys(blob).length > 0 ? blob : undefined;
 }

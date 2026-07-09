@@ -134,7 +134,8 @@ export type AccountConfigPatch = {
 
 // Repo pentest configuration (§3 D1 — dual mode). The cloud worker runs the
 // pentest against `staging_base_url` (hosted default) or, for self-hosted
-// deployments, boots the app on the worker host via `boot`/`healthcheck`.
+// deployments, boots the app under a gVisor sandbox on the worker host
+// (target/egress/secrets/canary/attack-safety declared in `pentest_config`).
 export type PentestMode = "staging" | "local_worker";
 
 export type Repo = {
@@ -160,6 +161,7 @@ export type RepoPentestConfigPatch = {
   boot?: string | null;
   healthcheck?: string | null;
   egress_allowlist?: string[];
+  pentest_config?: Record<string, unknown> | null;
 };
 
 import { getSessionToken } from "./session";
@@ -283,6 +285,7 @@ export type RepoPentestConfig = {
   boot: string | null;
   healthcheck: string | null;
   egress_allowlist: string[];
+  pentest_config?: Record<string, unknown> | null;
 };
 
 export function getRepoPentestConfig(id: string): Promise<RepoPentestConfig> {

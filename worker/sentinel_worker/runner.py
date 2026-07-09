@@ -80,8 +80,11 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     Loads the finding + repo pentest config, dispatches HTTP payloads to the
     staging URL, and lets the oracle write the finding confirmation directly.
     """
+    import hashlib
+
     from .pentest import PentestRequestContext, run_pentest
-    from .vm import PentestSandboxConfig
+    from .pentest_config import resolve_pentest_config
+    from .vm import DEFAULT_EGRESS_NETWORK, GvisorSandboxExecutor, apply_egress_rules, egress_rules, ensure_egress_network
 
     payload = claimed.payload
     finding_id = payload.get("finding_id")
@@ -100,23 +103,102 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     egress_allowlist = payload.get("egress_allowlist") or _decode_egress_allowlist(repo.egress_allowlist)
     boot = payload.get("boot") or repo.boot
     healthcheck = payload.get("healthcheck") or repo.healthcheck
+    pentest_config_json = payload.get("pentest_config") or getattr(repo, "pentest_config", None)
 
-    sandbox = PentestSandboxConfig(
+    # Resolve the full sandbox + egress + secrets + canary + attack-safety config
+    # from the structured blob (falls back to safe defaults when absent).
+    resolved = resolve_pentest_config(
+        pentest_mode=payload.get("pentest_mode") or repo.pentest_mode,
         boot=boot,
         healthcheck=healthcheck,
         egress_allowlist=[str(h) for h in egress_allowlist] if isinstance(egress_allowlist, list) else [],
+        pentest_config_json=pentest_config_json,
+        seed=f"{repo.id}:{finding_id}",
     )
+
+    # local_worker (self-hosted): boot the target under gVisor on the worker host.
+    # staging (hosted default): no on-worker sandbox — HTTP-only probe of staging_base_url.
+    executor = None
+    proxy_server = None
+    sandbox_runtime = "runsc"
+    container_name = "sentinel-pentest"
+    if resolved.use_local_sandbox:
+        from .sandbox_preflight import detect_capabilities
+
+        executor = GvisorSandboxExecutor()
+        # Preflight: hard-fail with a clear message if docker is absent; otherwise
+        # resolve the runtime (runsc, or runc fallback) and whether we can apply
+        # iptables hardening (NET_ADMIN). Degrades gracefully.
+        caps = await detect_capabilities(executor)
+        sandbox_runtime = caps.runtime
+        container_name = f"sentinel-pt-{hashlib.sha256(f'{repo.id}:{finding_id}'.encode()).hexdigest()[:12]}"
+
+        # Ensure the internal egress network exists (target has no direct external
+        # route — outbound only via the proxy).
+        await ensure_egress_network(executor, DEFAULT_EGRESS_NETWORK)
+
+        # Start the token-scoped egress proxy as the sandbox's only outbound path.
+        proxy_server = await _start_egress_proxy(resolved, seed=f"{repo.id}:{finding_id}", healthcheck=healthcheck)
+
+        # Optional hard enforcement: DROP the target's forwarded egress so even a
+        # proxy-unaware app can't bypass it. Best-effort; requires NET_ADMIN.
+        if caps.hard_egress:
+            await apply_egress_rules(executor, egress_rules(resolved.sandbox.vm_ip, []))
+
     context = PentestRequestContext(
         sanitizer_output=str(payload.get("sanitizer_output", "")),
         behavioral_proof=payload.get("behavioral_proof"),
         proof_detail=str(payload.get("proof_detail", "")),
-        sandbox=sandbox,
-        executor=None,  # HTTP-only Phase 1 (AUDIT.md §3 D3); no on-worker subprocess sandbox yet.
+        sandbox=resolved.sandbox,
+        executor=executor,
         staging_base_url=staging_base_url,
         healthcheck_path=healthcheck_path,
+        attack_safety=resolved.attack_safety,
+        canary_tokens=resolved.canary_tokens,
+        broker=resolved.broker,
+        sandbox_runtime=sandbox_runtime,
+        sandbox_network=DEFAULT_EGRESS_NETWORK,
+        container_name=container_name,
     )
 
     llm = await _pentest_llm(db, account, _llm)
-    # run_pentest creates its own Run, evaluates the oracle, and writes the
-    # finding confirmation + CONFIRMED_EXPLOIT edge directly (AUDIT.md §3 D6).
-    await run_pentest(db, finding, context, llm=llm)
+    try:
+        # run_pentest creates its own Run, evaluates the oracle, and writes the
+        # finding confirmation + CONFIRMED_EXPLOIT edge directly (AUDIT.md §3 D6).
+        await run_pentest(db, finding, context, llm=llm)
+    finally:
+        if proxy_server is not None:
+            proxy_server.close()
+
+
+async def _start_egress_proxy(resolved, *, seed: str, healthcheck: str | None):
+    """Build + serve the run's egress proxy and wire the sandbox to route all
+    outbound traffic through it (HTTP(S)_PROXY env + a per-run sandbox token)."""
+    import hashlib
+
+    from .egress_proxy import build_egress_proxy
+    from .vm import DEFAULT_PROXY_HOST_FROM_SANDBOX, _host_from_healthcheck, build_egress_proxy_env
+
+    egress = resolved.sandbox.egress
+    allow_hosts = list(egress.allow_hosts) if egress else []
+    hc = resolved.sandbox.healthcheck or healthcheck
+    hc_host = _host_from_healthcheck(hc) if hc else None
+    if hc_host:
+        allow_hosts.append(hc_host)
+
+    sandbox_token = hashlib.sha256(f"sandbox-token:{seed}".encode()).hexdigest()[:32]
+    proxy = build_egress_proxy(
+        allow_hosts=allow_hosts,
+        sandbox_token=sandbox_token,
+        broker=resolved.broker,
+        canary_tokens=resolved.canary_tokens,
+        token_scoped=bool(egress.token_scoped) if egress else True,
+    )
+    # Bind on all interfaces so the sandboxed container can reach the proxy via
+    # the docker host gateway (host.docker.internal), not just host-localhost.
+    server = await proxy.serve(host="0.0.0.0")
+    port = server.sockets[0].getsockname()[1]
+    # env is a mutable dict on the frozen config — safe to enrich in place.
+    resolved.sandbox.env.update(build_egress_proxy_env(port, host=DEFAULT_PROXY_HOST_FROM_SANDBOX))
+    resolved.sandbox.env["SENTINEL_SANDBOX_TOKEN"] = sandbox_token
+    return server

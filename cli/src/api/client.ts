@@ -49,6 +49,7 @@ export type RepoPentestConfig = {
   boot?: string | null;
   healthcheck?: string | null;
   egress_allowlist: string[];
+  pentest_config?: Record<string, unknown> | null;
 };
 
 export type RepoPentestConfigPatch = {
@@ -58,6 +59,7 @@ export type RepoPentestConfigPatch = {
   boot?: string | null;
   healthcheck?: string | null;
   egress_allowlist?: string[];
+  pentest_config?: Record<string, unknown> | null;
 };
 
 export type EnqueuePentestOptions = {

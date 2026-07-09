@@ -67,7 +67,20 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
-      - uses: docker/build-push-action@v5
+      # Smoke-build locally first and verify the sandbox tooling is present, so a
+      # broken image (missing docker/runsc) fails CI before it is pushed.
+      - name: Build worker image (smoke)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: worker/Dockerfile
+          load: true
+          tags: sentinel-worker:smoke
+          cache-from: type=gha
+      - name: Smoke-check sandbox tooling (docker + runsc)
+        run: docker run --rm --entrypoint sh sentinel-worker:smoke -c "docker --version && runsc --version"
+      - name: Build and push worker image
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: worker/Dockerfile

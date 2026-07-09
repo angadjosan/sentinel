@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .languages import language_for
 from .models import Account, Repo, SourceFileSnapshot
-from .security import is_env_var_file
+from .security import is_secret_file
 
 
 DEV_SOURCE_KEY = "sentinel-dev-source-key"
@@ -51,7 +51,7 @@ async def store_source_snapshot(
     content: str,
     deleted: bool = False,
 ) -> SourceFileSnapshot | None:
-    if is_env_var_file(file_path):
+    if is_secret_file(file_path):
         # .env-style files are never persisted, so the SAST agent's read_file/grep_source
         # tools have no snapshot to retrieve them from.
         return None
@@ -69,7 +69,7 @@ async def store_source_snapshot(
 
 
 async def read_source_snapshot(db: AsyncSession, *, repo_id: str, commit_hash: str, file_path: str) -> str:
-    if is_env_var_file(file_path):
+    if is_secret_file(file_path):
         raise FileNotFoundError(file_path)
     snapshot = await db.get(SourceFileSnapshot, (repo_id, commit_hash, file_path))
     if snapshot is None or snapshot.deleted:
