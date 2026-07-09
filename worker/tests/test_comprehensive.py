@@ -850,6 +850,79 @@ class TestGraphMerge:
                 reloaded = await session.get(Finding, finding_id)
         assert reloaded.graph_id == main.id
 
+    @pytest.mark.asyncio
+    async def test_merge_3way_flags_conflict_when_main_advanced(self):
+        """When main changes a node the branch also changed since the base, the
+        merge records a conflict but still defers to the branch version."""
+        from sentinel_worker.graph_merge import merge_graph
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = await get_or_create_graph(session, "acme/repo")
+                session.add(Node(id="n:x", graph_id=main.id, kind="FUNCTION", name="x", label="v0"))
+                await session.flush()
+                # Base snapshot captured here has n:x == v0.
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                session.add(Node(id="n:x", graph_id=branch.id, kind="FUNCTION", name="x", label="branch-v"))
+                # Main advances the same node independently.
+                main_node = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+                main_node.label = "main-v"
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+        assert result.had_base is True
+        assert "n:x" in result.conflicts
+        assert merged.label == "branch-v"  # branch wins per spec
+
+    @pytest.mark.asyncio
+    async def test_merge_3way_no_conflict_when_main_untouched(self):
+        from sentinel_worker.graph_merge import merge_graph
+        from sentinel_worker.scan import get_or_create_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = await get_or_create_graph(session, "acme/repo")
+                session.add(Node(id="n:x", graph_id=main.id, kind="FUNCTION", name="x", label="v0"))
+                await session.flush()
+                branch = await get_or_create_graph(session, "acme/repo", kind="branch", branch_name="f")
+                session.add(Node(id="n:x", graph_id=branch.id, kind="FUNCTION", name="x", label="branch-v"))
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:x"})
+        assert result.had_base is True
+        assert result.conflicts == []
+        assert merged.label == "branch-v"
+
+    @pytest.mark.asyncio
+    async def test_merge_without_base_falls_back_to_2way(self):
+        """A legacy branch graph with no recorded base still merges (no conflict
+        detection)."""
+        from sentinel_worker.graph_merge import merge_graph
+
+        engine = _engine()
+        sm = await _session_factory(engine)
+        async with sm() as session:
+            async with session.begin():
+                main = Graph(account_id="a", repo_id="r", kind="main")
+                branch = Graph(account_id="a", repo_id="r", kind="branch")  # no base_graph_id
+                session.add_all([main, branch])
+                await session.flush()
+                session.add(Node(id="n:y", graph_id=branch.id, kind="FUNCTION", name="y"))
+                await session.flush()
+                result = await merge_graph(session, branch_graph_id=branch.id, main_graph_id=main.id)
+            async with session.begin():
+                merged = await session.get(Node, {"graph_id": main.id, "id": "n:y"})
+        assert result.had_base is False
+        assert result.conflicts == []
+        assert merged is not None
+
 
 # ===========================================================================
 # vm.py — forbidden tokens and egress rules

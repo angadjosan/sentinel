@@ -1130,15 +1130,22 @@ async def graph_upsert(
 
 
 @app.post("/admin/graphs/merge")
-async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, int | str]:
+async def merge_graph_endpoint(payload: GraphMergeRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> dict[str, object]:
     branch = await db.get(Graph, payload.branch_graph_id)
     main = await db.get(Graph, payload.main_graph_id)
     if branch is None or main is None:
         raise HTTPException(status_code=404, detail="branch or main graph not found")
     if not _skip_tenant_filter(principal) and (branch.account_id != principal.account_id or main.account_id != principal.account_id):
         raise HTTPException(status_code=403, detail="cannot merge graphs from another account")
-    copied = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
-    return {"branch_graph_id": payload.branch_graph_id, "main_graph_id": payload.main_graph_id, "copied": copied}
+    result = await merge_graph(db, branch_graph_id=payload.branch_graph_id, main_graph_id=payload.main_graph_id)
+    return {
+        "branch_graph_id": payload.branch_graph_id,
+        "main_graph_id": payload.main_graph_id,
+        "copied": result.copied,
+        "conflicts": result.conflicts,
+        "findings_repointed": result.findings_repointed,
+        "had_base": result.had_base,
+    }
 
 
 @app.get("/analytics/token-spend")
