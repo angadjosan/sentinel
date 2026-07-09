@@ -81,7 +81,8 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     staging URL, and lets the oracle write the finding confirmation directly.
     """
     from .pentest import PentestRequestContext, run_pentest
-    from .vm import PentestSandboxConfig
+    from .pentest_config import resolve_pentest_config
+    from .vm import GvisorSandboxExecutor
 
     payload = claimed.payload
     finding_id = payload.get("finding_id")
@@ -100,20 +101,34 @@ async def execute_pentest_task(db: AsyncSession, claimed: ClaimedTask, *, repo: 
     egress_allowlist = payload.get("egress_allowlist") or _decode_egress_allowlist(repo.egress_allowlist)
     boot = payload.get("boot") or repo.boot
     healthcheck = payload.get("healthcheck") or repo.healthcheck
+    pentest_config_json = payload.get("pentest_config") or getattr(repo, "pentest_config", None)
 
-    sandbox = PentestSandboxConfig(
+    # Resolve the full sandbox + egress + secrets + canary + attack-safety config
+    # from the structured blob (falls back to safe defaults when absent).
+    resolved = resolve_pentest_config(
+        pentest_mode=payload.get("pentest_mode") or repo.pentest_mode,
         boot=boot,
         healthcheck=healthcheck,
         egress_allowlist=[str(h) for h in egress_allowlist] if isinstance(egress_allowlist, list) else [],
+        pentest_config_json=pentest_config_json,
+        seed=f"{repo.id}:{finding_id}",
     )
+
+    # local_worker (self-hosted): boot the target under gVisor on the worker host.
+    # staging (hosted default): no on-worker sandbox — HTTP-only probe of staging_base_url.
+    executor = GvisorSandboxExecutor() if resolved.use_local_sandbox else None
+
     context = PentestRequestContext(
         sanitizer_output=str(payload.get("sanitizer_output", "")),
         behavioral_proof=payload.get("behavioral_proof"),
         proof_detail=str(payload.get("proof_detail", "")),
-        sandbox=sandbox,
-        executor=None,  # HTTP-only Phase 1 (AUDIT.md §3 D3); no on-worker subprocess sandbox yet.
+        sandbox=resolved.sandbox,
+        executor=executor,
         staging_base_url=staging_base_url,
         healthcheck_path=healthcheck_path,
+        attack_safety=resolved.attack_safety,
+        canary_tokens=resolved.canary_tokens,
+        broker=resolved.broker,
     )
 
     llm = await _pentest_llm(db, account, _llm)

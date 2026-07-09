@@ -30,7 +30,7 @@ from .db import create_engine, create_sessionmaker
 from .migrations import apply_migrations
 from .models import Edge, Finding, Node
 from .scan import bootstrap_repo, get_or_create_graph, parse_unified_diff, review_plan, scan_diff
-from .security import is_env_var_file
+from .security import is_secret_file
 from .standalone import ScanFinding, ScanResult, _severity_rank
 
 _NODE_UPSERT_FIELDS = (
@@ -335,7 +335,7 @@ async def run_local_init(*, repo_name: str, repo_dir: str, llm: SentinelLLMClien
     """
     files: dict[str, str] = {}
     for rel_path in _list_tracked_files(repo_dir):
-        if rel_path == "sentinel.config.json" or is_env_var_file(rel_path):
+        if rel_path == "sentinel.config.json" or is_secret_file(rel_path):
             continue
         try:
             files[rel_path] = (Path(repo_dir) / rel_path).read_text()

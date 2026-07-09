@@ -3,23 +3,55 @@
   "repoName": "your-repo-name",
   "provider": "local",
   "model": "llama3.2",
-  "boot": "docker compose up -d",
-  "healthcheck": "curl -sf http://localhost:3000/health",
-  "egress_allowlist": ["localhost"],
-  "firecracker": {
-    "enabled": false,
-    "kernel_image": "/var/lib/sentinel/vmlinux",
-    "rootfs_image": "/var/lib/sentinel/rootfs.ext4",
-    "api_socket": "/tmp/sentinel-firecracker.sock",
-    "guest_runner_argv": ["sentinel-vsock-exec", "--socket", "/tmp/sentinel-vsock.sock", "--"]
+
+  "pentest_mode": "staging",
+  "staging_base_url": "https://staging.your-app.example",
+  "healthcheck_path": "/health",
+
+  "sandbox": {
+    "runtime": "gvisor",
+    "target": {
+      "image": "ghcr.io/your-org/your-app@sha256:REPLACE_WITH_DIGEST",
+      "entrypoint": ["node", "server.js"]
+    },
+    "healthcheck": "curl -sf http://localhost:3000/health",
+    "resources": { "vcpus": 1, "memory_mb": 2048, "pids_max": 256, "wall_clock_seconds": 1800 }
   },
-  "env": {
-    "from": ".env.sentinel"
+
+  "egress": {
+    "default": "deny",
+    "allow": ["registry.npmjs.org", "pypi.org"],
+    "proxy": { "mode": "token_scoped" }
   },
-  "variants": {
-    "asan": {
-      "build": "cmake -DCMAKE_BUILD_TYPE=Asan .",
-      "requires": "clang"
+
+  "secrets": {
+    "synthetic_env": ".env.sentinel",
+    "broker": {
+      "enabled": true,
+      "upstreams": [
+        { "host": "api.stripe.com", "credential_ref": "stripe_test_key" }
+      ]
+    }
+  },
+
+  "canary": {
+    "enabled": true,
+    "provider": "canarytokens",
+    "count": 3,
+    "seed_into": ["env"]
+  },
+
+  "attack_safety": {
+    "scope": ["/api/"],
+    "exclude_paths": ["/logout", "/admin/delete"],
+    "exclude_methods": ["DELETE"],
+    "max_requests": 500,
+    "max_attack_duration_seconds": 600,
+    "auth": {
+      "method": "POST",
+      "path": "/login",
+      "body": { "username": "$SENTINEL_USER", "password": "$SENTINEL_PASS" },
+      "logged_in_indicator": "dashboard"
     }
   }
 }

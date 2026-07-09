@@ -16,7 +16,7 @@ from .enrichment import enrich_graph_nodes
 from .graph_query import GraphQuery
 from .models import Edge, Finding, Graph, Node, Repo, Run, now
 from .sca import scan_dependencies
-from .security import compute_fingerprint, find_secret_candidates, is_env_var_file, scrub_secrets
+from .security import compute_fingerprint, find_secret_candidates, is_secret_file, scrub_secrets
 from .source_store import enforce_source_retention_for_account, store_source_snapshot
 from .trace_store import offload_trace_if_large
 
@@ -75,7 +75,7 @@ def _strip_env_files_from_diff(diff: str) -> str:
                 return block_line.removeprefix("+++ b/")
         return ""
 
-    return "".join(block for block in blocks if not is_env_var_file(block_path(block)))
+    return "".join(block for block in blocks if not is_secret_file(block_path(block)))
 
 
 def trace_event(kind: str, **fields: object) -> str:
@@ -200,7 +200,7 @@ async def bootstrap_repo(db: AsyncSession, repo_name: str, files: dict[str, str]
     llm_files: dict[str, str] = {}
     for path, content in files.items():
         await store_source_snapshot(db, repo_id=repo.id, commit_hash="bootstrap", file_path=path, content=content)
-        if not is_env_var_file(path):
+        if not is_secret_file(path):
             sources.append(SourceFile(path=path, content=content, is_new=False))
             llm_files[path] = content
     await build_source_graph(db, graph.id, sources)
@@ -280,7 +280,7 @@ async def execute_source_scan(
 
     for file in files:
         await store_source_snapshot(db, repo_id=repo.id, commit_hash=run.id, file_path=file.path, content=file.content)
-    llm_sources = [s for s in sources if not is_env_var_file(s.path)]
+    llm_sources = [s for s in sources if not is_secret_file(s.path)]
     if llm_sources:
         nodes = await build_source_graph(db, graph.id, llm_sources)
         for node in nodes:
@@ -362,7 +362,7 @@ async def execute_source_scan(
     # Graph enrichment runs only on the async worker path (run_context != "local"),
     # not inline on synchronous /source requests, to keep response latency bounded.
     if run_context != "local":
-        llm_source_by_file = {f.path: f.content for f in files if not is_env_var_file(f.path)}
+        llm_source_by_file = {f.path: f.content for f in files if not is_secret_file(f.path)}
         await enrich_graph_nodes(db, graph_id=graph.id, run_id=run.id, source_by_file=llm_source_by_file, only_new=True, llm=llm)
         from .enrichment import validate_enrichment_labels
         await validate_enrichment_labels(db, graph_id=graph.id, run_id=run.id, llm=llm, source_by_file=llm_source_by_file)

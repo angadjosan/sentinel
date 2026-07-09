@@ -1,48 +1,43 @@
-> **Local-AI-calls update.** This document was written before the local-execution
-> refactor and, in many places below (`sentinel init` "sends the full codebase to
-> the cloud", `sentinel source` "the diff is sent to Sentinel's cloud worker",
-> the Storage and Cloud Architecture sections' source-encryption-at-rest
-> claims), it still describes the **old** cloud-upload architecture. That
-> architecture no longer exists. The current model, in one paragraph:
+> **Status legend.** This document describes what is **shipped** today. Lines
+> tagged **[roadmap]** are designed but not yet built; everything else is
+> implemented and tested. When a roadmap item ships, its tag is removed.
 >
-> **SAST is local; pentest is cloud.** The scan path — diff computation, the
-> five-pass graph construction, the SAST/plan LLM calls — runs **locally**, in
-> a Python engine (`worker/sentinel_worker/local_cli.py`) the CLI spawns as a
-> subprocess. The SAST LLM call is made on the developer's own machine with a
-> key stored only in their system keychain (`sentinel config set api-key`) —
-> the server rejects a `PATCH /config` request that includes one. Source code
-> and diffs are never transmitted on the scan path. The only things that reach
-> the cloud from a scan are: the **code graph** (`POST /graph/upsert` —
-> node/edge pointers and short semantic labels, never source text) and
-> **findings** (`POST /findings/ingest`). `GET /graph/subgraph` lets the local
-> engine pull existing graph context (read-only, same no-source guarantee) to
-> enrich the SAST bootstrap for functions outside the current diff. SAST run
-> traces (every prompt, every tool call) are written locally to
-> `~/.sentinel/runs/<id>.jsonl` and never uploaded; the cloud only sees a
-> redacted summary.
+> **Architecture in one paragraph.** *SAST is local; pentest is cloud.* The scan
+> path — diff computation, the five-pass graph construction, the SAST/plan LLM
+> calls — runs **locally**, in a Python engine (`worker/sentinel_worker/local_cli.py`)
+> the CLI spawns as a subprocess. The SAST LLM call is made on the developer's
+> own machine with a key stored only in their system keychain
+> (`sentinel config set api-key`) — the server rejects a `PATCH /config` that
+> includes one. Source and diffs are never transmitted on the scan path. Only
+> the **code graph** (`POST /graph/upsert` — node/edge pointers and short
+> semantic labels, never source text) and **findings** (`POST /findings/ingest`)
+> reach the cloud. SAST run traces are written locally to
+> `~/.sentinel/runs/<id>.jsonl`; the cloud sees only a redacted summary.
 >
-> **Pentest runs on the cloud worker, not on the developer's machine.**
-> `sentinel pentest` enqueues a `kind=pentest` task (`POST /pentest`) and polls
-> (`sentinel runs watch`) until terminal. The worker reaches a running instance
-> of the app in one of two modes (repo config, `pentest_mode`):
+> **Pentest runs on the cloud worker.** `sentinel pentest` enqueues a
+> `kind=pentest` task (`POST /pentest`) and polls until terminal. The worker
+> reaches the target in one of two modes (repo config `pentest_mode`):
 > **`staging`** (hosted default) — HTTP payloads to a configured
 > `staging_base_url`; **`local_worker`** (self-hosted) — the worker boots the
-> app itself in a subprocess sandbox via `boot`/`healthcheck`. There is **no
-> Firecracker microVM** and no local-machine pentest. The pentest agent's LLM
-> credential is server-side (`SENTINEL_PENTEST_LLM_API_KEY` on the worker, or an
-> encrypted per-account `pentest_api_key`) — separate from the developer's
-> local SAST key. Phase 1 pentest is HTTP-only and uses the cloud graph +
-> finding metadata for context; **no source is uploaded for pentest.** The
-> worker writes the confirmation and a `CONFIRMED_EXPLOIT` edge directly; a
-> finding is `confirmed` only on an HTTP/behavioral proof or sanitizer output,
-> never on agent judgment alone.
+> target under a **gVisor sandbox** (`runsc`) on its own host, declared in the
+> structured `pentest_config` (OCI image or compose/boot). The sandbox enforces
+> **default-deny, token-scoped egress**, cgroup resource caps (memory, CPU,
+> `pids-limit` anti-fork-bomb), **synthetic secrets + canary decoys** in the
+> target env, a **credential broker** so the agent never holds real upstream
+> creds, and **attack-safety controls** (scope allowlist, destructive-endpoint
+> exclusion, request/duration budget). The pentest agent's LLM credential is
+> server-side (`SENTINEL_PENTEST_LLM_API_KEY` on the worker, or an encrypted
+> per-account `pentest_api_key`) — separate from the developer's local SAST key.
+> No source is uploaded for pentest. A finding is `confirmed` only on an
+> HTTP/behavioral proof (with a **replayable request artifact**), a leaked
+> canary, or sanitizer output — never on agent judgment alone; the worker then
+> writes the confirmation and a `CONFIRMED_EXPLOIT` edge directly.
 >
-> Read the sections below for the *design rationale* (the five-pass graph
-> pipeline, the context-loading strategy, the confirmation oracle) — they're
-> still accurate — but treat any claim about *where the codebase or diff is
-> sent*, or about pentest booting the app *locally* / in a *Firecracker
-> microVM*, as superseded by the two paragraphs above. The current pentest
-> host is the cloud worker (staging HTTP probe by default).
+> The gVisor sandbox is the shipped isolation substrate (chosen over Firecracker:
+> no nested-virtualization requirement). Native-code fuzzing (ASan/MSan/TSan +
+> libFuzzer) is **[roadmap]** — it targets C/C++/Rust-FFI, which the current
+> web-framework adapters don't cover — and is gated behind a future native
+> adapter.
 
 # Problem
 
@@ -75,7 +70,7 @@ One-time setup for a repository. Run once by any team member; the cloud graph is
 
 - Authenticates with the configured model provider (API key or OAuth) and registers the repo in Sentinel's cloud database.
 - Writes `sentinel.config.json` to the repo root — the only file `sentinel init` commits to git (see **Developer Experience**).
-- Sends the full codebase to the cloud and runs the graph bootstrap in five passes:
+- Builds the graph **locally** (the codebase never leaves the machine) in five passes, and uploads only the resulting graph — node/edge pointers and short semantic labels, never source text:
   1. **Parse** — tree-sitter extracts per-file ASTs. Fast, incremental, no dependencies.
   2. **Resolution** — cross-file name binding produces `CALLS` edges by resolving import references to their definitions. Unresolved calls (dynamic dispatch, unresolved imports) are written with `call_uncertainty` set rather than silently dropped.
   3. **Adapter** — framework adapters emit `ROUTE` nodes, ordered `middleware_chain` edges, and `is_entry_point` flags. Each supported framework (Express, FastAPI, Next.js, Django, Rails, Spring) has a dedicated adapter; the adapter interface is open for custom frameworks via `sentinel.config.json`. Without an adapter for your framework, route-level security properties are not populated.
@@ -135,52 +130,58 @@ Attempts to actually exploit a vulnerability in a realistic replica of the app. 
 
 **Environment definition (`sentinel.config.json`):**
 
-Instead of an imperative shell script, the app environment is declared in `sentinel.config.json`. Sentinel parses this declaratively — it can read, validate, and reason about the config before executing anything.
+The app environment is declared, not scripted. Sentinel parses `sentinel.config.json` declaratively — it validates the config and can reason about it before executing anything. Boot/healthcheck are run as **argv arrays, never through a shell** (metacharacters are rejected at parse time), so a config value cannot inject a shell command.
 
 ```json
 {
-  "boot": "docker compose up -d",
-  "healthcheck": "curl -sf http://localhost:3000/health",
-  "env": { "from": ".env.sentinel" },
-  "variants": {
-    "asan":     { "build": "cmake -DCMAKE_BUILD_TYPE=Asan .",     "requires": "clang" },
-    "msan":     { "build": "cmake -DCMAKE_BUILD_TYPE=Msan .",     "requires": "clang" },
-    "tsan":     { "build": "cmake -DCMAKE_BUILD_TYPE=Tsan .",     "requires": "clang" },
-    "coverage": { "build": "cmake -DCMAKE_BUILD_TYPE=Coverage .", "requires": "clang" }
-  }
+  "pentest_mode": "local_worker",
+  "sandbox": {
+    "runtime": "gvisor",
+    "target": { "image": "ghcr.io/your-org/app@sha256:...", "entrypoint": ["node", "server.js"] },
+    "healthcheck": "curl -sf http://localhost:3000/health",
+    "resources": { "vcpus": 1, "memory_mb": 2048, "pids_max": 256, "wall_clock_seconds": 1800 }
+  },
+  "egress":  { "default": "deny", "allow": ["pypi.org"], "proxy": { "mode": "token_scoped" } },
+  "secrets": { "synthetic_env": ".env.sentinel",
+               "broker": { "enabled": true, "upstreams": [{ "host": "api.stripe.com", "credential_ref": "stripe_test_key" }] } },
+  "canary":  { "enabled": true, "provider": "canarytokens", "count": 3, "seed_into": ["env"] },
+  "attack_safety": { "scope": ["/api/"], "exclude_paths": ["/logout"], "exclude_methods": ["DELETE"],
+                     "max_requests": 500, "max_attack_duration_seconds": 600 }
 }
 ```
 
-Variants are optional for interpreted-language apps. For any target with native code (C/C++, CGo, Python C extensions, Node native addons, JNI, Rust FFI), `asan` is required; the others are strongly recommended.
+The **target** is either a hermetic OCI image (recommended — pin by `@sha256` digest) or the compose/boot tier. In `staging` mode the target is instead an already-running deployment at `staging_base_url` (no on-worker sandbox).
+
+**Isolation the sandbox enforces (local_worker):**
+- **gVisor (`runsc`)** — a userspace-kernel boundary per run; no nested virtualization required. Resource caps applied via cgroups: memory, CPU, and `pids-limit` (fork-bomb bound), plus a wall-clock cap.
+- **Default-deny, token-scoped egress** — the target can reach only its healthcheck host plus explicitly allowlisted hosts, and only via a proxy that binds each request to the sandbox's own token. An attacker who exfiltrates *through* an allowlisted host with their own key is still rejected (an allowlist alone is not sufficient).
+- **Secrets** — real third-party credentials never enter the agent's view: a **credential broker** injects them per-request for configured upstream hosts and strips any agent-supplied auth. The target env carries only **synthetic decoys** and **canary tokens**; a canary that ever appears in a response is deterministic proof of a real exfiltration path.
 
 **Source-aware pentest:**
 
-Before probing, the agent loads the context graph subgraph for the target finding — its node, callers, callees, data sources, and any `GUARDED_BY` or `FLOWS_TO` edges — and reads the relevant source files directly. The graph tells it where to look; reading the code tells it exactly what it's attacking. The agent uses the graph as a navigation index to identify which entry points reach the vulnerable sink, what guards stand in the way, and which call paths to target — then reads the actual handler and sink implementations before forming exploit payloads. Live graph queries remain available throughout the pentest run.
+Before probing, the agent loads the context-graph subgraph for the target finding — its node, callers, callees, data sources, and any `GUARDED_BY` or `FLOWS_TO` edges — and reads the relevant source directly. The graph tells it where to look; reading the code tells it what it's attacking. Live graph queries remain available throughout the run.
 
-**Procedure (runs in the cloud):**
+**Procedure (runs on the cloud worker):**
 
-1. **Boot** the app with production-like secrets and config (plain build).
-2. **Instrument** — if native code is detected, boot a parallel sanitizer-enabled instance (`asan`). Attach a debugger to it. The agent can inject debug logic, add trace points, and inspect heap state directly on this instance.
-3. **Load target** — from vuln ID (graph lookup), natural language description, or empty (agent-driven, ranked by attack surface from the graph). If empty, rank entry-point nodes by `is_entry_point=true`, `auth_required=false`, and `FLOWS_TO` depth to sinks.
-4. **Exploit attempt** — the agent attacks both the plain and sanitizer builds simultaneously, using the graph's taint paths to generate targeted payloads over generic fuzzing.
-5. **Fuzzing tier** (for memory safety and native code) — for each suspicious code location, the agent generates a fuzzer harness targeting that function. Compiled with `asan` + `coverage` and run through libFuzzer. After each round, LLVM coverage data is processed and executed branches with ±3 lines of surrounding source are fed back to the agent to direct the next iteration. Continues until a sanitizer crash confirms the hypothesis or coverage plateaus.
-6. **Concurrency tier** — for code with shared mutable state, goroutines, threads, or async patterns, a `tsan` instance is run under concurrent load. The agent drives concurrent requests to trigger scheduling windows that expose races.
-7. **Native extension tier** — for apps with Python C API, Node N-API, JNI, CGo, or Rust FFI, the agent generates function-level fuzzer harnesses that bypass the HTTP interface entirely, targeting library internals unreachable through API endpoints.
+1. **Boot** the target under the gVisor sandbox (image tier) or via the boot/compose command, then healthcheck it. Synthetic secrets + canary decoys are injected into the env.
+2. **Load target** — from vuln ID (graph lookup), natural-language description, or empty (agent-driven, ranked by attack surface: `is_entry_point=true`, `auth_required=false`, `FLOWS_TO` depth to sinks).
+3. **Exploit attempt** — the agent reads the graph's taint paths and generates targeted payloads. Every probe is gated by **attack-safety**: it must be in-scope, non-destructive (logout/delete and `DELETE` excluded), and within the request/duration budget. Each request that produces proof is captured as a **replayable artifact** (exact method + URL + payload placement).
+4. **[roadmap] Native-code fuzzing** — for C/C++/Rust-FFI targets, generate a libFuzzer harness under ASan/coverage and iterate on coverage feedback until a sanitizer crash or plateau. Gated behind a native-code adapter that does not exist yet; not run for the current web-framework targets.
 
 **Confirmation oracle:**
 
-A finding is confirmed only if one of the following is true — agent judgment alone is not an outcome:
-- A sanitizer error fired on a reproducible input (`ASan`, `MSan`, `UBSan`, or `TSan` error with stack trace)
-- A deterministic behavioral proof was demonstrated: data exfiltrated, authentication bypassed, command executed, privilege escalated
+A finding is confirmed only on deterministic runtime proof — agent judgment alone is never an outcome:
+- A **leaked canary** in a response (a real secret-exfiltration path), or
+- A **deterministic behavioral/HTTP proof** captured from the target's own response (data exfiltrated, auth bypassed, command executed, privilege escalated), or
+- **[roadmap]** a sanitizer error on a reproducible input (`ASan`/`MSan`/`UBSan`/`TSan` with stack trace).
 
-Every confirmed finding carries the sanitizer stack trace or the behavioral proof as evidence in the database record, and a `CONFIRMED_EXPLOIT` edge is written to the context graph linking the entry point to the finding node.
+Every confirmed finding stores the proof **plus a replayable request artifact** — so a later fix can be re-run and auto-verified (the OSS-Fuzz "reproduce" contract) — and a `CONFIRMED_EXPLOIT` edge is written linking the entry point to the finding node. Broker secrets and high-entropy strings are scrubbed from all stored evidence.
 
 **Outcomes:**
-- Sanitizer crash confirmed → `reproduced via pentest (memory safety)` — sanitizer type, stack trace, triggering input
-- TSan race confirmed → `reproduced via pentest (concurrency)` — racing goroutine/thread stacks
-- Behavioral exploit confirmed → `reproduced via pentest (logic)` — proof artifact
+- Behavioral/HTTP exploit or canary leak confirmed → `reproduced via pentest` — proof artifact + replayable request
+- **[roadmap]** Sanitizer crash confirmed → `reproduced via pentest (memory safety)` — sanitizer type, stack trace, triggering input
 - Not exploitable → `not reproducible`. Suppressed or discarded depending on settings.
-- Fuzzing exhausted, no crash → `not reproducible (fuzz exhausted)` — coverage plateau data
+- Budget exhausted with no proof → `not reproducible` — probes skipped/stopped are recorded in the run trace
 
 ---
 
@@ -585,24 +586,27 @@ Concurrent writers on the same branch: node metadata is last-write-wins; edge ad
 
 ### Pentest sandbox
 
-Every `sentinel pentest` job runs inside a Firecracker microVM provisioned fresh for that job and destroyed when it completes. The customer's `docker compose` boot command, healthcheck, and `.env.sentinel` secrets execute entirely inside the VM. Nothing from the job persists outside it.
+In `local_worker` mode every `sentinel pentest` job boots the target inside a **gVisor sandbox** (`runsc`) — a userspace-kernel isolation boundary that needs no nested virtualization — provisioned for that job and torn down when it completes. The declared target (OCI image or compose/boot) runs under the sandbox; nothing from the job persists outside it. (gVisor was chosen over a Firecracker microVM specifically to avoid the nested-virt requirement on ordinary worker hosts.) In `staging` mode there is no on-worker sandbox — the worker probes an already-running deployment over HTTP.
 
-Isolation constraints enforced on every microVM:
+Isolation constraints enforced on every sandbox:
 
-- **Egress:** limited to the app's own declared healthcheck endpoint plus any hosts explicitly listed under `"egress_allowlist"` in `sentinel.config.json`. The host network and all other tenant VMs are unreachable.
-- **Resources:** hard CPU, memory (2 GB default, configurable per account), and wall-clock time limits. Fuzzing jobs that would otherwise run unbounded are capped at the declared budget; `sentinel.config.json` can raise or lower the cap.
-- **Storage:** no persistent storage survives teardown. Secrets injected at boot are never written to disk, graph, or run traces.
-- **No lateral movement:** inter-VM networking is disabled at the hypervisor level. A job cannot reach another tenant's VM, database, or network.
+- **Egress — default-deny, token-scoped.** The target reaches only its declared healthcheck host plus hosts listed under `egress.allow`, and only through a proxy that binds each request to the sandbox's own provisioned token. This closes the exfiltration leg of the "lethal trifecta": an attacker who tries to exfiltrate *through* an allowlisted host with their own key is rejected on the token check — an allowlist alone is not sufficient.
+- **Secrets — the agent never holds real credentials.** Real third-party creds are injected per-request by a **credential broker** for configured upstream hosts (and any agent-supplied auth is stripped first). The target env carries only **synthetic decoys** and **canary tokens**; broker secrets and high-entropy strings are scrubbed from all evidence and traces. This closes the private-data leg of the trifecta.
+- **Canaries as leak detectors.** Canary decoys are seeded into the target env; if a canary value ever appears in a response, that is deterministic proof of a real secret-exfiltration path (not a heuristic match).
+- **Resources.** Hard memory, CPU, and `pids-limit` (fork-bomb bound) caps via cgroups, plus a wall-clock cap — set in `sandbox.resources`.
+- **Attack-safety.** Probes are gated by an in-scope path allowlist, destructive-endpoint/verb exclusion (logout/delete, `DELETE`), and a request/duration budget — so a run is safe to point at a real target and is bounded (also anti-abuse: the runner can't be turned into unbounded free compute).
 
-Declarative config parsing is intentional here: Sentinel reads and validates `sentinel.config.json` before executing anything. A `"boot"` value that is a fork bomb or attempts to use the pentest runner as free compute is caught at config parse time and rejected. Shell expansion of config values does not happen — boot and healthcheck are passed as argv arrays, not shell strings.
+Declarative config parsing is intentional: Sentinel validates `sentinel.config.json` before executing anything, and boot/healthcheck/target commands are passed as **argv arrays, never shell strings** — shell expansion never happens, and a value containing shell metacharacters is rejected at parse time.
+
+**[roadmap]** Per-tenant hardware-isolation (Firecracker/Kata) and the full native-code fuzzing tier (ASan/MSan/TSan + libFuzzer) are designed but not yet shipped; the current substrate is gVisor with the controls above.
 
 ### Data transmission and storage
 
-The full codebase is transmitted once at `sentinel init` over TLS and stored encrypted at rest, keyed per repository with per-tenant encryption keys. All subsequent runs transmit only the diff. Source retention is configurable per account in the dashboard; accounts can request full deletion at any time and receive confirmation.
+Source code and diffs are **never transmitted** on the scan path — SAST runs locally on the developer's machine (see the status banner at the top). The only things that reach the cloud are the code graph (node/edge pointers + short semantic labels, never source text) and findings, over TLS. There is no source-at-rest to encrypt because there is no source at rest. For pentest, no source is uploaded either; the worker uses the cloud graph + finding metadata for context.
 
 Run traces (every prompt, every tool call, every finding) are stored as append-only JSONL. Before persistence, traces are scrubbed of secret-shaped content using the same entropy analysis and regex patterns as the secret scanning pass. This scrubbing covers the trace channel — agent prompts, tool call inputs and outputs, and finding records. Three constraints bound what can appear in a trace:
 
-- **Pentest secrets stay in the VM.** The Firecracker microVM enforces that secrets injected at boot (`.env.sentinel`) are passed as environment variables, not echoed into the agent's prompt or tool outputs. The agent receives the app's *behavior* (HTTP responses, sanitizer output, coverage data) — not the raw secret values. A secret that never enters the agent's context cannot appear in the trace.
+- **Pentest secrets never reach the agent.** Real upstream credentials are held by the credential broker and injected per-request outside the agent's view; the target env carries only synthetic decoys and canaries. The agent receives the app's *behavior* (HTTP responses) — not raw secret values — and broker secrets are scrubbed from evidence and traces. A secret that never enters the agent's context cannot appear in the trace.
 - **`CONFIRMED_EXPLOIT` evidence is scrubbed before storage.** Behavioral proof artifacts (exfiltrated data, session tokens, admin responses) pass through the same scrubbing pipeline as trace content before being written to the findings table.
 - **Trace access is audited.** `sentinel runs show <id>` is a privileged operation — every access is logged with actor, timestamp, and run ID. Admins can read traces; trace access logs are visible to all admins and cannot be deleted.
 

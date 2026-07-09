@@ -324,6 +324,9 @@ class RepoPentestConfigResponse(BaseModel):
     boot: str | None = None
     healthcheck: str | None = None
     egress_allowlist: list[str] = Field(default_factory=list)
+    # Structured config: {sandbox, egress, secrets, canary, attack_safety}.
+    # The worker reads this to build the gVisor sandbox and its controls.
+    pentest_config: dict | None = None
 
 
 class RepoPentestConfigPatch(BaseModel):
@@ -333,6 +336,7 @@ class RepoPentestConfigPatch(BaseModel):
     boot: str | None = None
     healthcheck: str | None = None
     egress_allowlist: list[str] | None = None
+    pentest_config: dict | None = None
 
 
 class SuppressionReviewRequest(BaseModel):
