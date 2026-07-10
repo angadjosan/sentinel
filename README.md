@@ -2,10 +2,11 @@
 
 # Sentinel
 
-### An LLM-powered application security agent that finds real vulnerabilities and proves they're exploitable before it bothers you.
+### 🛡️ Sentinel is an agent harness that finds, exploits, and verifies vulnerabilities before you ship
+</div>
 
-Sentinel reasons about exploitability on your actual diff, verifies each finding by attacking a running copy of your app, and never lets a line of your source code leave your machine.
-
+Sentinel reasons about exploitability on your actual diff, verifies each finding by attacking a running copy of your app, and never lets a line of your source code leave your machine. We offer a complete, end-to-end managed AppSec solution — SAST, SCA, secret scanning, and whitebox pentesting — so you never have to worry about a security failure reaching production again.
+<div align="center">
 <br/>
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -26,7 +27,7 @@ Sentinel reasons about exploitability on your actual diff, verifies each finding
 
 ## Why Sentinel
 
-Most of the AppSec stack, whether that's SAST, SCA, dependency bots, or the newer "AI security" add-ons, is really answering one question: does this code match a known-bad pattern? That approach has two problems baked in. It can only catch vulnerabilities it has already catalogued, and it drowns you in noise. You get "47 vulnerabilities," three of which actually matter. In practice, more than 85% of findings from traditional scanners turn out to be false positives ([Endor Labs](https://www.endorlabs.com/)), because a signature has no way of knowing whether a bug is actually reachable from attacker-controlled input.
+Most of the AppSec stack, whether that's SAST, SCA, dependency bots, or the newer "AI security" add-ons, is really answering one question: does this code match a known-bad pattern? That approach has two problems baked in. It can only catch vulnerabilities it has already catalogued, and it drowns you in noise. You get "47 vulnerabilities," three of which actually matter.
 
 Sentinel takes a different approach. It reasons about exploitability in context.
 
