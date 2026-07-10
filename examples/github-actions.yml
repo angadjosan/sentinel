@@ -1,0 +1,52 @@
+# Sentinel Security Scan — GitHub Actions
+#
+# Drop this into .github/workflows/sentinel.yml in your repo.
+# It scans every pull request IN YOUR CI: your source code never leaves the
+# runner. Only finding metadata is emitted (SARIF, uploaded to GitHub code
+# scanning) and — optionally — POSTed to your Sentinel cloud via ingest-url.
+#
+# Required permissions:
+#   contents: read          (to check out and diff the code)
+#   security-events: write  (to upload SARIF to the Security tab)
+
+name: Sentinel Security Scan
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  sentinel:
+    name: Sentinel scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0 gives the action the base branch history it needs
+          # to compute an accurate PR diff.
+          fetch-depth: 0
+
+      # ── LLM-powered scan (Anthropic) ──────────────────────────────────
+      - name: Sentinel scan
+        uses: angadjosan/sentinel@v0.1.0
+        with:
+          provider: anthropic
+          model: claude-sonnet-4-6
+          api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          fail-on: high
+          # Optional: ship findings (not source) to your Sentinel cloud.
+          # ingest-url: ${{ secrets.SENTINEL_API_URL }}
+          # ingest-token: ${{ secrets.SENTINEL_TOKEN }}
+
+      # ── Zero-config alternative (no API key, no LLM) ──────────────────
+      # provider: mock runs the secrets + SCA (dependency) scanners only.
+      # Uncomment this and remove the step above to try Sentinel with no setup.
+      #
+      # - name: Sentinel scan (secrets + SCA only)
+      #   uses: angadjosan/sentinel@v0.1.0
+      #   with:
+      #     provider: mock
+      #     fail-on: high

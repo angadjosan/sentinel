@@ -1,0 +1,63 @@
+[project]
+name = "sentinel-worker"
+version = "0.2.0"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2,<3",
+  "sqlalchemy>=2,<3",
+  "greenlet>=3,<4",  # required by SQLAlchemy's async engine (not always auto-installed)
+  "aiosqlite>=0.20,<1",
+  "asyncpg>=0.29,<1",
+  "httpx>=0.27,<1",
+  "structlog>=25,<26",
+  "cryptography>=44,<45",
+  "python-jose[cryptography]>=3.3,<4",
+  "packaging>=24,<26",
+  "anthropic>=0.76,<1",
+  "openai>=2,<3",
+  "alembic>=1.14,<2",
+  "tree-sitter>=0.21,<1",
+  "tree-sitter-python>=0.21,<1",
+  "tree-sitter-javascript>=0.21,<1",
+  "tree-sitter-typescript>=0.21,<1",
+]
+
+[project.optional-dependencies]
+grammars = [
+  "tree-sitter-go>=0.21,<1",
+  "tree-sitter-rust>=0.21,<1",
+  "tree-sitter-java>=0.21,<1",
+  "tree-sitter-c>=0.21,<1",
+  "tree-sitter-cpp>=0.21,<1",
+  "tree-sitter-ruby>=0.21,<1",
+]
+test = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<1",
+  "hypothesis>=6,<7",
+]
+
+[project.scripts]
+sentinel-worker = "sentinel_worker.worker_main:main"
+sentinel-scan = "sentinel_worker.standalone:main"
+sentinel-local = "sentinel_worker.local_cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+# LLM prompt templates are loaded at runtime via Path(__file__).parent/"prompts".
+# Without this they're omitted from wheels, breaking non-editable installs
+# (e.g. `pip install ./worker` in the GitHub Action / CI).
+sentinel_worker = ["prompts/*.txt"]
+
+[tool.pytest.ini_options]
+# Put the worker root on sys.path so `from tests.conftest import ...` resolves
+# regardless of how pytest is invoked (bare `pytest` vs `python -m pytest`).
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]

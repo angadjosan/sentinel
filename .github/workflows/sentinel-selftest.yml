@@ -1,0 +1,26 @@
+# Dogfooding: Sentinel scans its own pull requests using the action in this repo.
+# Runs the CI-native scanner (no source leaves the runner). Uses provider: mock
+# (secrets + SCA only, no API key) so it works with zero configuration.
+name: Sentinel self-scan
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  sentinel:
+    name: Sentinel self-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sentinel scan (this repo's action)
+        uses: ./
+        with:
+          provider: mock
+          fail-on: none          # report only; never block the PR on the self-scan
+          upload-sarif: "false"   # private repo: code scanning needs Advanced Security
+          json: sentinel-findings.json
+      - name: Show findings
+        if: always()
+        run: cat sentinel-findings.json 2>/dev/null || echo "no findings file"

@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel
+      POSTGRES_DB: sentinel
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
+      SENTINEL_JWT_SECRET: "${SENTINEL_JWT_SECRET:-dev-secret-not-for-production}"
+      SENTINEL_DEV_MODE: "${SENTINEL_DEV_MODE:-1}"
+      SENTINEL_DASHBOARD_URL: "${SENTINEL_DASHBOARD_URL:-http://localhost:3000}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
+      GITHUB_OAUTH_CLIENT_SECRET: "${GITHUB_OAUTH_CLIENT_SECRET:-}"
+      RESEND_API_KEY: "${RESEND_API_KEY:-}"
+      EMAIL_FROM: "${EMAIL_FROM:-}"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      postgres:
+        condition: service_healthy
+  worker:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    command: ["sentinel-worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
+      SENTINEL_WORKER_ID: local-worker
+      SENTINEL_WORKER_POLL_INTERVAL: "1"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    environment:
+      NEXT_PUBLIC_SENTINEL_API_URL: http://localhost:8000
+      SENTINEL_API_INTERNAL_URL: http://api:8000
+      SENTINEL_DEV_MODE: "${SENTINEL_DEV_MODE:-1}"
+      SENTINEL_JWT_SECRET: "${SENTINEL_JWT_SECRET:-dev-secret-not-for-production}"
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
