@@ -1,0 +1,6 @@
+src/
+tests/
+dist/tests/
+build.ts
+tsconfig.json
+*.tsbuildinfo

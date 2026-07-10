@@ -1,0 +1,57 @@
+{
+  "apiUrl": "https://sentinel-api.vercel.app",
+  "repoName": "your-repo-name",
+  "provider": "local",
+  "model": "llama3.2",
+
+  "pentest_mode": "staging",
+  "staging_base_url": "https://staging.your-app.example",
+  "healthcheck_path": "/health",
+
+  "sandbox": {
+    "runtime": "gvisor",
+    "target": {
+      "image": "ghcr.io/your-org/your-app@sha256:REPLACE_WITH_DIGEST",
+      "entrypoint": ["node", "server.js"]
+    },
+    "healthcheck": "curl -sf http://localhost:3000/health",
+    "resources": { "vcpus": 1, "memory_mb": 2048, "pids_max": 256, "wall_clock_seconds": 1800 }
+  },
+
+  "egress": {
+    "default": "deny",
+    "allow": ["registry.npmjs.org", "pypi.org"],
+    "proxy": { "mode": "token_scoped" }
+  },
+
+  "secrets": {
+    "synthetic_env": ".env.sentinel",
+    "broker": {
+      "enabled": true,
+      "upstreams": [
+        { "host": "api.stripe.com", "credential_ref": "stripe_test_key" }
+      ]
+    }
+  },
+
+  "canary": {
+    "enabled": true,
+    "provider": "canarytokens",
+    "count": 3,
+    "seed_into": ["env"]
+  },
+
+  "attack_safety": {
+    "scope": ["/api/"],
+    "exclude_paths": ["/logout", "/admin/delete"],
+    "exclude_methods": ["DELETE"],
+    "max_requests": 500,
+    "max_attack_duration_seconds": 600,
+    "auth": {
+      "method": "POST",
+      "path": "/login",
+      "body": { "username": "$SENTINEL_USER", "password": "$SENTINEL_PASS" },
+      "logged_in_indicator": "dashboard"
+    }
+  }
+}
