@@ -17,13 +17,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
 from .local_engine import (
     GraphDelta,
+    push_pentest_result,
     push_results_to_cloud,
     run_local_init,
+    run_local_pentest,
     run_local_plan_review,
     run_local_source_scan,
 )
@@ -79,9 +82,31 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_llm_args(plan)
     _add_common_cloud_args(plan)
 
-    # NOTE: the `pentest` subcommand was removed (AUDIT.md §3 D4). Pentest is no
-    # longer run on this machine — `sentinel pentest` in the Node CLI enqueues a
-    # cloud pentest (POST /pentest) and the cloud worker executes it.
+    # Pentest now runs the FULL hardened sandbox stack on THIS machine
+    # (LOCAL_PENTEST_REFACTOR_PLAN.md W3). The finding still lives in the cloud,
+    # so `--api-url` is required to fetch it; the outcome is pushed back via
+    # POST /findings/{id}/confirm. Source, payloads, and secrets stay local.
+    pentest = sub.add_parser("pentest", help="Confirm a finding by attacking the app booted locally under gVisor.")
+    pentest.add_argument("--repo-name", required=True)
+    pentest.add_argument("--repo-dir", default=".")
+    pentest.add_argument("--finding-id", required=True)
+    pentest.add_argument("--repo-id", help="Cloud Repo id — enables the structured pentest-config fetch + stable naming.")
+    pentest.add_argument("--sanitizer-output", default="")
+    pentest.add_argument("--behavioral-proof", help="Behavioral proof kind (e.g. an oracle hint).")
+    pentest.add_argument("--proof-detail", default="")
+    pentest.add_argument("--boot", help="Boot command for the target app (argv-style).")
+    pentest.add_argument("--healthcheck", help="Healthcheck command/URL for the target app.")
+    pentest.add_argument("--egress-allowlist", action="append", default=[], help="Repeatable egress allowlist entry.")
+    pentest.add_argument(
+        "--no-sandbox",
+        action="store_true",
+        help="Boot the target WITHOUT a Docker/gVisor container sandbox (reduced isolation, no egress proxy). "
+        "By default the sandbox is on and auto-degrades gVisor -> Docker -> subprocess if not found.",
+    )
+    _add_common_llm_args(pentest)
+    # --api-url is required here (unlike source/plan): the finding lives in the cloud.
+    pentest.add_argument("--api-url", required=True, help="Sentinel cloud API base URL — the finding + config live there.")
+    pentest.add_argument("--api-token", help="Bearer token for --api-url.")
 
     return p
 
@@ -104,6 +129,20 @@ def _push_or_warn(**kwargs) -> dict:
         return push_results_to_cloud(**kwargs)
     except Exception as exc:  # noqa: BLE001 — a push failure must not discard local results
         sys.stderr.write(f"sentinel: WARNING failed to push results to the cloud: {exc}\n")
+        return {"error": str(exc)}
+
+
+def _push_pentest_or_warn(**kwargs) -> dict:
+    """Push a pentest outcome, degrading gracefully on failure.
+
+    A pentest that ran to completion locally must still report its real outcome
+    (and the local trace path) even if the cloud confirm write fails — the local
+    result is valid on its own. Mirrors `_push_or_warn`.
+    """
+    try:
+        return push_pentest_result(**kwargs)
+    except Exception as exc:  # noqa: BLE001 — a push failure must not discard the local outcome
+        sys.stderr.write(f"sentinel: WARNING failed to push pentest result to the cloud: {exc}\n")
         return {"error": str(exc)}
 
 
@@ -236,6 +275,55 @@ def run(argv: list[str] | None = None) -> int:
             )
         )
         return 1 if scan.findings else 0
+
+    if args.command == "pentest":
+        # Feature flag: --no-sandbox disables the Docker/gVisor container sandbox
+        # for this run (detect_capabilities reads SENTINEL_SANDBOX_RUNTIME). Without
+        # it the sandbox is on by default and auto-degrades if Docker/gVisor is
+        # absent — see sandbox_preflight's ladder.
+        if getattr(args, "no_sandbox", False):
+            os.environ["SENTINEL_SANDBOX_RUNTIME"] = "off"
+        result = asyncio.run(
+            run_local_pentest(
+                repo_name=args.repo_name,
+                repo_dir=args.repo_dir,
+                finding_id=args.finding_id,
+                llm=llm,
+                api_url=args.api_url,
+                api_token=args.api_token,
+                repo_id=args.repo_id,
+                sanitizer_output=args.sanitizer_output,
+                behavioral_proof=args.behavioral_proof,
+                proof_detail=args.proof_detail,
+                boot=args.boot,
+                healthcheck=args.healthcheck,
+                egress_allowlist=args.egress_allowlist or None,
+            )
+        )
+        push_response = _push_pentest_or_warn(
+            api_url=args.api_url,
+            token=args.api_token,
+            result=result,
+        )
+        verb = "CONFIRMED" if result.confirmed else "not confirmed"
+        sys.stderr.write(f"sentinel: pentest {verb} — finding {result.finding_id} status={result.status}\n")
+        if result.local_trace_path:
+            sys.stderr.write(f"sentinel: full trace saved locally -> {result.local_trace_path}\n")
+        print(
+            json.dumps(
+                {
+                    "finding_id": result.finding_id,
+                    "confirmed": result.confirmed,
+                    "status": result.status,
+                    "evidence": result.evidence,
+                    "payloads": result.payloads,
+                    "local_run_id": result.local_run_id,
+                    "local_trace_path": result.local_trace_path,
+                    "push": push_response,
+                }
+            )
+        )
+        return 0
 
     return 2
 

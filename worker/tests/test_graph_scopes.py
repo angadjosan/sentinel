@@ -82,7 +82,7 @@ async def test_branch_creation_snapshots_base(db):
     """Creating a branch graph captures an immutable base snapshot of main."""
     from sqlalchemy import select
 
-    from sentinel_worker.models import Graph, Node
+    from sentinel_worker.models import Node
 
     main = await get_or_create_graph(db, "acme/repo")
     db.add(Node(id="n:1", graph_id=main.id, kind="FUNCTION", name="f", label="original"))
@@ -106,7 +106,6 @@ async def test_base_snapshot_is_excluded_from_graph_list_shape(db):
     await get_or_create_graph(db, "acme/repo", kind="branch", branch_name="feature/x")
     from sqlalchemy import select
 
-    from sentinel_worker.models import Graph
 
     kinds = {g.kind for g in await db.scalars(select(Graph))}
     assert "base" in kinds  # snapshot exists

@@ -186,6 +186,55 @@ export async function runLocalPlanReview(
   return { result: parseJsonStdout<LocalPlanResult>(stdout, "sentinel plan"), exitCode };
 }
 
-// NOTE: local pentest execution was removed (AUDIT.md §3 D4). `sentinel pentest`
-// now enqueues a cloud pentest (POST /pentest) and polls the run — the cloud
-// worker owns pentest execution (§1 invariant 4). See cli/src/index.ts.
+export interface LocalPentestResult {
+  finding_id: string;
+  confirmed: boolean;
+  status: string;
+  evidence?: string | null;
+  payloads: string[];
+  local_run_id?: string;
+  local_trace_path?: string;
+  push: Record<string, unknown>;
+}
+
+// Run the FULL hardened pentest stack (gVisor sandbox + egress proxy + canary +
+// broker + attack-safety + oracle) on THIS machine, mirroring runLocalSourceScan.
+// The finding lives in the cloud, so --api-url is required; the outcome is pushed
+// back by the Python engine via POST /findings/{id}/confirm. Source, payloads,
+// and boot secrets never leave this process.
+export async function runLocalPentest(
+  opts: CommonEngineOpts & {
+    findingId: string;
+    repoId?: string;
+    sanitizerOutput?: string;
+    behavioralProof?: string;
+    proofDetail?: string;
+    boot?: string;
+    healthcheck?: string;
+    egressAllowlist?: string[];
+    noSandbox?: boolean;
+  }
+): Promise<LocalPentestResult> {
+  const args = [
+    "pentest",
+    "--repo-name", opts.config.repoName,
+    "--repo-dir", opts.repoDir,
+    "--finding-id", opts.findingId,
+    "--provider", opts.config.provider,
+    "--model", opts.config.model,
+    "--api-url", opts.config.apiUrl,
+  ];
+  if (opts.repoId) args.push("--repo-id", opts.repoId);
+  if (opts.sanitizerOutput) args.push("--sanitizer-output", opts.sanitizerOutput);
+  if (opts.behavioralProof) args.push("--behavioral-proof", opts.behavioralProof);
+  if (opts.proofDetail) args.push("--proof-detail", opts.proofDetail);
+  if (opts.boot) args.push("--boot", opts.boot);
+  if (opts.healthcheck) args.push("--healthcheck", opts.healthcheck);
+  for (const entry of opts.egressAllowlist ?? []) args.push("--egress-allowlist", entry);
+  if (opts.noSandbox) args.push("--no-sandbox");
+  if (opts.config.api_endpoint) args.push("--llm-endpoint", opts.config.api_endpoint);
+  if (opts.apiToken) args.push("--api-token", opts.apiToken);
+  const { stdout, exitCode, stderr } = await runLocalEngine(args, { llmApiKey: opts.llmApiKey });
+  if (exitCode !== 0) throw new Error(`local pentest failed (exit ${exitCode}): ${stderr.slice(-2000)}`);
+  return parseJsonStdout<LocalPentestResult>(stdout, "sentinel pentest");
+}

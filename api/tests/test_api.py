@@ -122,59 +122,11 @@ def test_findings_can_filter_by_status_and_severity():
     assert critical_rows.json() == []
 
 
-def test_pentest_task_claim_complete_and_cancel():
-    """Generic task-queue lifecycle (claim/complete/fail/cancel), exercised via
-    /pentest enqueue now that /source/enqueue is gone — the task machinery
-    itself is not scan-specific."""
-    repo = f"queue-{uuid4().hex}"
-    with TestClient(app) as client:
-        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli")
-        finding_id = ingested["finding_ids"][0]
-
-        enqueued = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        assert enqueued.status_code == 200
-        task_id = enqueued.json()["task_id"]
-        run_id = enqueued.json()["run"]["id"]
-
-        claimed = client.post("/tasks/claim?worker_id=test-worker")
-        assert claimed.status_code == 200
-        assert claimed.json()["id"] == task_id
-        assert claimed.json()["status"] == "claimed"
-
-        completed = client.post(f"/tasks/{task_id}/complete", json={"trace": "worker done"})
-        assert completed.status_code == 200
-        assert completed.json()["status"] == "completed"
-        run = client.get(f"/runs/{run_id}")
-        assert run.status_code == 200
-        assert run.json()["status"] == "completed"
-
-        second = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        second_task = second.json()["task_id"]
-        cancelled = client.post(f"/tasks/{second_task}/cancel")
-        assert cancelled.status_code == 200
-        assert cancelled.json()["status"] == "cancelled"
-
-        third = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        third_task = third.json()["task_id"]
-        third_run = third.json()["run"]["id"]
-        cancelled_run = client.delete(f"/runs/{third_run}")
-        assert cancelled_run.status_code == 200
-        assert cancelled_run.json()["status"] == "cancelled"
-        claimed_after_cancel = client.post("/tasks/claim?worker_id=test-worker")
-        assert claimed_after_cancel.status_code == 200
-        assert claimed_after_cancel.json() is None
-        cancelled_task = client.post(f"/tasks/{third_task}/complete", json={"trace": "late completion"})
-        assert cancelled_task.status_code == 200
-        assert cancelled_task.json()["status"] == "cancelled"
-        cancelled_trace = client.get(f"/runs/{third_run}/trace")
-        assert "run.cancelled" in cancelled_trace.text
-        assert "late completion" not in cancelled_trace.text
-
-        fourth = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        fourth_run = fourth.json()["run"]["id"]
-        delete_cancelled = client.delete(f"/runs/{fourth_run}")
-        assert delete_cancelled.status_code == 200
-        assert delete_cancelled.json()["status"] == "cancelled"
+# NOTE (W4): test_pentest_task_claim_complete_and_cancel was removed. It drove the
+# generic task-queue lifecycle (/tasks/claim|complete|cancel) via the now-deleted
+# POST /pentest enqueue. Pentest runs entirely on the developer's machine and the
+# backend no longer enqueues any task, so there is no API path to seed the queue.
+# The /tasks/* endpoints are dead cloud-worker surface removed with the daemon in W5.
 
 
 def test_analytics_endpoints_return_operational_metrics():
@@ -197,214 +149,49 @@ def test_analytics_endpoints_return_operational_metrics():
     assert "confirmed" in confirmation.json()
 
 
-def test_pentest_enqueue_returns_queued_run_and_task():
-    """Enqueue-only contract: POST /pentest returns a *queued* pentest run + task.
-
-    Renamed from the former ``*writes_confirmed_edge`` (AUDIT.md §6 W4 P3.2 /
-    Gate 3): that name lied — the body only ever asserted ``status == queued``
-    and never confirmed anything. Confirmation is proven end-to-end (through the
-    worker + a mock staging app) in
-    ``test_pentest_e2e_confirms_finding_and_writes_exploit_edge`` below.
-    """
-    repo = f"pentest-{uuid4().hex}"
-    with TestClient(app) as client:
-        seed_finding(client, repo_name=repo, vuln_type="sqli", severity="high")
-
-        enqueued = client.post(
-            "/pentest",
-            json={"repo_name": repo},
-        )
-        assert enqueued.status_code == 200
-        body = enqueued.json()
-        assert body["run"]["status"] == "queued"
-        assert body["run"]["kind"] == "pentest"
-        assert body["task_id"]
-
-        runs = client.get("/runs")
-    pentest_runs = [run for run in runs.json() if run["kind"] == "pentest"]
-    assert pentest_runs
+# NOTE (W4): the cloud-enqueue and cloud-worker E2E pentest tests were removed:
+#   - test_pentest_enqueue_returns_queued_run_and_task
+#   - test_pentest_e2e_confirms_finding_and_writes_exploit_edge
+#   - test_pentest_e2e_clean_target_marks_not_reproducible
+#   - test_pentest_description_selects_matching_open_target
+# plus their _set_repo_staging_url / _patch_httpx_transport helpers.
+# They all drove POST /pentest -> cloud worker, which no longer exists: pentest
+# runs entirely on the developer's machine (full gVisor stack) and pushes its
+# outcome to POST /findings/{id}/confirm (covered by test_pentest_confirm.py).
+# Natural-language target resolution moved client-side to the CLI, ranking over
+# GET /findings — test_findings_exposes_fields_for_client_target_resolution below
+# pins the fields that resolution depends on.
 
 
-def _set_repo_staging_url(repo_name: str, base_url: str, healthcheck_path: str = "/health") -> None:
-    """Set staging pentest config on the repo directly in the test DB.
-
-    The runner reads `repo.staging_base_url` to decide where to dispatch HTTP
-    payloads; the /pentest enqueue payload doesn't carry it. Uses the same
-    patched SessionLocal the inline task runner uses."""
-    import asyncio
-    from sqlalchemy import select
-    from sentinel_api.deps import SessionLocal
-    from sentinel_worker.models import Repo
-
-    async def _run() -> None:
-        async with SessionLocal() as session:
-            async with session.begin():
-                repo = await session.scalar(select(Repo).where(Repo.name == repo_name))
-                assert repo is not None, f"repo {repo_name} should exist after seed_finding"
-                repo.pentest_mode = "staging"
-                repo.staging_base_url = base_url
-                repo.healthcheck_path = healthcheck_path
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
-
-def _patch_httpx_transport(monkeypatch, handler):
-    """Route httpx.AsyncClients created without an explicit transport through a
-    MockTransport so the worker's real HTTP dispatch hits our fake staging app."""
-    import httpx
-
-    real_init = httpx.AsyncClient.__init__
-
-    def patched_init(self, *args, **kwargs):
-        kwargs.setdefault("transport", httpx.MockTransport(handler))
-        real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
-
-
-def test_pentest_e2e_confirms_finding_and_writes_exploit_edge(monkeypatch):
-    """True end-to-end (AUDIT.md §6 W4 P3.1/P3.2, Gate 3):
-
-    POST /pentest -> worker claims the task -> real HTTP dispatch hits a mock
-    staging app that leaks a SQL error on the injection payload -> the oracle
-    confirms on the *target's own response* (not the agent's word, §1 inv. 5) ->
-    finding is marked confirmed and a CONFIRMED_EXPLOIT edge is written.
-
-    This is the test that FAILS if the runner's `pentest` handler is deleted:
-    the unknown kind would mark the task failed, the finding would stay open, and
-    both the status and the edge assertions below would blow up.
-    """
-    import httpx
-    from .conftest import process_tasks, NoFindingLLM
-
-    def staging_app(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":  # healthcheck
-            return httpx.Response(200, text="ok")
-        body = request.content.decode(errors="replace")
-        if "OR '1'='1" in body or "OR '1'='1" in str(request.url):
-            # Target leaks a DB error the oracle recognizes as a SQLi proof marker.
-            return httpx.Response(500, text="psycopg2.errors.SyntaxError: unclosed quotation mark near ''")
-        return httpx.Response(200, text="no results")
-
-    _patch_httpx_transport(monkeypatch, staging_app)
-
-    repo = f"pentest-e2e-{uuid4().hex}"
-    sink_id = "fn:app/db.py:query_user"
-    entry = {"id": "route:search", "kind": "ROUTE", "name": "search", "file": "app/routes.py", "is_entry_point": True}
-    with TestClient(app) as client:
-        client.post(
-            "/graph/upsert",
-            json={
-                "repo_name": repo,
-                "graph_kind": "main",
-                "nodes": [entry, {"id": sink_id, "kind": "FUNCTION", "name": "query_user", "file": "app/db.py", "is_sink": True}],
-                "edges": [],
-            },
-        )
-        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli", node_id=sink_id, file="app/db.py")
-        finding_id = ingested["finding_ids"][0]
-
-        _set_repo_staging_url(repo, "http://staging.example.test", "/health")
-
-        enqueued = client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        assert enqueued.status_code == 200
-        assert enqueued.json()["run"]["status"] == "queued"
-
-        # Run the worker inline: real handler + real HTTP dispatch (mocked target).
-        process_tasks(1, llm=NoFindingLLM())
-
-        detail = client.get(f"/findings/{finding_id}")
-        assert detail.status_code == 200, detail.text
-        assert detail.json()["status"] == "confirmed", detail.json()
-        assert detail.json()["confirmed"] is True
-
-        graph = client.get(f"/findings/{finding_id}/graph")
-        assert graph.status_code == 200
-        edge_kinds = {e["kind"] for e in graph.json()["edges"]}
-        assert "CONFIRMED_EXPLOIT" in edge_kinds, graph.json()
-
-        # A completed pentest run with an HTTP-dispatch trace must exist.
-        runs = client.get("/runs")
-        pentest_runs = [r for r in runs.json() if r["kind"] == "pentest"]
-        assert pentest_runs
-        assert any(r["status"] == "completed" for r in pentest_runs)
-
-
-def test_pentest_e2e_clean_target_marks_not_reproducible(monkeypatch):
-    """Negative half of the E2E: a staging app that never leaks proof must leave
-    the finding NOT reproducible — the oracle refuses to confirm without the
-    target's own evidence (AUDIT.md §1 invariant 5)."""
-    import httpx
-    from .conftest import process_tasks, NoFindingLLM
-
-    def clean_app(request: httpx.Request) -> httpx.Response:
-        if request.method == "GET":
-            return httpx.Response(200, text="ok")
-        return httpx.Response(200, text="0 results found")
-
-    _patch_httpx_transport(monkeypatch, clean_app)
-
-    repo = f"pentest-clean-{uuid4().hex}"
-    with TestClient(app) as client:
-        ingested = seed_finding(client, repo_name=repo, vuln_type="sqli")
-        finding_id = ingested["finding_ids"][0]
-        _set_repo_staging_url(repo, "http://staging.example.test", "/health")
-
-        client.post("/pentest", json={"repo_name": repo, "finding_id": finding_id})
-        process_tasks(1, llm=NoFindingLLM())
-
-        detail = client.get(f"/findings/{finding_id}")
-        assert detail.status_code == 200
-        assert detail.json()["status"] == "not_reproducible", detail.json()
-        assert detail.json()["confirmed"] is False
-
-
-def test_pentest_description_selects_matching_open_target():
-    repo = f"pentest-description-{uuid4().hex}"
+def test_findings_exposes_fields_for_client_target_resolution():
+    """GET /findings must expose the fields the CLI ranks over to resolve a
+    natural-language pentest target client-side (vuln_type/title/severity/status/
+    id/file) — the server no longer selects a target."""
+    repo = f"pentest-resolve-{uuid4().hex}"
     with TestClient(app) as client:
         seed_finding(
-            client, repo_name=repo, vuln_type="sqli", title="SQL Injection",
+            client, repo_name=repo, vuln_type="sqli", title="SQL Injection", severity="high",
             description="Taint path confirmed from user-controlled input to sqli sink.",
         )
         seed_finding(
-            client, repo_name=repo, vuln_type="cmdi", title="Command Injection",
+            client, repo_name=repo, vuln_type="cmdi", title="Command Injection", severity="critical",
+            file="convert.js",
             description="Command injection via the convert endpoint using unsanitized input.",
         )
 
         all_findings = client.get(f"/findings?repo_name={repo}")
         assert all_findings.status_code == 200
         findings_list = all_findings.json()
-        cmdi_findings = [f for f in findings_list if f["vuln_type"] == "cmdi"]
-        sqli_findings = [f for f in findings_list if f["vuln_type"] == "sqli"]
-        assert cmdi_findings
-        assert sqli_findings
+        assert len(findings_list) == 2
+        for finding in findings_list:
+            for field in ("id", "vuln_type", "title", "severity", "status", "file"):
+                assert field in finding, f"{field} missing from GET /findings response"
 
-        selected = client.post(
-            "/pentest",
-            json={
-                "repo_name": repo,
-                "description": "confirm the command injection convert endpoint",
-                "behavioral_proof": "command_executed",
-                "proof_detail": "wrote marker file through convert payload",
-            },
-        )
-
-    assert selected.status_code == 200
-    assert selected.json()["run"]["status"] == "queued"
-    assert selected.json()["task_id"]
-
-
-# NOTE (AUDIT.md §6 W4 P3.2): the former `test_pentest_rejects_incomplete_firecracker_config`
-# was deleted. It was named "rejects ... config" but only asserted a 200 on
-# enqueue — a fake-green test for a `firecracker` field that is not part of the
-# target pentest config (§3 D1 supports `staging` and `local_worker` modes only).
-# Config validation now lives in PATCH /repos/{id}/pentest-config (see
-# api/tests/test_repos_pentest_config.py / W1) and in the worker, both of which
-# assert real reject behavior.
+        cmdi = next(f for f in findings_list if f["vuln_type"] == "cmdi")
+        assert cmdi["title"] == "Command Injection"
+        assert cmdi["severity"] == "critical"
+        assert cmdi["status"] == "open"
+        assert cmdi["file"] == "convert.js"
 
 
 def test_run_events_streams_trace_and_completion():

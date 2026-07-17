@@ -19,3 +19,4 @@ cli/binaries/
 .env*
 build/
 .playwright-mcp/
+context/

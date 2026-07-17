@@ -53,10 +53,36 @@ async def test_detect_falls_back_to_runc_without_runsc():
 
 
 @pytest.mark.asyncio
-async def test_detect_hard_fails_without_docker():
+async def test_detect_auto_degrades_to_subprocess_without_docker():
+    """auto mode (default): Docker absent is NOT fatal — degrade to the
+    container-less subprocess rung with a warning, so a machine without Docker
+    can still run pentests."""
+    ex = FakeExec([("docker version", _fail())])
+    caps = await detect_capabilities(ex, environ={})
+    assert caps.runtime == "subprocess"
+    assert caps.docker is False
+    assert caps.sandboxed is False
+    assert caps.hard_egress is False
+
+
+@pytest.mark.asyncio
+async def test_detect_explicit_runc_still_hard_fails_without_docker():
+    """Opting out of the graceful ladder: an explicit runtime request that can't
+    be met still raises."""
     ex = FakeExec([("docker version", _fail())])
     with pytest.raises(SandboxUnavailable):
-        await detect_capabilities(ex, environ={})
+        await detect_capabilities(ex, environ={"SENTINEL_SANDBOX_RUNTIME": "runc"})
+
+
+@pytest.mark.asyncio
+async def test_detect_off_flag_disables_sandbox_without_probing():
+    """The --no-sandbox flag (SENTINEL_SANDBOX_RUNTIME=off) returns the disabled
+    rung and never even probes Docker."""
+    ex = FakeExec([("docker version", _ok("27.0"))])
+    caps = await detect_capabilities(ex, environ={"SENTINEL_SANDBOX_RUNTIME": "off"})
+    assert caps.runtime == "none"
+    assert caps.sandboxed is False
+    assert ex.calls == []  # no probing at all
 
 
 @pytest.mark.asyncio

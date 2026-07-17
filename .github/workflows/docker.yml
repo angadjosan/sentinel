@@ -44,52 +44,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  build-worker:
-    name: Build worker image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
-        id: meta
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/worker
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-      # Smoke-build locally first and verify the sandbox tooling is present, so a
-      # broken image (missing docker/runsc) fails CI before it is pushed.
-      - name: Build worker image (smoke)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: worker/Dockerfile
-          load: true
-          tags: sentinel-worker:smoke
-          cache-from: type=gha
-      - name: Smoke-check sandbox tooling (docker + runsc)
-        run: docker run --rm --entrypoint sh sentinel-worker:smoke -c "docker --version && runsc --version"
-      - name: Build and push worker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: worker/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   build-dashboard:
     name: Build dashboard image
     runs-on: ubuntu-latest

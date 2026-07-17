@@ -6,13 +6,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-TASKS_CHANNEL = "tasks_channel"
 RUN_CHANNEL_PREFIX = "run_"
 CHANNEL_RE = re.compile(r"[^A-Za-z0-9_]")
-
-
-async def notify_task_available(db: AsyncSession, task_id: str) -> None:
-    await notify(db, TASKS_CHANNEL, task_id)
 
 
 async def notify_run_event(db: AsyncSession, run_id: str, payload: str) -> None:

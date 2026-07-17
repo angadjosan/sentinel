@@ -38,8 +38,6 @@ async def apply_migrations(engine: AsyncEngine) -> list[str]:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN api_endpoint TEXT"))
             if "source_retention_days" not in columns:
                 await conn.execute(text("ALTER TABLE accounts ADD COLUMN source_retention_days INTEGER DEFAULT 365"))
-            if "pentest_api_key" not in columns:  # 0004
-                await conn.execute(text("ALTER TABLE accounts ADD COLUMN pentest_api_key TEXT"))
             user_columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(users)"))}
             if "name" not in user_columns:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN name TEXT"))

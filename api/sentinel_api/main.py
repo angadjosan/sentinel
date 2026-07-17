@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import time
@@ -17,13 +16,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, Task, TokenSpendByComponent, TraceAccessLog, User, now
+from sentinel_worker.models import Account, DeviceAuthSession, Edge, Finding, Graph, Node, Repo, Run, SuppressionAudit, TokenSpendByComponent, TraceAccessLog, User, now
 from sentinel_worker.graph_merge import gc_sessions, merge_graph, promote_session_to_branch
 from sentinel_worker.graph_query import LayeredGraphQuery
 from sentinel_worker.payload_guard import SourcePayloadError, assert_no_source_markers
 from sentinel_worker.scan import get_or_create_graph, trace_event
 from sentinel_worker.security import compute_fingerprint
-from sentinel_worker.task_queue import cancel_run_tasks, cancel_task, claim_next_task, complete_task, enqueue_task, fail_task
+from sentinel_worker.task_queue import cancel_run_tasks
 from sentinel_worker.trace_store import read_run_trace
 
 from .auth import Principal, create_token, current_principal, require_admin
@@ -39,7 +38,6 @@ from .schemas import (
     DeviceStartResponse,
     DeviceTokenResponse,
     EdgeResponse,
-    EnqueueResponse,
     FindingResponse,
     GraphResponse,
     GraphMergeRequest,
@@ -54,15 +52,11 @@ from .schemas import (
     IngestResponse,
     NodeResponse,
     PentestConfirmRequest,
-    PentestRequest,
     RemediationResponse,
     RunResponse,
     SuppressRequest,
     SuppressionAuditResponse,
     SuppressionReviewRequest,
-    TaskCompleteRequest,
-    TaskFailRequest,
-    TaskResponse,
     TokenBudgetRequest,
     TraceAccessLogResponse,
 )
@@ -223,24 +217,12 @@ async def finding_response(db: AsyncSession, finding: Finding) -> FindingRespons
         confirmed=finding.confirmed,
         evidence=finding.evidence,
         fingerprint=finding.fingerprint,
+        node_id=finding.node_id,
         file=node.file if node else None,
         line_start=node.line_start if node else None,
         line_end=node.line_end if node else None,
         created_at=finding.created_at.isoformat(),
         updated_at=finding.updated_at.isoformat(),
-    )
-
-
-def task_response(task: Task) -> TaskResponse:
-    return TaskResponse(
-        id=task.id,
-        run_id=task.run_id,
-        kind=task.kind,
-        status=task.status,
-        payload=json.loads(task.payload),
-        attempts=task.attempts,
-        claimed_by=task.claimed_by,
-        error=task.error,
     )
 
 
@@ -441,39 +423,6 @@ async def patch_account_config(payload: AccountConfigPatch, db: AsyncSession = D
 # by pentest tasks.
 
 
-@app.post("/tasks/claim", response_model=TaskResponse | None)
-async def claim_task(worker_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse | None:
-    claimed = await claim_next_task(db, worker_id=worker_id)
-    return task_response(claimed.task) if claimed else None
-
-
-@app.post("/tasks/{task_id}/complete", response_model=TaskResponse)
-async def complete_task_endpoint(task_id: str, payload: TaskCompleteRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse:
-    try:
-        task = await complete_task(db, task_id=task_id, trace=payload.trace)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return task_response(task)
-
-
-@app.post("/tasks/{task_id}/fail", response_model=TaskResponse)
-async def fail_task_endpoint(task_id: str, payload: TaskFailRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(require_admin)) -> TaskResponse:
-    try:
-        task = await fail_task(db, task_id=task_id, error=payload.error)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return task_response(task)
-
-
-@app.post("/tasks/{task_id}/cancel", response_model=TaskResponse)
-async def cancel_task_endpoint(task_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> TaskResponse:
-    try:
-        task = await cancel_task(db, task_id=task_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return task_response(task)
-
-
 @app.post("/findings/ingest", response_model=IngestResponse)
 async def ingest_findings(payload: IngestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> IngestResponse:
     """Ingest pre-computed findings from a CI-native scan.
@@ -637,19 +586,23 @@ async def confirm_pentest_result(
     finding_id: str,
     payload: PentestConfirmRequest,
     db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(current_principal),
 ) -> FindingResponse:
-    """DEPRECATED (AUDIT.md §3 D6): admin-only during migration.
+    """PRIMARY write path for pentest results.
 
-    Confirmation is now written directly by the cloud worker inside
-    `run_pentest` (oracle-gated on HTTP/sanitizer proof, AUDIT.md §1 invariant
-    5). This public endpoint is retained admin-only as a manual override during
-    migration and must not be called by the CLI. It never receives source,
-    diffs, or secrets — only outcome + evidence text + node pointers.
+    The pentest pipeline now runs entirely on the developer's local machine
+    (gVisor sandbox, egress proxy, canary, oracle) against a throwaway DB. After
+    it runs, the local engine POSTs the outcome here — the cloud backend is a
+    pure results store. Any authenticated principal of the finding's own account
+    may confirm (tenant-scoped via `_finding_for_principal`); a different account
+    still gets a 404. It never receives source, diffs, payloads, or secrets —
+    only outcome + evidence text + node pointers.
     """
     finding = await _finding_for_principal(db, finding_id, principal)
     if finding is None:
         raise HTTPException(status_code=404, detail="finding not found")
+    if principal.role == "readonly":
+        raise HTTPException(status_code=403, detail="readonly users cannot confirm findings")
 
     if payload.confirmed:
         finding.confirmed = True
@@ -810,31 +763,11 @@ async def finding_remediation(finding_id: str, db: AsyncSession = Depends(get_db
     )
 
 
-@app.post("/pentest", response_model=EnqueueResponse)
-async def pentest(payload: PentestRequest, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> EnqueueResponse:
-    finding = await _finding_for_principal(db, payload.finding_id, principal) if payload.finding_id else await _select_pentest_target(db, payload.repo_name, principal, payload.description)
-    if finding is None:
-        raise HTTPException(status_code=404, detail="finding not found")
-    task = await enqueue_task(
-        db,
-        repo_name=payload.repo_name or "",
-        kind="pentest",
-        payload={
-            "finding_id": finding.id,
-            "sanitizer_output": payload.sanitizer_output,
-            "behavioral_proof": payload.behavioral_proof,
-            "proof_detail": payload.proof_detail,
-            "boot": payload.boot,
-            "healthcheck": payload.healthcheck,
-            "egress_allowlist": payload.egress_allowlist,
-            "pentest_config": json.dumps(payload.pentest_config, sort_keys=True) if payload.pentest_config else None,
-        },
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await run_response(db, run))
+# NOTE: POST /pentest was removed. Pentest now runs entirely on the developer's
+# local machine (full gVisor sandbox stack); the local engine POSTs the outcome
+# to POST /findings/{id}/confirm. The backend no longer enqueues pentest tasks —
+# it is a pure results store. Natural-language target resolution is done
+# client-side by the CLI ranking over GET /findings.
 
 
 @app.get("/runs", response_model=list[RunResponse])
@@ -1372,46 +1305,10 @@ async def _check_token_budget(db: AsyncSession, principal: Principal) -> None:
         )
 
 
-async def _select_pentest_target(db: AsyncSession, repo_name: str, principal: Principal, description: str | None = None) -> Finding | None:
-    stmt = (
-        select(Finding)
-        .join(Graph, Finding.graph_id == Graph.id)
-        .join(Repo, Graph.repo_id == Repo.id)
-        .where(Repo.name == repo_name)
-        .where(Finding.status == "open")
-    )
-    if not _skip_tenant_filter(principal):
-        stmt = stmt.where(Graph.account_id == principal.account_id)
-    findings = list(await db.scalars(stmt))
-    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-    target_terms = _pentest_target_terms(description)
-    if target_terms:
-        findings = [finding for finding in findings if _pentest_target_score(finding, target_terms) > 0]
-        findings.sort(key=lambda finding: (-_pentest_target_score(finding, target_terms), severity_rank.get(finding.severity, 5), finding.created_at))
-    else:
-        findings.sort(key=lambda finding: (severity_rank.get(finding.severity, 5), finding.created_at))
-    return findings[0] if findings else None
-
-
-def _pentest_target_terms(description: str | None) -> list[str]:
-    if not description:
-        return []
-    return [term for term in "".join(char.lower() if char.isalnum() else " " for char in description).split() if len(term) > 2]
-
-
-def _pentest_target_score(finding: Finding, terms: list[str]) -> int:
-    haystack = " ".join(
-        [
-            finding.id,
-            finding.vuln_type,
-            finding.severity,
-            finding.title,
-            finding.description,
-            finding.remediation,
-            finding.evidence or "",
-        ]
-    ).lower()
-    return sum(1 for term in terms if term in haystack)
+# NOTE: _select_pentest_target / _pentest_target_terms / _pentest_target_score
+# were removed with POST /pentest. Natural-language pentest target resolution now
+# happens client-side in the CLI, ranking over GET /findings — the server no
+# longer selects a pentest target.
 
 
 async def _finding_for_principal(db: AsyncSession, finding_id: str | None, principal: Principal) -> Finding | None:

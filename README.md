@@ -111,6 +111,11 @@ This is exactly the gap the pentest layer closes. A finding is only promoted to 
 npm install -g sentineldev
 pip install sentinel-worker            # or: pip install ./worker from source
 
+# 1b. (Optional) Docker + gVisor — stronger pentest isolation. Skippable:
+#     `sentinel pentest` auto-degrades to a container-less boot without them.
+#     macOS:  brew install --cask docker         # then start Docker Desktop
+#     Linux:  https://docs.docker.com/engine/install/  +  scripts/install-gvisor.sh
+
 # 2. Point the CLI at a backend for the shared graph + findings
 sentinel auth login                    # hosted, or self-hosted (see below)
 
@@ -242,6 +247,18 @@ pip install sentinel-worker
 
 Requires **Node.js v20 or later** (`node --version`) and **Python 3.12+** for the local engine.
 
+**Optional — Docker + gVisor** (stronger `sentinel pentest` isolation). Not required: pentest auto-degrades to a container-less boot without them, and SAST never needs them.
+
+```bash
+# macOS
+brew install --cask docker            # then launch Docker Desktop
+# Linux
+#   Docker Engine:  https://docs.docker.com/engine/install/
+#   gVisor (runsc): ./scripts/install-gvisor.sh   # registers the runsc runtime with Docker
+```
+
+Verify what your machine resolves to with `sentinel doctor`. See [Sandbox isolation](#sandbox-isolation-dockergvisor-recommended-not-required).
+
 Then:
 
 ```bash
@@ -286,7 +303,7 @@ npm install && npm run build && npm link
 
 ## Self-host the backend
 
-Sentinel's backend (API, worker, database, dashboard) runs in Docker. It only ever stores the code graph (pointers plus short labels, never source text) and findings. No source code or diffs are ever sent to it, whether you self-host it or use the hosted default. Self-hosting is about controlling where the graph and findings live, not about keeping source local. Source is already local no matter which backend you point the CLI at.
+Sentinel's backend (API, database, dashboard) runs in Docker. It is a results-only store: it only ever holds the code graph (pointers plus short labels, never source text) and findings. There is no worker process — SAST and pentest both run locally on your machine, and the backend just serves reads and receives finding writes. No source code, diffs, or payloads are ever sent to it, whether you self-host it or use the hosted default. Self-hosting is about controlling where the graph and findings live, not about keeping source local. Source is already local no matter which backend you point the CLI at.
 
 ### Prerequisites
 
@@ -401,52 +418,73 @@ sentinel pull <id>                   # full description + step-by-step fix
 
 ---
 
-## Pentest (cloud)
+## Pentest (local)
 
-SAST tells you a finding *looks* exploitable. Pentest *proves* it. Unlike everything else in Sentinel, **pentest runs on the cloud worker, not on your machine** — the worker needs to reach a running instance of your app, generate payloads, and observe the app's behavior for a runtime oracle.
+SAST tells you a finding *looks* exploitable. Pentest *proves* it. Like everything else in Sentinel, **pentest runs entirely on your machine** — the local engine boots a copy of your app, generates payloads, and observes the app's behavior for a runtime oracle. There is no cloud worker: the backend only receives the confirmation outcome afterward.
 
-`sentinel pentest` never spawns a local pentest: it enqueues a `kind=pentest` task and polls until the run is terminal.
+`sentinel pentest` runs the full sandbox stack locally and pushes only the result:
 
 ```
 sentinel pentest [id]
-  └─ POST /pentest ──────────────► cloud worker claims the task
-  └─ sentinel runs watch ───────► worker sends HTTP payloads to your staging URL
-                                   → confirms finding only on HTTP/behavioral proof
-                                     or sanitizer output (never agent judgment alone)
+  └─ local engine boots the target under a gVisor sandbox (runsc)
+     └─ token-scoped egress proxy · canary tokens · credential broker · attack-safety budget
+        └─ agent generates payloads (reading local source), dispatches them, checks the oracle
+  └─ POST /findings/{id}/confirm ───► backend (confirmation outcome + evidence only)
+                                       confirmed only on HTTP/behavioral proof, a leaked
+                                       canary, or sanitizer output — never agent judgment alone
 ```
+
+### Sandbox isolation: Docker/gVisor (recommended, not required)
+
+Booting a possibly-malicious target is risky, so Sentinel prefers to run it inside a container under **gVisor** — the `runsc` OCI runtime, a user-space kernel that intercepts the target's syscalls — behind a token-scoped egress proxy. gVisor runs *under* Docker (`docker run --runtime=runsc`), which is why they're referred to together as "Docker/gVisor".
+
+**gVisor is on by default and degrades gracefully — it is not a hard requirement.** The engine resolves the strongest sandbox your machine supports and logs which rung it chose:
+
+| Rung | Needs | Isolation |
+|---|---|---|
+| **gVisor (`runsc`)** | Docker + gVisor | Strongest — syscall-level sandbox + egress proxy (+ iptables hard-egress with `NET_ADMIN`) |
+| **Docker (`runc`)** | Docker | Standard container isolation + egress proxy. Used automatically when gVisor isn't registered. |
+| **subprocess** | nothing | The target boots directly on the host — no container, no egress proxy. Used automatically when **Docker is absent**, so a machine with no Docker can still run pentests. |
+
+Each downgrade is logged to your terminal, e.g. `Docker/gVisor not found — running the pentest WITHOUT a container sandbox …`. This means **`npm install` + an LLM is enough to run a pentest**; Docker + gVisor only add isolation strength.
+
+Controls:
+- **`sentinel pentest --no-sandbox`** (or `sentinel scan --no-sandbox`) forces the container-less subprocess rung.
+- **`SENTINEL_SANDBOX_RUNTIME`** — `auto` (default, degrades), `gvisor` or `runc` (**require** that runtime; error if unmet), `off` (same as `--no-sandbox`).
+- Run **`sentinel doctor`** to see which rung your machine resolves to.
+
+(SAST — `init`/`source`/`scan`/`plan` — never needs any of this.)
 
 ### Reachability: two modes
 
-The worker needs to reach your app. Configure this **per repo** — on the dashboard **Team → Pentest Configuration**, or with `sentinel config set` (synced to the cloud repo):
+The engine needs to reach a running copy of your app. Configure this **per repo** — on the dashboard **Team → Pentest Configuration**, or with `sentinel config set` (synced to the cloud repo, which the local run reads back):
 
 | Mode | When | Config |
 |---|---|---|
-| **`staging`** (default) | Hosted worker (Vercel/Railway). The worker sends HTTP probes to a URL it can reach. | `staging_base_url`, `healthcheck_path` |
-| **`local_worker`** | Self-hosted `docker compose` worker. The worker boots the app itself in a subprocess sandbox on the worker host. | `boot`, `healthcheck`, `egress_allowlist` |
+| **`local_worker`** (default for local boot) | The engine boots the app itself under the gVisor sandbox on your machine. | `boot`, `healthcheck`, `egress_allowlist` |
+| **`staging`** | The engine sends HTTP probes to an already-running deployment it can reach. | `staging_base_url`, `healthcheck_path` |
 
 ```bash
-# Staging mode (hosted): point the worker at a reachable deployment
-sentinel config set pentest_mode staging
-sentinel config set staging_base_url https://staging.your-app.com
-sentinel config set healthcheck_path /health
-
-# Self-hosted worker: let the worker boot the app
+# Boot mode: let the engine boot the app under the sandbox
 sentinel config set pentest_mode local_worker
 sentinel config set boot "docker compose up -d"
 sentinel config set healthcheck "curl -sf http://localhost:3000/health"
-```
 
-The hosted worker cannot reach `localhost` on your machine — use `staging` mode against a deployed environment, or run a self-hosted worker for `local_worker` mode.
+# Staging mode: point the engine at a reachable deployment
+sentinel config set pentest_mode staging
+sentinel config set staging_base_url https://staging.your-app.com
+sentinel config set healthcheck_path /health
+```
 
 ### Pentest LLM credential
 
-The pentest agent's LLM key lives **on the worker**, not on your machine — set `SENTINEL_PENTEST_LLM_API_KEY` in the worker environment (or an admin can set an encrypted `pentest_api_key` on the account from the dashboard). This is deliberately **separate** from your local SAST key: the worker never sees your SAST key, and your machine never sees the pentest key.
+The pentest agent uses your **local** LLM key — the same one SAST uses, stored only in your system keychain (or `SENTINEL_LLM_API_KEY` in CI). There is no separate server-side pentest credential; nothing pentest-related is uploaded to the backend.
 
 ### Confirmation
 
-A finding is marked `confirmed` **only** with a runtime oracle: an HTTP/behavioral proof (data exfiltrated, auth bypassed, command executed) or a sanitizer stack trace. The agent asserting "this is exploitable" is not sufficient. The worker writes the confirmation and a `CONFIRMED_EXPLOIT` edge directly; evidence text is visible in the dashboard finding detail and via `sentinel pull <id>`.
+A finding is marked `confirmed` **only** with a runtime oracle: an HTTP/behavioral proof (data exfiltrated, auth bypassed, command executed), a leaked canary token, or a sanitizer stack trace. The agent asserting "this is exploitable" is not sufficient. The local engine evaluates the oracle, then posts the confirmation and evidence to `POST /findings/{id}/confirm`, which writes a `CONFIRMED_EXPLOIT` edge; evidence text is visible in the dashboard finding detail and via `sentinel pull <id>`.
 
-Phase 1 pentest is HTTP-only and uses the cloud graph plus finding metadata for context — **no source is uploaded for pentest.**
+Source, diffs, payloads, the live target, and all secrets stay on your machine. Only evidence text and node pointers cross to the backend — **no source is ever uploaded for pentest.** The full run trace is written to `~/.sentinel/runs/<id>.jsonl` and never leaves the machine.
 
 ---
 
@@ -611,9 +649,9 @@ Written by `sentinel init` into your repo root. Commit this file. It contains no
 | `healthcheck` | string | (none) | Command that exits 0 when app is ready |
 | `env.from` | string | (none) | Path to env file loaded into the local pentest process |
 | `egress_allowlist` | string[] | `[]` | Hosts the local pentest sandbox may contact |
-| `firecracker.*` | (none) | (none) | Unused. Pentest runs in a local subprocess sandbox now (the app is already on your machine, not a shared host). Kept for schema back-compat only. |
+| `firecracker.*` | (none) | (none) | Unused. Pentest runs locally under a gVisor sandbox (`runsc`) now, not a Firecracker microVM. Kept for schema back-compat only. |
 
-Example (`staging` mode, the hosted default):
+Example (`local_worker` mode — the engine boots the app under the sandbox):
 
 ```json
 {
@@ -621,6 +659,16 @@ Example (`staging` mode, the hosted default):
   "repoName": "my-app",
   "provider": "local",
   "model": "llama3.2",
+  "pentest_mode": "local_worker",
+  "boot": "docker compose up -d",
+  "healthcheck": "curl -sf http://localhost:3000/health"
+}
+```
+
+You can instead point the engine at an already-running deployment with `staging` mode:
+
+```json
+{
   "pentest_mode": "staging",
   "staging_base_url": "https://staging.my-app.com",
   "healthcheck_path": "/health"
@@ -639,7 +687,7 @@ Check that everything is set up correctly. Run this first if something isn't wor
 sentinel doctor
 ```
 
-Checks: git repo present, config file, backend reachable, authenticated, LLM configured (provider, model, and key resolvable locally), Node.js version, and the local engine (`sentinel_worker`) installed.
+Checks: git repo present, config file, backend reachable, authenticated, the local engine (`sentinel_worker`) installed, LLM configured (provider, model, and key resolvable locally), the pentest sandbox tier (Docker, and gVisor's `runsc` runtime), and the repo's pentest config. The Docker/gVisor checks are advisory — SAST never needs them, and `sentinel pentest` auto-degrades to a container-less boot without them (they only add isolation strength).
 
 ---
 
@@ -705,21 +753,22 @@ Full scan: `source` plus automated pentesting of each finding, all locally.
 sentinel scan [--staged] [--base <ref>] [--no-pentest] [--pentest-concurrency <n>] [paths...]
 ```
 
-`--no-pentest` scans locally and skips the cloud pentest step entirely.
+`--no-pentest` scans locally and skips the pentest step entirely.
 
 ---
 
 ### `sentinel pentest [target...]`
 
-Confirm a finding with runtime oracle evidence. Boots your app locally (via `boot` and `healthcheck` in `sentinel.config.json`), then the pentest agent generates payloads, runs them against it, and checks for sanitizer output or behavioral proof, all on this machine. Only the confirmation outcome and evidence text are pushed to the backend.
+Confirm a finding with runtime oracle evidence. Boots your app locally under a gVisor sandbox (via `boot` and `healthcheck` in `sentinel.config.json`), routes its egress through a token-scoped proxy, seeds canary tokens, then the pentest agent generates payloads reading local source, runs them against it, and checks for a leaked canary, sanitizer output, or behavioral proof — all on this machine. Only the confirmation outcome and evidence text are pushed to the backend.
 
 ```bash
 sentinel pentest                                         # auto-select
 sentinel pentest abc123ef-...                            # by finding ID
-sentinel pentest "SQL injection in user login handler"   # by description
+sentinel pentest "SQL injection in user login handler"   # by description (resolved locally)
+sentinel pentest abc123ef-... --no-sandbox               # skip the container sandbox
 ```
 
-Requires the repo's **pentest reachability** to be configured — a reachable `staging_base_url` (hosted worker, the default), or `boot`/`healthcheck` for a self-hosted `local_worker`. See [Pentest (cloud)](#pentest-cloud). The worker's LLM credential is server-side (`SENTINEL_PENTEST_LLM_API_KEY`) — separate from your local SAST key, which the worker never sees.
+**Docker/gVisor is recommended but optional** — the sandbox is on by default and auto-degrades (gVisor → Docker → container-less subprocess) with a logged notice when a runtime isn't found, so the command runs even with no Docker installed. Use `--no-sandbox` to force the container-less rung, or `SENTINEL_SANDBOX_RUNTIME=gvisor|runc` to *require* a runtime. It also needs the repo's **pentest reachability** configured: `boot`/`healthcheck` for local boot (the default), or a reachable `staging_base_url` for `staging` mode. See [Pentest (local)](#pentest-local). The pentest agent uses your local LLM key, the same one SAST uses.
 
 ---
 

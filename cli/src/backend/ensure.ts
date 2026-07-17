@@ -80,11 +80,10 @@ export function readWorkerConn(): WorkerConn | null {
   }
 }
 
-// NOTE: The Docker worker helpers (ensureWorkerContainer / isWorkerContainerRunning
-// / workerDockerArgs) were removed. Under the target architecture the CLI runs
-// SAST locally in-process and the hosted worker runs pentest in the cloud, so
-// `sentinel up` spawns a local Python API + worker (see startBackend) rather than
-// pulling a container image. No product path invoked the Docker helpers.
+// NOTE: There is no separate worker process anymore. The CLI runs SAST and
+// pentest locally in-process (see local_engine.py / execute_full_pentest), and
+// the backend is a results-only store. `sentinel up` therefore spawns only a
+// local Python API — no worker daemon, no Docker container image.
 
 // ── Localhost spawning (self-hosted local dev via `sentinel up`) ────────────────
 
@@ -124,23 +123,6 @@ export async function startBackend(apiUrl: string): Promise<void> {
     }
   }
 
-  if (!readPid("worker")) {
-    const fd = openSync(join(LOG_DIR, "worker.log"), "a");
-    const workerProc = spawn(
-      pythonBin,
-      ["-m", "sentinel_worker.worker_main"],
-      {
-        detached: true,
-        stdio: ["ignore", fd, fd],
-        env: { ...process.env },
-      }
-    );
-    workerProc.unref();
-    if (workerProc.pid !== undefined) {
-      writePid("worker", workerProc.pid);
-    }
-  }
-
   for (let i = 0; i < 16; i++) {
     if (await isHealthy(apiUrl, 500)) return;
     await sleep(500);
@@ -152,34 +134,31 @@ export async function startBackend(apiUrl: string): Promise<void> {
 }
 
 export async function stopBackend(): Promise<void> {
-  for (const name of ["api", "worker"]) {
-    const pid = readPid(name);
-    if (pid) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {}
-      removePid(name);
-    }
+  const pid = readPid("api");
+  if (pid) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+    removePid("api");
   }
 }
 
 export async function backendStatus(
   apiUrl: string
-): Promise<{ api: string; worker: string; healthy: boolean }> {
+): Promise<{ api: string; healthy: boolean }> {
   const apiPid = readPid("api");
-  const workerPid = readPid("worker");
   const healthy = await isHealthy(apiUrl);
   return {
     api: apiPid ? `running (PID ${apiPid})` : "stopped",
-    worker: workerPid ? `running (PID ${workerPid})` : "stopped",
     healthy,
   };
 }
 
 export async function ensureBackend(apiUrl: string): Promise<void> {
   if (!isLocalhost(apiUrl)) {
-    // Remote (cloud) backend: just verify reachability. The hosted worker on Railway
-    // handles task processing — no local Docker container needed.
+    // Remote (cloud) backend: just verify reachability. It is a results-only
+    // store — scans and pentests run locally in the CLI, so there is no remote
+    // worker or task processing to wait on.
     for (let attempt = 0; attempt < 3; attempt++) {
       if (await isHealthy(apiUrl, 8000)) return;
     }

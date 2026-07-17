@@ -132,9 +132,9 @@ export type AccountConfigPatch = {
   source_retention_days?: number;
 };
 
-// Repo pentest configuration (§3 D1 — dual mode). The cloud worker runs the
-// pentest against `staging_base_url` (hosted default) or, for self-hosted
-// deployments, boots the app under a gVisor sandbox on the worker host
+// Repo pentest configuration (§3 D1 — dual mode). The local CLI engine runs the
+// pentest against `staging_base_url` (reach a deployment) or boots the app under
+// a gVisor sandbox on the developer's own machine
 // (target/egress/secrets/canary/attack-safety declared in `pentest_config`).
 export type PentestMode = "staging" | "local_worker";
 

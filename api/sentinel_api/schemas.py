@@ -40,18 +40,9 @@ class IngestResponse(BaseModel):
     finding_ids: list[str] = Field(default_factory=list)
 
 
-class PentestRequest(BaseModel):
-    repo_name: str = Field(min_length=1)
-    finding_id: str | None = None
-    description: str | None = None
-    sanitizer_output: str = ""
-    behavioral_proof: str | None = None
-    proof_detail: str = ""
-    boot: str | None = None
-    healthcheck: str | None = None
-    egress_allowlist: list[str] = Field(default_factory=list)
-    # Structured gVisor sandbox config forwarded to the worker for ad-hoc runs.
-    pentest_config: dict | None = None
+# NOTE: PentestRequest was removed with the cloud pentest enqueue endpoints
+# (POST /pentest, POST /repos/{id}/pentest). Pentest now runs entirely on the
+# developer's local machine and the outcome is posted via PentestConfirmRequest.
 
 
 class PentestConfirmRequest(BaseModel):
@@ -118,6 +109,10 @@ class FindingResponse(BaseModel):
     confirmed: bool
     evidence: str | None = None
     fingerprint: str
+    # The sink node this finding points at (graph pointer, not source). The local
+    # pentest engine needs it to load graph context + entry paths and to link the
+    # CONFIRMED_EXPLOIT edge; without it a local pentest runs context-free.
+    node_id: str | None = None
     file: str | None = None
     line_start: int | None = None
     line_end: int | None = None
@@ -141,28 +136,11 @@ class TraceAccessLogResponse(BaseModel):
     created_at: str
 
 
-class EnqueueResponse(BaseModel):
-    task_id: str
-    run: RunResponse
-
-
-class TaskResponse(BaseModel):
-    id: str
-    run_id: str
-    kind: str
-    status: str
-    payload: dict
-    attempts: int
-    claimed_by: str | None
-    error: str | None
-
-
-class TaskCompleteRequest(BaseModel):
-    trace: str | None = None
-
-
-class TaskFailRequest(BaseModel):
-    error: str = Field(min_length=1)
+# NOTE: The cloud task queue is gone. No API endpoint enqueues, claims, or
+# completes tasks anymore — pentest runs locally and POSTs results back, while
+# SAST/ingest post results directly. The `/tasks/*` lifecycle endpoints and
+# their TaskResponse/TaskCompleteRequest/TaskFailRequest schemas were removed
+# with the Railway worker daemon.
 
 
 class TokenBudgetRequest(BaseModel):

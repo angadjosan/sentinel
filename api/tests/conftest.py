@@ -190,52 +190,6 @@ def seed_finding(
     return resp.json()
 
 
-def process_tasks(n: int = 1, *, llm=None) -> None:
-    """Run n queued worker tasks inline using the test's patched DB.
-
-    Must be called inside a test that has the _isolated_db autouse fixture
-    active (i.e., any API test).
-
-    `llm`, when provided, is forwarded to `run_one_task` as the pentest/SAST
-    agent. Pass a stub (e.g. `NoFindingLLM()`) to keep pentest tasks fully
-    offline and deterministic — otherwise the worker's `_pentest_llm` would
-    resolve a real `local` provider client that tries to reach ollama on
-    localhost. Even without a stub the pentest still completes (the agent call
-    is caught and the run falls back to template payloads), but injecting one
-    avoids the network attempt entirely.
-    """
-    import asyncio
-    from sentinel_api.deps import SessionLocal
-    from sentinel_worker.runner import run_one_task
-
-    async def _run() -> None:
-        for _ in range(n):
-            async with SessionLocal() as session:
-                async with session.begin():
-                    await run_one_task(session, worker_id="test-worker", _llm=llm)
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(_run())
-    finally:
-        loop.close()
-
-
-class NoFindingLLM:
-    """Agent stub that reads nothing and emits nothing.
-
-    For a pentest task this drives `run_pentest` down the template-payload path
-    (no agent-supplied payloads) with zero network calls, so confirmation is
-    decided purely by the (mocked) HTTP target's own responses — the honest
-    oracle path (AUDIT.md §1 invariant 5)."""
-
-    async def call_with_tools(self, *, system=None, user=None, tools=None, tool_dispatcher=None, max_iterations=50, **kwargs):
-        return
-        yield  # pragma: no cover — makes this an async generator
-
-    async def call(self, *, system: str, user: str | None = None, data: str | None = None, **kwargs):
-        from sentinel_worker.agent import LLMCallResult
-        return LLMCallResult(content='{"annotations": []}', input_tokens=0, output_tokens=0, model="mock", provider="mock")
 
 @pytest.fixture
 def mock_sast_llm(monkeypatch):

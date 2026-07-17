@@ -4,7 +4,6 @@ discard that. Mirrors the graceful --ingest-url failure handling already in
 standalone.py's post_findings call.
 """
 import httpx
-import pytest
 
 from sentinel_worker.local_cli import _push_or_warn
 from sentinel_worker.local_engine import GraphDelta
