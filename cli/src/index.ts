@@ -27,7 +27,7 @@ function currentBranch(): string | null {
   return branch && branch !== "HEAD" ? branch : null;
 }
 
-program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.1");
+program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.2.0");
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
@@ -721,7 +721,7 @@ program
 // Backend lifecycle commands
 program
   .command("up")
-  .description("Start the local Sentinel backend (results-only API)")
+  .description("Start the local Sentinel stack (results-only API + dashboard when available)")
   .action(async () => {
     const config = loadConfig();
     await startBackend(config.apiUrl);
@@ -730,7 +730,7 @@ program
 
 program
   .command("down")
-  .description("Stop the Sentinel backend")
+  .description("Stop the local Sentinel stack (API + dashboard)")
   .action(async () => {
     await stopBackend();
     console.log("Sentinel backend stopped.");
@@ -742,8 +742,9 @@ program
   .action(async () => {
     const config = loadConfig();
     const s = await backendStatus(config.apiUrl);
-    console.log(`API:     ${s.api}`);
-    console.log(`Healthy: ${s.healthy ? "yes" : "no"}`);
+    console.log(`API:       ${s.api}`);
+    console.log(`Dashboard: ${s.dashboard}`);
+    console.log(`Healthy:   ${s.healthy ? "yes" : "no"}`);
   });
 
 // Only run the CLI when invoked directly (not when imported, e.g. by tests that

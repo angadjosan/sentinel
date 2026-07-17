@@ -1,0 +1,162 @@
+# Build + publish the per-platform frozen Sentinel engine packages
+# (@sentineldev/engine-<os>-<cpu>) so `npm install -g sentineldev` needs no
+# separate `pip install` / system Python.
+#
+# Each matrix leg pip-installs the worker + PyInstaller into an isolated venv,
+# freezes sentinel_worker.local_cli:main into a onedir bundle, wraps it in an
+# npm package with matching os/cpu, smoke-tests it, and (on a release) publishes.
+#
+# STATUS: mechanism written + verified locally on darwin-arm64. The matrix,
+# code-signing/notarization, and npm publish are CI-PENDING — they need runners
+# and secrets that can't run on a dev machine. Signing steps are TODO stubs.
+name: build-engine
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish packages to npm (otherwise build + smoke-test only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.pkg }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14        # Apple silicon
+            pkg: engine-darwin-arm64
+            os: darwin
+            cpu: arm64
+          - runner: macos-13        # Intel
+            pkg: engine-darwin-x64
+            os: darwin
+            cpu: x64
+          - runner: ubuntu-latest
+            pkg: engine-linux-x64
+            os: linux
+            cpu: x64
+          - runner: ubuntu-24.04-arm
+            pkg: engine-linux-arm64
+            os: linux
+            cpu: arm64
+          - runner: windows-latest
+            pkg: engine-win32-x64
+            os: win32
+            cpu: x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # ── Freeze the engine (isolated venv keeps the bundle to real deps only) ──
+      - name: Install worker + PyInstaller
+        shell: bash
+        run: |
+          python -m venv .build-venv
+          if [ "${{ runner.os }}" = "Windows" ]; then source .build-venv/Scripts/activate; else source .build-venv/bin/activate; fi
+          python -m pip install --upgrade pip wheel
+          pip install ./worker pyinstaller
+
+      - name: Build onedir bundle
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then source .build-venv/Scripts/activate; else source .build-venv/bin/activate; fi
+          cd worker/pyinstaller
+          pyinstaller sentinel-engine.spec --noconfirm --clean
+
+      # ── macOS: codesign + notarize (CI-PENDING — needs Apple secrets) ──
+      # - name: Codesign + notarize (macOS)
+      #   if: runner.os == 'macOS'
+      #   env:
+      #     APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+      #     APPLE_CERT_PASSWORD:   ${{ secrets.APPLE_CERT_PASSWORD }}
+      #     APPLE_TEAM_ID:         ${{ secrets.APPLE_TEAM_ID }}
+      #     APPLE_NOTARY_KEY:      ${{ secrets.APPLE_NOTARY_KEY }}
+      #   run: |
+      #     # 1. import the Developer ID cert into a temp keychain
+      #     # 2. codesign --deep --force --options runtime --timestamp \
+      #     #      --sign "Developer ID Application: ..." worker/pyinstaller/dist/sentinel-local/sentinel-local
+      #     # 3. zip the dir, submit with `xcrun notarytool submit --wait`, then staple
+      #     echo "TODO: macOS signing/notarization"
+
+      # ── Windows: Authenticode sign (CI-PENDING — needs signing cert) ──
+      # - name: Sign (Windows)
+      #   if: runner.os == 'Windows'
+      #   env:
+      #     WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      #     WINDOWS_CERT_PASSWORD:   ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      #   run: |
+      #     # signtool sign /f cert.pfx /p $env:WINDOWS_CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 \
+      #     #   worker\pyinstaller\dist\sentinel-local\sentinel-local.exe
+      #     echo "TODO: Windows Authenticode signing"
+
+      # ── Assemble the npm package ──
+      - name: Assemble npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKGDIR="packages/${{ matrix.pkg }}"
+          mkdir -p "$PKGDIR/bin"
+          cp -R worker/pyinstaller/dist/sentinel-local/. "$PKGDIR/bin/"
+          VERSION=$(node -p "require('./cli/package.json').version")
+          cat > "$PKGDIR/package.json" <<EOF
+          {
+            "name": "@sentineldev/${{ matrix.pkg }}",
+            "version": "$VERSION",
+            "description": "Frozen Sentinel analysis engine for ${{ matrix.os }}-${{ matrix.cpu }}",
+            "license": "MIT",
+            "os": ["${{ matrix.os }}"],
+            "cpu": ["${{ matrix.cpu }}"],
+            "files": ["bin"]
+          }
+          EOF
+          cp packages/engine-README.md "$PKGDIR/README.md"
+
+      # ── Smoke test the frozen binary with NO source on PYTHONPATH ──
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          BINDIR="packages/${{ matrix.pkg }}/bin"
+          BIN="$BINDIR/sentinel-local"
+          [ "${{ runner.os }}" = "Windows" ] && BIN="$BINDIR/sentinel-local.exe"
+          REPO="$RUNNER_TEMP/tinyrepo"; mkdir -p "$REPO"; cd "$REPO"
+          git init -q; git config user.email t@t.co; git config user.name t
+          printf 'import os\ndef f():\n    return os.getenv("X")\n' > app.py
+          git add app.py; git commit -qm init
+          printf 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1,3 +1,4 @@\n import os\n+AWS_ACCESS_KEY_ID = "AKIA1234567890ABCDEF"\n def f():\n     return os.getenv("X")\n' > tiny.diff
+          cd "$GITHUB_WORKSPACE"
+          PYTHONPATH= "$BIN" source --repo-name t --repo-dir "$REPO" --diff-file "$REPO/tiny.diff" --base HEAD --provider mock --model mock || code=$?
+          # exit 1 = a finding was found (expected: the AWS secret); that's success here.
+          test "${code:-0}" -eq 1
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pkg }}
+          path: packages/${{ matrix.pkg }}
+
+      # ── Publish (release, or manual dispatch with publish=true) ──
+      - name: Publish to npm
+        if: github.event_name == 'release' || inputs.publish
+        shell: bash
+        working-directory: packages/${{ matrix.pkg }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

@@ -110,6 +110,8 @@ This is exactly the gap the pentest layer closes. A finding is only promoted to 
 # 1. Install the CLI and the local analysis engine
 npm install -g sentineldev
 pip install sentinel-worker            # or: pip install ./worker from source
+# ^ pip step is temporary: prebuilt, Python-free engine binaries (shipped as
+#   npm optionalDependencies) are coming so `npm install` alone will be enough.
 
 # 1b. (Optional) Docker + gVisor — stronger pentest isolation. Skippable:
 #     `sentinel pentest` auto-degrades to a container-less boot without them.
@@ -245,7 +247,7 @@ npm install -g sentineldev
 pip install sentinel-worker
 ```
 
-Requires **Node.js v20 or later** (`node --version`) and **Python 3.12+** for the local engine.
+Requires **Node.js v20 or later** (`node --version`) and **Python 3.12+** for the local engine. Prebuilt, Python-free engine binaries (shipped per-platform as npm optionalDependencies) are on the way — once published, the `pip install` step drops and `npm install -g sentineldev` is all you need.
 
 **Optional — Docker + gVisor** (stronger `sentinel pentest` isolation). Not required: pentest auto-degrades to a container-less boot without them, and SAST never needs them.
 

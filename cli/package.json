@@ -41,7 +41,12 @@
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
-    "keytar": "^7.9.0"
+    "keytar": "^7.9.0",
+    "@sentineldev/engine-darwin-arm64": "0.2.0",
+    "@sentineldev/engine-darwin-x64": "0.2.0",
+    "@sentineldev/engine-linux-x64": "0.2.0",
+    "@sentineldev/engine-linux-arm64": "0.2.0",
+    "@sentineldev/engine-win32-x64": "0.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",

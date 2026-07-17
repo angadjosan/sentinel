@@ -20,3 +20,9 @@ cli/binaries/
 build/
 .playwright-mcp/
 context/
+# PyInstaller frozen-engine build artifacts (rebuilt per platform in CI; never committed)
+worker/pyinstaller/build/
+worker/pyinstaller/dist/
+worker/pyinstaller/.build-venv/
+packages/engine-*/bin/
+packages/engine-*/dist/
