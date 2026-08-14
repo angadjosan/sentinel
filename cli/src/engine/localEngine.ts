@@ -6,8 +6,51 @@
 // push counts) crosses back over stdout; the LLM API key crosses over env,
 // never argv or a file.
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { accessSync, constants as fsConstants } from "node:fs";
 import type { SentinelConfig } from "../config/sentinel.config.js";
 import { resolveVenvPython } from "../backend/ensure.js";
+
+/**
+ * Resolve how to invoke the Python analysis engine, in priority order:
+ *
+ *   a. A bundled, frozen (PyInstaller) binary shipped as an optionalDependency
+ *      `@sentineldev/engine-<platform>-<arch>`. npm installs only the package
+ *      matching the host os/cpu (mirrors how esbuild/swc/turbo ship natives).
+ *      When present + executable → run it directly, no Python needed.
+ *   b. `SENTINEL_ENGINE_BIN` env override → a caller-provided frozen binary.
+ *   c. Fallback (dev / source checkout): the historical behavior —
+ *      `<venv python> -m sentinel_worker.local_cli`.
+ *
+ * `prefixArgs` are prepended before the subcommand ("source", "pentest", …):
+ * empty for a frozen binary (its entry point IS local_cli:main), and
+ * `["-m", "sentinel_worker.local_cli"]` for the Python fallback.
+ */
+export function resolveEngineCommand(): { cmd: string; prefixArgs: string[] } {
+  // (a) Bundled frozen binary via optionalDependency.
+  const pkg = `@sentineldev/engine-${process.platform}-${process.arch}`;
+  try {
+    // import.meta.url works both in the built dist and under ts-node/tsx.
+    const req = createRequire(import.meta.url);
+    // Resolve a known file inside the platform package. The frozen onedir bundle
+    // exposes its launcher at bin/sentinel-local (bin/sentinel-local.exe on win32).
+    const binName = process.platform === "win32" ? "sentinel-local.exe" : "sentinel-local";
+    const bin = req.resolve(`${pkg}/bin/${binName}`);
+    accessSync(bin, fsConstants.X_OK);
+    return { cmd: bin, prefixArgs: [] };
+  } catch {
+    // Package not installed for this platform, or its binary isn't executable —
+    // fall through to the env override / Python fallback.
+  }
+
+  // (b) Explicit binary override.
+  if (process.env.SENTINEL_ENGINE_BIN) {
+    return { cmd: process.env.SENTINEL_ENGINE_BIN, prefixArgs: [] };
+  }
+
+  // (c) Dev / source fallback: run the module through a Python interpreter.
+  return { cmd: resolveVenvPython(), prefixArgs: ["-m", "sentinel_worker.local_cli"] };
+}
 
 export interface LocalFinding {
   vuln_type: string;
@@ -78,8 +121,8 @@ interface RawRunResult {
 
 function runLocalEngine(args: string[], opts: { llmApiKey?: string; stdin?: string } = {}): Promise<RawRunResult> {
   return new Promise((resolve, reject) => {
-    const pythonBin = resolveVenvPython();
-    const child = spawn(pythonBin, ["-m", "sentinel_worker.local_cli", ...args], {
+    const { cmd, prefixArgs } = resolveEngineCommand();
+    const child = spawn(cmd, [...prefixArgs, ...args], {
       env: {
         ...process.env,
         // Passed via env, never argv (argv is visible to other processes via `ps`).
@@ -99,8 +142,11 @@ function runLocalEngine(args: string[], opts: { llmApiKey?: string; stdin?: stri
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         reject(
           new Error(
-            `Could not run the local Sentinel engine (${pythonBin} -m sentinel_worker.local_cli). ` +
-              `Install it with 'pip install ./worker' or set SENTINEL_PYTHON to a Python with sentinel-worker installed.`
+            `Could not run the local Sentinel engine (${cmd}${prefixArgs.length ? " " + prefixArgs.join(" ") : ""}). ` +
+              `Install the bundled engine (it ships automatically as the optionalDependency ` +
+              `@sentineldev/engine-${process.platform}-${process.arch}), or for a source checkout ` +
+              `run 'pip install ./worker' / set SENTINEL_PYTHON to a Python with sentinel-worker installed, ` +
+              `or point SENTINEL_ENGINE_BIN at a frozen engine binary.`
           )
         );
         return;
@@ -186,6 +232,55 @@ export async function runLocalPlanReview(
   return { result: parseJsonStdout<LocalPlanResult>(stdout, "sentinel plan"), exitCode };
 }
 
-// NOTE: local pentest execution was removed (AUDIT.md §3 D4). `sentinel pentest`
-// now enqueues a cloud pentest (POST /pentest) and polls the run — the cloud
-// worker owns pentest execution (§1 invariant 4). See cli/src/index.ts.
+export interface LocalPentestResult {
+  finding_id: string;
+  confirmed: boolean;
+  status: string;
+  evidence?: string | null;
+  payloads: string[];
+  local_run_id?: string;
+  local_trace_path?: string;
+  push: Record<string, unknown>;
+}
+
+// Run the FULL hardened pentest stack (gVisor sandbox + egress proxy + canary +
+// broker + attack-safety + oracle) on THIS machine, mirroring runLocalSourceScan.
+// The finding lives in the cloud, so --api-url is required; the outcome is pushed
+// back by the Python engine via POST /findings/{id}/confirm. Source, payloads,
+// and boot secrets never leave this process.
+export async function runLocalPentest(
+  opts: CommonEngineOpts & {
+    findingId: string;
+    repoId?: string;
+    sanitizerOutput?: string;
+    behavioralProof?: string;
+    proofDetail?: string;
+    boot?: string;
+    healthcheck?: string;
+    egressAllowlist?: string[];
+    noSandbox?: boolean;
+  }
+): Promise<LocalPentestResult> {
+  const args = [
+    "pentest",
+    "--repo-name", opts.config.repoName,
+    "--repo-dir", opts.repoDir,
+    "--finding-id", opts.findingId,
+    "--provider", opts.config.provider,
+    "--model", opts.config.model,
+    "--api-url", opts.config.apiUrl,
+  ];
+  if (opts.repoId) args.push("--repo-id", opts.repoId);
+  if (opts.sanitizerOutput) args.push("--sanitizer-output", opts.sanitizerOutput);
+  if (opts.behavioralProof) args.push("--behavioral-proof", opts.behavioralProof);
+  if (opts.proofDetail) args.push("--proof-detail", opts.proofDetail);
+  if (opts.boot) args.push("--boot", opts.boot);
+  if (opts.healthcheck) args.push("--healthcheck", opts.healthcheck);
+  for (const entry of opts.egressAllowlist ?? []) args.push("--egress-allowlist", entry);
+  if (opts.noSandbox) args.push("--no-sandbox");
+  if (opts.config.api_endpoint) args.push("--llm-endpoint", opts.config.api_endpoint);
+  if (opts.apiToken) args.push("--api-token", opts.apiToken);
+  const { stdout, exitCode, stderr } = await runLocalEngine(args, { llmApiKey: opts.llmApiKey });
+  if (exitCode !== 0) throw new Error(`local pentest failed (exit ${exitCode}): ${stderr.slice(-2000)}`);
+  return parseJsonStdout<LocalPentestResult>(stdout, "sentinel pentest");
+}

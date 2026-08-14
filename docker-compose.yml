@@ -38,19 +38,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-  worker:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
-    command: ["sentinel-worker"]
-    environment:
-      DATABASE_URL: postgresql+asyncpg://sentinel:sentinel@postgres:5432/sentinel
-      SENTINEL_WORKER_ID: local-worker
-      SENTINEL_WORKER_POLL_INTERVAL: "1"
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
   dashboard:
     build:
       context: .

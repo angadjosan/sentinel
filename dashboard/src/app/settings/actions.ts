@@ -67,7 +67,7 @@ export async function updateRepoPentestConfigAction(formData: FormData) {
   const patch: RepoPentestConfigPatch = { pentest_mode: pentestMode };
 
   if (pentestMode === "staging") {
-    // Hosted worker probes a reachable staging URL — no boot argv (§3 D1).
+    // Local engine probes a reachable staging URL — no boot argv (§3 D1).
     const stagingBaseUrl = stringValue(formData.get("staging_base_url"));
     if (!stagingBaseUrl) {
       throw new Error("staging_base_url is required in staging mode");
@@ -79,7 +79,7 @@ export async function updateRepoPentestConfigAction(formData: FormData) {
     patch.healthcheck = null;
     patch.egress_allowlist = [];
   } else {
-    // Self-hosted worker boots the app under a gVisor sandbox (§3 D1).
+    // Local engine boots the app under a gVisor sandbox on the dev machine (§3 D1).
     patch.boot = stringValue(formData.get("boot"));
     patch.healthcheck = stringValue(formData.get("healthcheck"));
     patch.egress_allowlist = parseAllowlist(formData.get("egress_allowlist"));

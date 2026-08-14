@@ -42,7 +42,7 @@ export function FindingActions({ finding }: { finding: Finding }) {
     startTransition(async () => {
       const result = await startPentestAction(finding.id);
       if (result.startsWith("error")) {
-        setPentestMsg("Could not queue pentest (worker offline?)");
+        setPentestMsg("Could not start pentest. Run `sentinel pentest` from the CLI.");
         toast("Could not queue pentest", "error");
       } else {
         setPentestMsg("Pentest queued — track it in Scans.");

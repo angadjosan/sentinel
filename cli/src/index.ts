@@ -2,18 +2,19 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import chalk from "chalk";
 import { Command } from "commander";
 
-import { SentinelApiClient } from "./api/client.js";
+import { SentinelApiClient, type Finding } from "./api/client.js";
 import { clearApiKey, readApiKey, readLlmApiKey, writeApiKey, writeCredential, writeLlmApiKey } from "./auth/keychain.js";
 import { writeWorkerConn } from "./backend/ensure.js";
 import { ConfigSchema, configPath, findRepoRoot, loadConfig, validateConfigForScan, writeConfig } from "./config/sentinel.config.js";
 import { currentDiff } from "./diff/git.js";
 import { ensureBackend, startBackend, stopBackend, backendStatus, isHealthy, resolveVenvPython } from "./backend/ensure.js";
-import { runLocalInit, runLocalPlanReview, runLocalSourceScan } from "./engine/localEngine.js";
+import { runLocalInit, runLocalPentest, runLocalPlanReview, runLocalSourceScan } from "./engine/localEngine.js";
 import { printAdapterWarnings } from "./output/adapterWarnings.js";
 
 const program = new Command();
@@ -26,7 +27,7 @@ function currentBranch(): string | null {
   return branch && branch !== "HEAD" ? branch : null;
 }
 
-program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.1.1");
+program.name("sentinel").description("LLM-powered application security scanner — scans run locally, only the code graph and findings sync to the cloud").version("0.2.0");
 
 const auth = program.command("auth").description("Manage Sentinel authentication");
 auth
@@ -156,12 +157,13 @@ program
 
 program
   .command("scan")
-  .description("Run source scan locally, then enqueue a cloud pentest for each finding unless skipped")
+  .description("Run source scan locally, then run a local pentest for each pushed finding unless skipped")
   .argument("[paths...]", "Optional paths to scope the diff")
   .option("--staged", "Scan staged changes only")
   .option("--base <ref>", "Diff against this base ref")
-  .option("--no-pentest", "Skip enqueueing cloud pentests")
-  .option("--pentest-concurrency <count>", "Maximum concurrent enqueue requests", "4")
+  .option("--no-pentest", "Skip running local pentests")
+  .option("--pentest-concurrency <count>", "Maximum concurrent local pentest runs", "4")
+  .option("--no-sandbox", "Run pentests without a Docker/gVisor sandbox (reduced isolation)")
   .action(async (paths: string[], options) => {
     const config = loadConfig();
     validateConfigForScan(config);
@@ -194,25 +196,51 @@ program
     printAdapterWarnings(result.adapter_unmatched_files);
 
     const findingIds = result.push.findings?.finding_ids ?? [];
+    let pentestFailures = 0;
     if (options.pentest && findingIds.length > 0) {
-      // AUDIT.md §3 D4 / P1.3: enqueue one cloud pentest per ingested finding
-      // ID. No local pentest loop — the cloud worker executes each pentest.
-      const client = new SentinelApiClient(config);
+      // Run one LOCAL pentest per ingested finding id, bounded by
+      // --pentest-concurrency (distinct per-run sandbox/egress-proxy). Nothing
+      // is enqueued to the cloud — execution is the full local stack.
       const concurrency = parsePositiveInt(options.pentestConcurrency, "pentest concurrency");
-      const enqueued = await runLimited(findingIds, concurrency, async (findingId) => {
-        const r = await client.enqueuePentest({ findingId });
-        return { findingId, runId: r.run.id, taskId: r.task_id };
+      // Isolate each finding's pentest: one failure (e.g. a boot error, or docker
+      // missing) must not abort the batch or discard already-completed results.
+      const pentested = await runLimited(findingIds, concurrency, async (findingId) => {
+        try {
+          const r = await runLocalPentest({
+            config,
+            repoDir: root,
+            apiToken,
+            llmApiKey,
+            findingId,
+            repoId: config.repo_id,
+            boot: config.boot,
+            healthcheck: config.healthcheck,
+            egressAllowlist: config.egress_allowlist,
+            noSandbox: !options.sandbox,
+          });
+          return { findingId, result: r };
+        } catch (err) {
+          return { findingId, error: err instanceof Error ? err.message : String(err) };
+        }
       });
-      for (const e of enqueued) {
-        console.log(`pentest enqueued: finding ${e.findingId} -> run ${e.runId} (task ${e.taskId})`);
+      for (const p of pentested) {
+        if ("error" in p && p.error !== undefined) {
+          pentestFailures += 1;
+          console.error(`pentest ${p.findingId}: failed — ${p.error}`);
+        } else if (p.result) {
+          console.log(`pentest ${p.findingId}: ${p.result.status} confirmed=${p.result.confirmed}`);
+        }
       }
-      console.log(`enqueued ${enqueued.length} cloud pentest run(s); watch with 'sentinel runs watch <run-id>'`);
+      if (pentestFailures > 0) {
+        console.error(`${pentestFailures} of ${findingIds.length} pentest(s) failed`);
+      }
     } else if (options.pentest && result.findings.length > 0) {
       console.log("(pentest skipped: findings were not pushed to the cloud, so no finding IDs are available — check network/auth)");
     }
     console.log(`scan: ${result.finding_count} finding(s)`);
     if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
-    process.exitCode = exitCode;
+    // Non-zero if the source scan tripped its fail-on threshold OR any pentest failed.
+    process.exitCode = exitCode || (pentestFailures > 0 ? 1 : 0);
   });
 
 program
@@ -323,33 +351,62 @@ program
 
 program
   .command("pentest")
-  .description("Confirm a finding by enqueueing a cloud pentest run and polling until it completes")
-  .argument("[target...]", "Finding ID, natural-language target, or empty to auto-select")
+  .description("Confirm a finding by attacking the app booted locally under the full gVisor sandbox stack")
+  .argument("[target...]", "Finding ID, natural-language target, or empty to auto-select the highest-severity open finding")
   .option("--sanitizer-output <text>", "Sanitizer output")
   .option("--behavioral-proof <kind>", "Behavioral proof kind")
   .option("--proof-detail <text>", "Behavioral proof detail", "")
+  .option("--no-sandbox", "Run without a Docker/gVisor sandbox (reduced isolation); default auto-degrades if not found")
   .action(async (targetParts: string[], options) => {
-    // AUDIT.md §3 D4: `sentinel pentest` never runs a pentest on this machine.
-    // The cloud worker owns pentest execution (§1 invariant 4); the CLI only
-    // enqueues (POST /pentest) and polls the run until it reaches a terminal
-    // state, then prints the finding's confirmation status/evidence.
+    // Pentest runs the FULL hardened stack (gVisor + egress proxy + canary +
+    // broker + attack-safety + oracle) on THIS machine. Source stays local; the
+    // Python engine fetches the finding from the cloud and pushes back only the
+    // confirmation outcome via POST /findings/{id}/confirm.
     const config = loadConfig();
+    validateConfigForScan(config);
     await ensureBackend(config.apiUrl);
+    const root = findRepoRoot();
+    const [apiToken, llmApiKey] = await Promise.all([readApiKey(config), readLlmApiKey(config)]);
     const client = new SentinelApiClient(config);
+
+    // Resolve the target to a concrete finding id, entirely client-side (D4):
+    //   - a bare id is used directly
+    //   - a natural-language target is ranked over the open findings
+    //   - no target auto-selects the highest-severity open finding
     const target = parsePentestTarget(targetParts);
-    // Let the cloud resolve a natural-language target when no ID is given
-    // (POST /pentest accepts `description`); only pre-resolve an explicit ID.
-    const enqueued = await client.enqueuePentest({
-      findingId: target.findingId,
-      description: target.description,
+    let findingId = target.findingId;
+    if (!findingId) {
+      findingId = (await resolvePentestTargetId(client, target.description)) ?? undefined;
+      if (!findingId) {
+        console.error(
+          target.description
+            ? `no open finding matched "${target.description}" — run \`sentinel list\` to see finding ids`
+            : "no open findings to pentest — run `sentinel scan` first"
+        );
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`resolved target -> finding ${findingId}`);
+    }
+
+    const result = await runLocalPentest({
+      config,
+      repoDir: root,
+      apiToken,
+      llmApiKey,
+      findingId,
+      repoId: config.repo_id,
       sanitizerOutput: options.sanitizerOutput,
       behavioralProof: options.behavioralProof,
       proofDetail: options.proofDetail,
+      boot: config.boot,
+      healthcheck: config.healthcheck,
+      egressAllowlist: config.egress_allowlist,
+      noSandbox: !options.sandbox,
     });
-    const findingId = target.findingId;
-    console.log(`enqueued cloud pentest: run ${enqueued.run.id} (task ${enqueued.task_id})`);
-    await watchRunToTerminal(client, enqueued.run.id);
-    await printPentestOutcome(client, findingId);
+    console.log(`${result.finding_id}\t${result.status}\tconfirmed=${result.confirmed}`);
+    if (result.evidence) console.log(result.evidence);
+    if (result.local_trace_path) console.log(`trace saved locally: ${result.local_trace_path}`);
   });
 
 const suppress = program.command("suppress").description("Suppress or remove suppressions");
@@ -532,7 +589,7 @@ config
 // when something the CLI needs is missing or misconfigured (§5 Gate 4).
 program
   .command("doctor")
-  .description("Run pre-flight checks: git repo, config, cloud health, auth, local engine, LLM key, pentest config")
+  .description("Run pre-flight checks: git repo, config, cloud health, auth, local engine, LLM key, pentest sandbox (docker + gVisor), pentest config")
   .action(async () => {
     const checks: Array<{ ok: boolean; warn?: boolean; label: string; detail?: string }> = [];
     const record = (ok: boolean, label: string, detail?: string, warn = false) => checks.push({ ok, warn, label, detail });
@@ -593,16 +650,56 @@ program
         !keyOk
       );
 
-      // 7. pentest reachability config (§3 D1 — cloud worker executes pentest)
-      const hasPentestConfig = Boolean(config.staging_base_url) || config.pentest_mode === "local_worker" || Boolean(config.boot);
+      // 7. pentest config — the local pentest needs a target: either a boot
+      // command (the app is booted locally under the sandbox) or a reachable
+      // staging_base_url. Warn only — SAST works without pentest configured.
+      const hasPentestConfig = Boolean(config.boot) || Boolean(config.staging_base_url) || config.pentest_mode === "local_worker";
       record(
         hasPentestConfig,
-        "pentest config (cloud worker)",
+        "pentest config",
         hasPentestConfig
-          ? `mode=${config.pentest_mode ?? "staging"}${config.staging_base_url ? ` url=${config.staging_base_url}` : ""}`
-          : "no staging_base_url — `sentinel pentest` will have no target. Set it with `sentinel config set staging_base_url <url>`",
+          ? `mode=${config.pentest_mode ?? "staging"}${config.boot ? ` boot set` : ""}${config.staging_base_url ? ` url=${config.staging_base_url}` : ""}`
+          : "no boot / staging_base_url — `sentinel pentest` will have no target. Set one with `sentinel config set boot \"<cmd>\"` or `sentinel config set staging_base_url <url>`",
         true // pentest config is a warning, not a hard failure — SAST still works without it
       );
+    }
+
+    // 8. pentest sandbox — a real local pentest boots the target under gVisor
+    // (runsc) via docker. Both are advisory: SAST never needs them, but
+    // `sentinel pentest` fails loudly without docker, and drops to runc (a
+    // weaker isolation boundary) without runsc.
+    let dockerOk = false;
+    try {
+      const proc = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], { encoding: "utf8" });
+      dockerOk = proc.status === 0 && Boolean((proc.stdout || "").trim());
+      record(
+        dockerOk,
+        "docker (pentest sandbox)",
+        dockerOk
+          ? `server ${(proc.stdout || "").trim()}`
+          : "docker not available — `sentinel pentest` requires it to boot the target sandbox (install Docker Desktop). SAST is unaffected.",
+        !dockerOk // advisory: SAST works without it
+      );
+    } catch (error) {
+      record(false, "docker (pentest sandbox)", `docker check failed: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+
+    if (dockerOk) {
+      let runscOk = false;
+      try {
+        const proc = spawnSync("docker", ["info", "--format", "{{json .Runtimes}}"], { encoding: "utf8" });
+        runscOk = proc.status === 0 && (proc.stdout || "").includes("runsc");
+        record(
+          runscOk,
+          "gVisor / runsc (pentest isolation)",
+          runscOk
+            ? "runsc runtime registered with docker"
+            : "runsc not registered — the pentest falls back to runc (weaker isolation). Install gVisor and add it to /etc/docker/daemon.json for full hardening.",
+          !runscOk // advisory: a runc fallback still runs the pentest
+        );
+      } catch (error) {
+        record(false, "gVisor / runsc (pentest isolation)", `runsc check failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
     }
 
     let hardFailures = 0;
@@ -624,7 +721,7 @@ program
 // Backend lifecycle commands
 program
   .command("up")
-  .description("Start the Sentinel backend (API + worker)")
+  .description("Start the local Sentinel stack (results-only API + dashboard when available)")
   .action(async () => {
     const config = loadConfig();
     await startBackend(config.apiUrl);
@@ -633,7 +730,7 @@ program
 
 program
   .command("down")
-  .description("Stop the Sentinel backend")
+  .description("Stop the local Sentinel stack (API + dashboard)")
   .action(async () => {
     await stopBackend();
     console.log("Sentinel backend stopped.");
@@ -645,26 +742,31 @@ program
   .action(async () => {
     const config = loadConfig();
     const s = await backendStatus(config.apiUrl);
-    console.log(`API:     ${s.api}`);
-    console.log(`Worker:  ${s.worker}`);
-    console.log(`Healthy: ${s.healthy ? "yes" : "no"}`);
+    console.log(`API:       ${s.api}`);
+    console.log(`Dashboard: ${s.dashboard}`);
+    console.log(`Healthy:   ${s.healthy ? "yes" : "no"}`);
   });
 
-program.parseAsync().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(chalk.red(`Error: ${message}`));
-  if (process.env.DEBUG && error instanceof Error && error.stack) {
-    console.error(error.stack);
-  }
-  if (error instanceof Error && (error as NodeJS.ErrnoException).cause) {
-    const cause = (error as NodeJS.ErrnoException).cause as any;
-    const causeStr = cause?.code ?? String(cause);
-    if (causeStr !== message) {
-      console.error(chalk.dim(`Cause: ${causeStr}`));
+// Only run the CLI when invoked directly (not when imported, e.g. by tests that
+// exercise helpers like resolvePentestTargetId).
+const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolvePath(process.argv[1]);
+if (isMain) {
+  program.parseAsync().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(chalk.red(`Error: ${message}`));
+    if (process.env.DEBUG && error instanceof Error && error.stack) {
+      console.error(error.stack);
     }
-  }
-  process.exitCode = 2;
-});
+    if (error instanceof Error && (error as NodeJS.ErrnoException).cause) {
+      const cause = (error as NodeJS.ErrnoException).cause as any;
+      const causeStr = cause?.code ?? String(cause);
+      if (causeStr !== message) {
+        console.error(chalk.dim(`Cause: ${causeStr}`));
+      }
+    }
+    process.exitCode = 2;
+  });
+}
 
 function summarizeTokens(trace: string): { rows: Array<{ component: string; input: number; output: number }>; totalInput: number; totalOutput: number } {
   const totals = new Map<string, { input: number; output: number }>();
@@ -706,25 +808,6 @@ async function watchRunToTerminal(client: SentinelApiClient, runId: string): Pro
   }
 }
 
-/**
- * After a cloud pentest run finishes, print the finding's confirmation status
- * and evidence. The cloud worker writes finding.confirmed/status/evidence
- * directly (AUDIT.md §3 D6), so the CLI just reads it back.
- */
-async function printPentestOutcome(client: SentinelApiClient, findingId?: string): Promise<void> {
-  if (!findingId) {
-    console.log("pentest run finished. Run `sentinel list` to see the confirmed/not_reproducible status.");
-    return;
-  }
-  try {
-    const finding = await client.finding(findingId);
-    console.log(`${finding.id}\t${finding.status}\tconfirmed=${finding.confirmed}`);
-    if (finding.evidence) console.log(finding.evidence);
-  } catch {
-    console.log(`pentest run finished for finding ${findingId}. Run \`sentinel list\` to see the status.`);
-  }
-}
-
 async function runLimited<T, R>(items: T[], concurrency: number, task: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
@@ -747,13 +830,60 @@ function parsePositiveInt(value: string, label: string): number {
   return parsed;
 }
 
-function parsePentestTarget(parts: string[]): { findingId?: string; description?: string } {
+export function parsePentestTarget(parts: string[]): { findingId?: string; description?: string } {
   const target = parts.join(" ").trim();
   if (!target) return {};
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(target)) {
     return { findingId: target };
   }
   return { description: target };
+}
+
+// Highest first. Anything unknown ranks below `info`.
+const PENTEST_SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];
+function severityRank(severity: string): number {
+  const idx = PENTEST_SEVERITY_ORDER.indexOf((severity ?? "").toLowerCase());
+  return idx === -1 ? PENTEST_SEVERITY_ORDER.length : idx;
+}
+
+/**
+ * Resolve a pentest target to a finding id entirely client-side (plan D4). Only
+ * open findings are considered. With a description, findings are ranked by
+ * term-overlap of the description against title/vuln_type/file, tie-broken by
+ * severity. With no description, the highest-severity open finding wins.
+ * Returns null when there is nothing to run against.
+ */
+export async function resolvePentestTargetId(
+  client: SentinelApiClient,
+  description?: string
+): Promise<string | null> {
+  const open = await client.findings({ status: "open" });
+  if (open.length === 0) return null;
+
+  const bySeverity = (a: Finding, b: Finding) => severityRank(a.severity) - severityRank(b.severity);
+
+  if (!description || !description.trim()) {
+    // No description — take the single highest-severity open finding.
+    return [...open].sort(bySeverity)[0].id;
+  }
+
+  const terms = description
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length > 2);
+
+  const scored = open.map((f) => {
+    const haystack = `${f.title ?? ""} ${f.vuln_type ?? ""} ${f.file ?? ""}`.toLowerCase();
+    const overlap = terms.reduce((n, term) => (haystack.includes(term) ? n + 1 : n), 0);
+    return { finding: f, overlap };
+  });
+
+  // Rank by term overlap first, then severity as a tie-break.
+  scored.sort((a, b) => (b.overlap - a.overlap) || bySeverity(a.finding, b.finding));
+  const best = scored[0];
+  // Nothing matched any term — fall back to the highest-severity open finding.
+  if (best.overlap === 0) return [...open].sort(bySeverity)[0].id;
+  return best.finding.id;
 }
 
 // The structured gVisor sandbox blocks (sandbox/egress/secrets/canary/

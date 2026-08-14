@@ -31,11 +31,6 @@ export type Run = {
   completed_at?: string | null;
 };
 
-export type EnqueueResponse = {
-  task_id: string;
-  run: Run;
-};
-
 // AUDIT.md §3 D1 — Repo pentest reachability config (dual mode). These field
 // names are the locked D1 contract; the cloud stores them on the Repo and the
 // worker (W1) reads them to decide how to reach the target app.
@@ -60,14 +55,6 @@ export type RepoPentestConfigPatch = {
   healthcheck?: string | null;
   egress_allowlist?: string[];
   pentest_config?: Record<string, unknown> | null;
-};
-
-export type EnqueuePentestOptions = {
-  findingId?: string;
-  description?: string;
-  sanitizerOutput?: string;
-  behavioralProof?: string;
-  proofDetail?: string;
 };
 
 export type DeviceAuthStart = {
@@ -286,24 +273,6 @@ export class SentinelApiClient {
     }>("/config", {
       method: "PATCH",
       body: JSON.stringify(patch),
-    });
-  }
-
-  /**
-   * Enqueue a cloud pentest for a finding (AUDIT.md §3 D4 — CLI pentest is
-   * enqueue + poll; execution happens on the cloud worker, never locally).
-   * Returns the created task id and its run so the caller can poll to terminal.
-   */
-  enqueuePentest(options: EnqueuePentestOptions) {
-    const body: Record<string, unknown> = { repo_name: this.config.repoName };
-    if (options.findingId) body.finding_id = options.findingId;
-    if (options.description) body.description = options.description;
-    if (options.sanitizerOutput) body.sanitizer_output = options.sanitizerOutput;
-    if (options.behavioralProof) body.behavioral_proof = options.behavioralProof;
-    if (options.proofDetail) body.proof_detail = options.proofDetail;
-    return this.request<EnqueueResponse>("/pentest", {
-      method: "POST",
-      body: JSON.stringify(body),
     });
   }
 

@@ -30,10 +30,6 @@ class Account(Base):
     model: Mapped[str] = mapped_column(String, default="ollama")
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     api_endpoint: Mapped[str | None] = mapped_column(String, nullable=True)
-    # Optional server-side pentest-agent credential (AUDIT.md §3 D2). Separate
-    # from the SAST `api_key` policy; set admin-only via dashboard. The worker
-    # env `SENTINEL_PENTEST_LLM_API_KEY` takes precedence when present.
-    pentest_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_retention_days: Mapped[int] = mapped_column(Integer, default=365)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

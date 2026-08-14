@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from sentinel_worker.agent import ToolCallEvent
 from sentinel_worker.local_engine import (
     _unmatched_adapter_files_from_trace,
     run_local_source_scan,

@@ -7,19 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sentinel_worker.models import Repo, Run
-from sentinel_worker.task_queue import enqueue_task
+from sentinel_worker.models import Repo
 
 from ..auth import Principal, current_principal
 from ..deps import get_db
 from ..schemas import (
-    EnqueueResponse,
-    PentestRequest,
     RepoCreateRequest,
     RepoPentestConfigPatch,
     RepoPentestConfigResponse,
     RepoResponse,
-    RunResponse,
 )
 
 router = APIRouter(prefix="/repos", tags=["repos"])
@@ -32,25 +28,6 @@ def _is_dev_mode() -> bool:
 def _skip_tenant_filter(principal: Principal) -> bool:
     """Bypass tenant scoping only when in dev mode AND using the dev principal."""
     return _is_dev_mode() and principal.account_id == "dev"
-
-
-async def _run_response_simple(db: AsyncSession, run: Run) -> RunResponse:
-    """Minimal run response used inside this router — avoids circular imports."""
-    from sqlalchemy import func
-    from sentinel_worker.models import Finding
-
-    finding_count = await db.scalar(select(func.count(Finding.id)).where(Finding.run_id == run.id)) or 0
-    return RunResponse(
-        id=run.id,
-        kind=run.kind,
-        status=run.status,
-        finding_count=int(finding_count),
-        token_spend=run.token_spend,
-        model_used=run.model_used,
-        trace=run.trace or "",
-        created_at=run.created_at.isoformat(),
-        completed_at=run.completed_at.isoformat() if run.completed_at else None,
-    )
 
 
 def _graph_account_id(principal: Principal) -> str | None:
@@ -207,25 +184,10 @@ async def update_pentest_config(
 # See main.py's equivalent note next to /tasks/claim.
 
 
-@router.post("/{repo_id}/pentest", response_model=EnqueueResponse)
-async def pentest_scan(
-    repo_id: str,
-    payload: PentestRequest,
-    db: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(current_principal),
-) -> EnqueueResponse:
-    repo = await _get_repo(db, repo_id, principal)
-    task = await enqueue_task(
-        db,
-        repo_name=repo.name,
-        kind="pentest",
-        payload={"repo_name": repo.name, "finding_id": payload.finding_id, "description": payload.description},
-        account_id=_graph_account_id(principal),
-    )
-    run = await db.get(Run, task.run_id)
-    if run is None:
-        raise HTTPException(status_code=500, detail="run record not found after enqueue")
-    return EnqueueResponse(task_id=task.id, run=await _run_response_simple(db, run))
+# NOTE: POST /{repo_id}/pentest was removed. Pentest now runs entirely on the
+# developer's local machine (full gVisor sandbox stack); the local engine POSTs
+# the outcome to POST /findings/{id}/confirm. The backend no longer enqueues
+# pentest tasks — it is a pure results store.
 
 
 # NOTE: POST /{repo_id}/plan was removed. Plan/design-doc review took the plan

@@ -140,7 +140,7 @@ export default async function SettingsPage() {
             </div>
             {repos.length ? (
               <div className="panel" style={{ marginTop: 14 }}>
-                <div className="panel-header"><h2>Pentest configuration</h2><span className="muted">where the cloud worker reaches each repo</span></div>
+                <div className="panel-header"><h2>Pentest configuration</h2><span className="muted">how the local pentest reaches each repo</span></div>
                 <div className="panel-body stack" style={{ gap: 20 }}>
                   {reposWithConfig.map((repo) => (
                     <div key={repo.id} className="stack" style={{ gap: 10 }}>

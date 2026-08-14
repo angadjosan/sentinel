@@ -8,6 +8,8 @@ const SENTINEL_DIR = join(homedir(), ".sentinel");
 const PID_DIR = join(SENTINEL_DIR, "pids");
 const LOG_DIR = join(SENTINEL_DIR, "logs");
 const WORKER_CONN_FILE = join(SENTINEL_DIR, "worker-conn.json");
+const DASHBOARD_PORT = process.env.SENTINEL_DASHBOARD_PORT || "3000";
+const DASHBOARD_URL = `http://localhost:${DASHBOARD_PORT}`;
 
 function ensureDirs(): void {
   mkdirSync(PID_DIR, { recursive: true });
@@ -80,11 +82,11 @@ export function readWorkerConn(): WorkerConn | null {
   }
 }
 
-// NOTE: The Docker worker helpers (ensureWorkerContainer / isWorkerContainerRunning
-// / workerDockerArgs) were removed. Under the target architecture the CLI runs
-// SAST locally in-process and the hosted worker runs pentest in the cloud, so
-// `sentinel up` spawns a local Python API + worker (see startBackend) rather than
-// pulling a container image. No product path invoked the Docker helpers.
+// NOTE: There is no separate worker process anymore. The CLI runs SAST and
+// pentest locally in-process (see local_engine.py / execute_full_pentest), and
+// the backend is a results-only store. `sentinel up` spawns a local Python API
+// and, when the dashboard source is resolvable, the Next.js dashboard too — no
+// worker daemon, no Docker container image.
 
 // ── Localhost spawning (self-hosted local dev via `sentinel up`) ────────────────
 
@@ -102,57 +104,114 @@ export function resolveVenvPython(): string {
   return "python3"; // fall back to PATH
 }
 
+/**
+ * Locate the Next.js dashboard source so `sentinel up` can launch the frontend.
+ * Explicit `SENTINEL_DASHBOARD_DIR` wins; otherwise walk up from cwd looking for
+ * a `dashboard/package.json` (a Sentinel source checkout / self-host). Returns
+ * null when not found — the CLI then starts the API only (an npm-global install
+ * doesn't ship the dashboard; use docker-compose for the full stack there).
+ */
+export function resolveDashboardDir(): string | null {
+  const override = process.env.SENTINEL_DASHBOARD_DIR;
+  if (override) return existsSync(join(override, "package.json")) ? override : null;
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, "dashboard");
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    const parent = join(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** True if something is serving HTTP at the given URL (any response counts). */
+async function isPortResponding(url: string, timeoutMs = 500): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    await fetch(url, { signal: controller.signal });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function startApi(apiUrl: string): void {
+  const port = new URL(apiUrl).port || "8000";
+  if (readPid("api")) return;
+  const fd = openSync(join(LOG_DIR, "api.log"), "a");
+  const apiProc = spawn(
+    resolveVenvPython(),
+    ["-m", "uvicorn", "sentinel_api.main:app", "--host", "0.0.0.0", "--port", port],
+    { detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, SENTINEL_DEV_MODE: "1" } }
+  );
+  apiProc.unref();
+  if (apiProc.pid !== undefined) writePid("api", apiProc.pid);
+}
+
+/** Best-effort: launch the Next.js dashboard against the local API. Non-fatal —
+ *  a missing/failed dashboard must never block the API-backed workflow. */
+function startDashboard(apiUrl: string): "started" | "running" | "unavailable" {
+  if (readPid("dashboard")) return "running";
+  const dir = resolveDashboardDir();
+  if (!dir) return "unavailable";
+  const fd = openSync(join(LOG_DIR, "dashboard.log"), "a");
+  const proc = spawn("npm", ["run", "dev"], {
+    cwd: dir,
+    detached: true,
+    stdio: ["ignore", fd, fd],
+    env: {
+      ...process.env,
+      PORT: DASHBOARD_PORT,
+      NEXT_PUBLIC_SENTINEL_API_URL: apiUrl,
+      SENTINEL_API_INTERNAL_URL: apiUrl,
+      SENTINEL_DEV_MODE: "1",
+    },
+  });
+  proc.unref();
+  if (proc.pid !== undefined) writePid("dashboard", proc.pid);
+  return "started";
+}
+
 export async function startBackend(apiUrl: string): Promise<void> {
   ensureDirs();
   const port = new URL(apiUrl).port || "8000";
-  const pythonBin = resolveVenvPython();
 
-  if (!readPid("api")) {
-    const fd = openSync(join(LOG_DIR, "api.log"), "a");
-    const apiProc = spawn(
-      pythonBin,
-      ["-m", "uvicorn", "sentinel_api.main:app", "--host", "0.0.0.0", "--port", port],
-      {
-        detached: true,
-        stdio: ["ignore", fd, fd],
-        env: { ...process.env, SENTINEL_DEV_MODE: "1" },
-      }
-    );
-    apiProc.unref();
-    if (apiProc.pid !== undefined) {
-      writePid("api", apiProc.pid);
-    }
-  }
+  startApi(apiUrl);
+  const dashboard = startDashboard(apiUrl);
 
-  if (!readPid("worker")) {
-    const fd = openSync(join(LOG_DIR, "worker.log"), "a");
-    const workerProc = spawn(
-      pythonBin,
-      ["-m", "sentinel_worker.worker_main"],
-      {
-        detached: true,
-        stdio: ["ignore", fd, fd],
-        env: { ...process.env },
-      }
-    );
-    workerProc.unref();
-    if (workerProc.pid !== undefined) {
-      writePid("worker", workerProc.pid);
-    }
-  }
-
+  let apiReady = false;
   for (let i = 0; i < 16; i++) {
-    if (await isHealthy(apiUrl, 500)) return;
+    if (await isHealthy(apiUrl, 500)) { apiReady = true; break; }
     await sleep(500);
   }
-  throw new Error(
-    `Backend failed to start within 8s. Check logs: ${join(LOG_DIR, "api.log")}\n` +
-    `You can also start it manually with: uvicorn sentinel_api.main:app --port ${port}`
-  );
+  if (!apiReady) {
+    throw new Error(
+      `Backend failed to start within 8s. Check logs: ${join(LOG_DIR, "api.log")}\n` +
+      `You can also start it manually with: uvicorn sentinel_api.main:app --port ${port}`
+    );
+  }
+
+  if (dashboard === "unavailable") {
+    console.log(
+      "Dashboard source not found — started the API only. " +
+      "Run `sentinel up` from a Sentinel checkout, or set SENTINEL_DASHBOARD_DIR, to launch the dashboard too."
+    );
+  } else {
+    // Give Next a moment; it compiles on first request, so don't fail if slow.
+    for (let i = 0; i < 20; i++) {
+      if (await isPortResponding(DASHBOARD_URL, 500)) break;
+      await sleep(500);
+    }
+    console.log(`Dashboard: ${DASHBOARD_URL} (logs: ${join(LOG_DIR, "dashboard.log")})`);
+  }
 }
 
 export async function stopBackend(): Promise<void> {
-  for (const name of ["api", "worker"]) {
+  for (const name of ["dashboard", "api"]) {
     const pid = readPid(name);
     if (pid) {
       try {
@@ -165,21 +224,22 @@ export async function stopBackend(): Promise<void> {
 
 export async function backendStatus(
   apiUrl: string
-): Promise<{ api: string; worker: string; healthy: boolean }> {
+): Promise<{ api: string; dashboard: string; healthy: boolean }> {
   const apiPid = readPid("api");
-  const workerPid = readPid("worker");
+  const dashPid = readPid("dashboard");
   const healthy = await isHealthy(apiUrl);
   return {
     api: apiPid ? `running (PID ${apiPid})` : "stopped",
-    worker: workerPid ? `running (PID ${workerPid})` : "stopped",
+    dashboard: dashPid ? `running (PID ${dashPid}) at ${DASHBOARD_URL}` : "stopped",
     healthy,
   };
 }
 
 export async function ensureBackend(apiUrl: string): Promise<void> {
   if (!isLocalhost(apiUrl)) {
-    // Remote (cloud) backend: just verify reachability. The hosted worker on Railway
-    // handles task processing — no local Docker container needed.
+    // Remote (cloud) backend: just verify reachability. It is a results-only
+    // store — scans and pentests run locally in the CLI, so there is no remote
+    // worker or task processing to wait on.
     for (let attempt = 0; attempt < 3; attempt++) {
       if (await isHealthy(apiUrl, 8000)) return;
     }
