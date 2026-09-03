@@ -1,20 +1,168 @@
 from __future__ import annotations
 
-# NOTE: Alembic is the production migration path.
-# The create_all fallback below is kept for SQLite dev mode only.
-# Run `alembic upgrade head` (from the worker/ directory) for production.
+# Schema management has exactly two paths, chosen by database backend:
+#
+#   Postgres (hosted + self-host)  -> Alembic. `_apply_alembic` runs
+#       `upgrade head` on boot, guarded by a Postgres advisory lock so
+#       concurrent serverless cold starts can't race each other.
+#   SQLite (local engine, dev)     -> `Base.metadata.create_all` plus the
+#       idempotent ALTERs below. Alembic's migrations are Postgres-shaped and
+#       SQLite can't run most of them, so the local engine keeps create_all.
+#
+# Set SENTINEL_DISABLE_AUTO_MIGRATE=1 to skip the boot-time upgrade entirely
+# (for deployments that run `alembic upgrade head` as a separate deploy step).
 
+import asyncio
+import os
 from datetime import UTC, datetime
+from pathlib import Path
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .models import Base
 
-CURRENT_SCHEMA_VERSION = "0005_repo_pentest_config_blob"
+log = structlog.get_logger(__name__)
+
+CURRENT_SCHEMA_VERSION = "0009_drop_pentest_api_key"
+
+# Shipped inside the package so migrations are importable from an installed
+# wheel (Vercel, Docker), not just from a source checkout.
+ALEMBIC_DIR = Path(__file__).parent / "alembic_migrations"
+
+# Arbitrary but fixed: any two processes migrating this database must agree.
+_MIGRATION_LOCK_KEY = 0x5E271E
+
+
+def _alembic_config():
+    from alembic.config import Config
+
+    config = Config()
+    config.set_main_option("script_location", str(ALEMBIC_DIR))
+    # env.py reads ALEMBIC_DB_URL first; passing the URL that way avoids
+    # configparser's %-interpolation mangling passwords containing '%'.
+    return config
+
+
+def _alembic_head() -> str:
+    from alembic.script import ScriptDirectory
+
+    return ScriptDirectory.from_config(_alembic_config()).get_current_head() or "head"
+
+
+def _run_alembic(url: str, action: str, revision: str) -> None:
+    """Run alembic synchronously. Called in a worker thread: env.py uses
+    asyncio.run(), which raises if a loop is already running on this thread."""
+    from alembic import command
+
+    config = _alembic_config()
+    previous = os.environ.get("ALEMBIC_DB_URL")
+    os.environ["ALEMBIC_DB_URL"] = url
+    try:
+        if action == "stamp":
+            command.stamp(config, revision)
+        else:
+            command.upgrade(config, revision)
+    finally:
+        if previous is None:
+            os.environ.pop("ALEMBIC_DB_URL", None)
+        else:
+            os.environ["ALEMBIC_DB_URL"] = previous
+
+
+class SchemaDriftError(RuntimeError):
+    """An untracked (pre-Alembic) database whose shape doesn't match head."""
+
+
+def _compare_to_models(sync_conn) -> list[str]:
+    """Diff the live schema against the ORM models. Alembic's autogenerate
+    comparator is the same machinery `alembic revision --autogenerate` uses."""
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    context = MigrationContext.configure(sync_conn)
+    diffs = []
+    for diff in compare_metadata(context, Base.metadata):
+        # compare_metadata yields tuples like ("add_column", schema, table, Column)
+        # and nested lists for multi-part changes; summarise rather than dump.
+        entries = diff if isinstance(diff, list) else [diff]
+        for entry in entries:
+            kind = entry[0]
+            # Only structural gaps matter here; ignore index/type nits that
+            # differ harmlessly between create_all and migration DDL.
+            if kind == "add_table":
+                diffs.append(f"missing table: {entry[1].name}")
+            elif kind == "add_column":
+                diffs.append(f"missing column: {entry[3].table.name}.{entry[3].name}")
+            elif kind == "remove_column":
+                diffs.append(f"unexpected column: {entry[3].table.name}.{entry[3].name}")
+    return diffs
+
+
+async def _schema_drift(conn) -> list[str]:
+    return await conn.run_sync(_compare_to_models)
+
+
+async def _apply_alembic(engine: AsyncEngine) -> list[str]:
+    url = engine.url.render_as_string(hide_password=False)
+    head = await asyncio.to_thread(_alembic_head)
+
+    async with engine.connect() as conn:
+        # Only one process migrates; the rest proceed against the schema the
+        # winner leaves behind. A cold start must not block on a peer's upgrade.
+        acquired = (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _MIGRATION_LOCK_KEY})).scalar()
+        if not acquired:
+            log.info("schema.migrate.skipped", reason="lock_held_by_peer")
+            return []
+        try:
+            has_alembic = (
+                await conn.execute(text("SELECT to_regclass('public.alembic_version')"))
+            ).scalar() is not None
+            has_tables = (
+                await conn.execute(text("SELECT to_regclass('public.accounts')"))
+            ).scalar() is not None
+
+            if has_tables and not has_alembic:
+                # Pre-Alembic database: tables were built by create_all, so
+                # replaying 0001.. would collide with them. Adopt the schema by
+                # stamping instead -- but only once we've confirmed it really
+                # matches head. A long-lived create_all database drifts: boots
+                # add new *tables* but never add columns to existing ones, so
+                # stamping blind would permanently mark a half-built schema as
+                # migrated. Refuse instead, and name the drift for the operator.
+                drift = await _schema_drift(conn)
+                if drift:
+                    log.error(
+                        "schema.migrate.drift_detected",
+                        revision=head,
+                        drift=drift,
+                        remedy="reconcile the database with head, then `alembic stamp head`",
+                    )
+                    raise SchemaDriftError(
+                        f"database predates Alembic and does not match {head}: {'; '.join(drift)}"
+                    )
+                log.warning("schema.migrate.adopting_untracked", revision=head)
+                await asyncio.to_thread(_run_alembic, url, "stamp", head)
+                return [head]
+
+            await asyncio.to_thread(_run_alembic, url, "upgrade", "head")
+            return [head]
+        finally:
+            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _MIGRATION_LOCK_KEY})
 
 
 async def apply_migrations(engine: AsyncEngine) -> list[str]:
+    """Bring the database up to the current schema. Returns revisions applied."""
+    if os.getenv("SENTINEL_DISABLE_AUTO_MIGRATE") == "1":
+        log.info("schema.migrate.disabled")
+        return []
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return await _apply_alembic(engine)
+    return await _apply_sqlite_schema(engine)
+
+
+async def _apply_sqlite_schema(engine: AsyncEngine) -> list[str]:
     async with engine.begin() as conn:
         await conn.execute(
             text(

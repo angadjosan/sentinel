@@ -12,8 +12,9 @@
 #
 # What must be bundled beyond code:
 #   * data:  sentinel_worker/prompts/*.txt   (loaded via Path(__file__).parent/"prompts")
-#   * data:  worker/alembic/versions/*.py    (alembic migration path; create_all is the
-#            runtime default but we ship these so `alembic upgrade` also works frozen)
+#   * data:  sentinel_worker/alembic_migrations/**  (the Postgres migration path;
+#            the frozen engine is SQLite/create_all by default, but a self-host
+#            engine pointed at Postgres runs `alembic upgrade head` on boot)
 #   * tree-sitter grammar shared libs — loaded dynamically via importlib in
 #     construction.py, so PyInstaller can't see them: --collect-all each grammar.
 
@@ -29,7 +30,7 @@ PKG_DIR = WORKER_DIR / "sentinel_worker"
 
 datas = [
     (str(PKG_DIR / "prompts"), "sentinel_worker/prompts"),
-    (str(WORKER_DIR / "alembic"), "alembic"),
+    (str(PKG_DIR / "alembic_migrations"), "sentinel_worker/alembic_migrations"),
 ]
 binaries = []
 hiddenimports = [

@@ -47,12 +47,18 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
+# Without an explicit include, find() also picks up the top-level `tests` package
+# and (previously) `alembic` -- installing a stub `alembic` package that shadows
+# the real Alembic distribution at runtime.
+include = ["sentinel_worker*"]
 
 [tool.setuptools.package-data]
 # LLM prompt templates are loaded at runtime via Path(__file__).parent/"prompts".
 # Without this they're omitted from wheels, breaking non-editable installs
 # (e.g. `pip install ./worker` in the GitHub Action / CI).
-sentinel_worker = ["prompts/*.txt"]
+# alembic_migrations ships too: apply_migrations() runs `upgrade head` from the
+# installed package on Postgres, so the revisions must exist in the wheel.
+sentinel_worker = ["prompts/*.txt", "alembic_migrations/*.py", "alembic_migrations/versions/*.py"]
 
 [tool.pytest.ini_options]
 # Put the worker root on sys.path so `from tests.conftest import ...` resolves

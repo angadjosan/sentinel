@@ -70,11 +70,14 @@ async def lifespan(app: FastAPI):
     try:
         await init_schema()
     except Exception as exc:
-        # Migrations may fail on Neon's pooled endpoint in serverless cold starts.
-        # The hosted worker runs migrations on boot and owns schema management;
-        # log the error but don't crash the API — existing schema is sufficient.
+        # Never take the API down over a migration failure: a cold start that
+        # can't migrate can still serve requests against the existing schema,
+        # and crash-looping every instance turns a schema problem into an
+        # outage. The failure is logged at error level so it surfaces rather
+        # than passing silently -- SchemaDriftError in particular means the
+        # database needs manual reconciliation (see sentinel_worker.migrations).
         import structlog as _sl
-        _sl.get_logger().warning("schema.init.skipped", error=str(exc))
+        _sl.get_logger().error("schema.init.failed", error=str(exc), error_type=type(exc).__name__)
     yield
 
 
