@@ -36,7 +36,10 @@ jobs:
             pkg: engine-darwin-arm64
             os: darwin
             cpu: arm64
-          - runner: macos-13        # Intel
+          # macos-13 was retired: jobs targeting it queue forever instead of
+          # failing. macos-15-intel is the current x86_64 macOS runner
+          # (verified: uname -m = x86_64, ProductVersion 15.7.9).
+          - runner: macos-15-intel  # Intel
             pkg: engine-darwin-x64
             os: darwin
             cpu: x64
