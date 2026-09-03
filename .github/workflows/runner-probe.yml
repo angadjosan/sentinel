@@ -1,0 +1,22 @@
+# TEMPORARY: determines which macOS runner labels this account can actually
+# schedule. Deleted once build-engine.yml's matrix is corrected.
+name: runner-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 4          # an unschedulable label queues forever; fail fast
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-13, macos-14, macos-15, macos-15-intel, macos-26]
+    steps:
+      - run: |
+          echo "runner=${{ matrix.runner }}"
+          uname -m
+          sw_vers || true
