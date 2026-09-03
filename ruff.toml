@@ -1,0 +1,20 @@
+# Ruff configuration for the whole repo (api/ and worker/ inherit this: neither
+# pyproject.toml declares [tool.ruff], so resolution walks up to here).
+#
+# The rule set is stated explicitly on purpose. Ruff's *default* selection
+# changes between releases -- 0.16 widened it, which turned a green CI red with
+# 203 findings on code nobody had touched. Naming the rules means a ruff upgrade
+# changes lint only when we decide it should.
+target-version = "py312"
+
+[lint]
+# Ruff's historical default: pyflakes plus the pycodestyle error subset.
+select = ["E4", "E7", "E9", "F"]
+
+# Deliberately not enabled, for reasons specific to this codebase:
+#   B008  flags `= Depends(...)` / `= Header(...)` in defaults -- that IS the
+#         FastAPI idiom, and it accounts for 117 findings on its own.
+#   BLE001 flags `except Exception`, which several paths use on purpose so a
+#         push/telemetry failure can't discard a completed local result.
+# I001 (import sorting) and the SIM rules are worth adopting, but as their own
+# change with the reformatting that implies -- not smuggled into a CI fix.

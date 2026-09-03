@@ -15,7 +15,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install ruff mypy -e "./api[test]" -e "./worker[test]"
+      # Pinned: an unpinned linter turns an upstream release into a red build
+      # on code nobody touched. Bump deliberately, with the fixes in the same PR.
+      - run: pip install "ruff==0.16.5" "mypy==1.18.2" -e "./api[test]" -e "./worker[test]"
       - run: ruff check api/sentinel_api worker/sentinel_worker
       - run: mypy api/sentinel_api worker/sentinel_worker --ignore-missing-imports
 
