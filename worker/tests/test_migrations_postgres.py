@@ -102,8 +102,11 @@ async def test_second_boot_is_a_noop():
 
 
 @pytest.mark.asyncio
-async def test_auto_migrate_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("SENTINEL_DISABLE_AUTO_MIGRATE", "1")
+@pytest.mark.parametrize("var", ["SENTINEL_DISABLE_AUTO_MIGRATE", "VERCEL"])
+async def test_auto_migrate_is_disabled_on_serverless(monkeypatch, var):
+    """Serverless cold starts must not migrate: they'd race each other for the
+    lock and run DDL over a pooled connection. Hosted deploys migrate out-of-band."""
+    monkeypatch.setenv(var, "1")
     engine = create_async_engine(await _make_db())
     try:
         assert await apply_migrations(engine) == []

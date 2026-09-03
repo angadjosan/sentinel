@@ -152,10 +152,32 @@ async def _apply_alembic(engine: AsyncEngine) -> list[str]:
             await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _MIGRATION_LOCK_KEY})
 
 
+def _auto_migrate_enabled() -> bool:
+    """Whether this process should migrate on boot.
+
+    A long-lived process (Docker self-host, local engine) is the right place to
+    migrate: it boots once, holds a direct connection, and can take its time.
+
+    A serverless function is the wrong place. Every cold start would race the
+    others for the migration lock, the connection is a PgBouncer-pooled one that
+    DDL and session-level advisory locks don't play well with, and a slow
+    migration turns into a failed invocation rather than a slow boot. Hosted
+    deployments migrate as an explicit step instead:
+
+        cd worker && ALEMBIC_DB_URL=<unpooled-url> alembic upgrade head
+    """
+    if os.getenv("SENTINEL_DISABLE_AUTO_MIGRATE") == "1":
+        return False
+    # Set by Vercel on both build and runtime; also covers `vercel dev`.
+    if os.getenv("VERCEL"):
+        return False
+    return True
+
+
 async def apply_migrations(engine: AsyncEngine) -> list[str]:
     """Bring the database up to the current schema. Returns revisions applied."""
-    if os.getenv("SENTINEL_DISABLE_AUTO_MIGRATE") == "1":
-        log.info("schema.migrate.disabled")
+    if not _auto_migrate_enabled():
+        log.info("schema.migrate.skipped", reason="auto_migrate_disabled")
         return []
     if not engine.url.get_backend_name().startswith("sqlite"):
         return await _apply_alembic(engine)
