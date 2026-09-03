@@ -572,6 +572,7 @@ async def run_local_pentest(
         fetched_egress = fetched.get("egress_allowlist")
         resolved_egress = list(fetched_egress) if isinstance(fetched_egress, list) else _decode_egress_allowlist(fetched_egress)
 
+    resolved_config_json: str | None
     if pentest_config_json is not None:
         resolved_config_json = pentest_config_json
     else:

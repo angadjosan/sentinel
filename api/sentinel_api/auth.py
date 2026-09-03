@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import bcrypt
-from fastapi import Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,15 +70,16 @@ def create_token(user_id: str, account_id: str, role: str = "admin", expires_min
     return jwt.encode(payload, jwt_secret(), algorithm=ALGORITHM)
 
 
-async def current_principal(
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_db),
-) -> Principal:
-    if not auth_required():
-        return Principal(user_id="dev", account_id="dev", role="admin")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    token = authorization.removeprefix("Bearer ").strip()
+# Must match SESSION_COOKIE in dashboard/src/lib/session.ts.
+SESSION_COOKIE_NAME = "sentinel_session"
+
+
+async def _principal_from_token(token: str, db: AsyncSession) -> Principal:
+    """Validate a session JWT and resolve it to a Principal.
+
+    Shared by the Bearer path and the SSE cookie path so the two can never
+    drift apart on revocation or purpose-token handling.
+    """
     try:
         payload = jwt.decode(token, jwt_secret(), algorithms=[ALGORITHM])
     except JWTError as exc:
@@ -109,6 +110,41 @@ async def current_principal(
         role=str(payload.get("role", "readonly")),
         sid=str(sid) if sid else None,
     )
+
+
+async def current_principal(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> Principal:
+    if not auth_required():
+        return Principal(user_id="dev", account_id="dev", role="admin")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    return await _principal_from_token(authorization.removeprefix("Bearer ").strip(), db)
+
+
+async def current_principal_sse(
+    authorization: str | None = Header(default=None),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    db: AsyncSession = Depends(get_db),
+) -> Principal:
+    """Auth for EventSource streams, which cannot send an Authorization header.
+
+    The browser's EventSource API has no way to set headers, so a dashboard
+    page streaming a run can only present the session cookie the dashboard
+    already set (same-origin via the /api proxy). Accepting it is scoped
+    deliberately to this read-only GET: the cookie is SameSite=lax, so it does
+    not ride along on cross-site requests, and no state-changing endpoint
+    accepts cookie auth. A Bearer header still wins when both are present, so
+    the CLI is unaffected.
+    """
+    if not auth_required():
+        return Principal(user_id="dev", account_id="dev", role="admin")
+    if authorization and authorization.startswith("Bearer "):
+        return await _principal_from_token(authorization.removeprefix("Bearer ").strip(), db)
+    if session_cookie:
+        return await _principal_from_token(session_cookie, db)
+    raise HTTPException(status_code=401, detail="missing bearer token")
 
 
 def _as_utc(value: datetime) -> datetime:

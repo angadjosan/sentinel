@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,10 +113,20 @@ def _decode_pentest_config(raw: str | None) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+def _pentest_mode(value: str | None) -> Literal["staging", "local_worker"]:
+    """Narrow the free-text DB column to the response's Literal.
+
+    The column is plain text, so anything unrecognised (or NULL) falls back to
+    "staging" -- the same default the old `or "staging"` gave for NULL, now
+    applied to bad values too rather than passing them through untyped.
+    """
+    return "local_worker" if value == "local_worker" else "staging"
+
+
 def _pentest_config_response(repo: Repo) -> RepoPentestConfigResponse:
     return RepoPentestConfigResponse(
         repo_id=repo.id,
-        pentest_mode=repo.pentest_mode or "staging",
+        pentest_mode=_pentest_mode(repo.pentest_mode),
         staging_base_url=repo.staging_base_url,
         healthcheck_path=repo.healthcheck_path,
         boot=repo.boot,

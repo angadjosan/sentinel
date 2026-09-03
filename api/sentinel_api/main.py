@@ -25,7 +25,7 @@ from sentinel_worker.security import compute_fingerprint
 from sentinel_worker.task_queue import cancel_run_tasks
 from sentinel_worker.trace_store import read_run_trace
 
-from .auth import Principal, create_token, current_principal, require_admin
+from .auth import Principal, create_token, current_principal, current_principal_sse, require_admin
 from .deps import get_db, init_schema
 from .routers.auth import router as auth_router
 from .routers.repos import router as repos_router
@@ -809,7 +809,7 @@ async def run_trace_access_log(run_id: str, db: AsyncSession = Depends(get_db), 
 
 
 @app.get("/runs/{run_id}/events")
-async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal)) -> StreamingResponse:
+async def run_events(run_id: str, db: AsyncSession = Depends(get_db), principal: Principal = Depends(current_principal_sse)) -> StreamingResponse:
     run = await _run_for_principal(db, run_id, principal)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")

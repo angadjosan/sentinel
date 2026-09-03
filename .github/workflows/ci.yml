@@ -19,6 +19,16 @@ jobs:
           node-version: "20"
           cache: npm
           cache-dependency-path: cli/package-lock.json
+      # tests/localEngine.test.ts is a deliberate end-to-end test: it spawns the
+      # real Python engine to prove the Node <-> Python contract (argv, stdin
+      # diff piping, stdout JSON). That contract is exactly what breaks silently,
+      # so CI installs the engine rather than stubbing the test out.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e "./worker"
+        working-directory: .
       - run: npm ci
       - run: npm run build
       - run: npm test

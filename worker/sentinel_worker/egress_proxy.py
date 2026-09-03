@@ -159,7 +159,7 @@ class EgressProxy:
             await writer.drain()
         writer.close()
 
-    async def serve(self, host: str = "127.0.0.1", port: int = 0) -> asyncio.AbstractServer:
+    async def serve(self, host: str = "127.0.0.1", port: int = 0) -> asyncio.Server:
         """Start the proxy server. Port 0 binds an ephemeral port (returned on the
         server object). The sandbox is pointed here via build_egress_proxy_env."""
         return await asyncio.start_server(self.handle_client, host, port)

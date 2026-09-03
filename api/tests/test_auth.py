@@ -224,3 +224,45 @@ def test_device_auth_token_stays_pending_without_dev_mode(monkeypatch):
         started = client.post("/auth/device")
         pending = client.get(f"/auth/device/token?device_code={started.json()['device_code']}")
     assert pending.status_code == 202
+
+
+# ── SSE cookie auth ──────────────────────────────────────────────────────────
+# EventSource cannot set an Authorization header, so the dashboard's live
+# findings stream can only present the session cookie. That path is scoped to
+# this one read-only GET; everything else stays Bearer-only.
+
+
+def test_sse_events_accepts_the_session_cookie(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token = create_token("user-1", "account-1", "member")
+    with TestClient(app) as client:
+        client.cookies.set("sentinel_session", token)
+        response = client.get("/runs/missing/events")
+    # 404 (run not found), NOT 401 -- the request authenticated successfully.
+    assert response.status_code == 404
+
+
+def test_sse_events_rejects_a_bad_session_cookie(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    with TestClient(app) as client:
+        client.cookies.set("sentinel_session", "not-a-real-jwt")
+        response = client.get("/runs/missing/events")
+    assert response.status_code == 401
+
+
+def test_sse_events_rejects_no_credentials(monkeypatch):
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    with TestClient(app) as client:
+        response = client.get("/runs/missing/events")
+    assert response.status_code == 401
+
+
+def test_session_cookie_does_not_authenticate_other_endpoints(monkeypatch):
+    """The cookie path must not leak into the rest of the API: a browser that
+    can present the cookie must still not be able to drive write endpoints."""
+    monkeypatch.setenv("SENTINEL_REQUIRE_AUTH", "1")
+    token = create_token("user-1", "account-1", "member")
+    with TestClient(app) as client:
+        client.cookies.set("sentinel_session", token)
+        assert client.get("/findings").status_code == 401
+        assert client.get("/runs").status_code == 401

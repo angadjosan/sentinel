@@ -200,7 +200,7 @@ def run(argv: list[str] | None = None) -> int:
                 api_token=args.api_token,
             )
         )
-        push_response: dict = {}
+        push_response = {}
         if args.api_url:
             push_response = _push_or_warn(
                 api_url=args.api_url,
@@ -283,7 +283,7 @@ def run(argv: list[str] | None = None) -> int:
         # absent — see sandbox_preflight's ladder.
         if getattr(args, "no_sandbox", False):
             os.environ["SENTINEL_SANDBOX_RUNTIME"] = "off"
-        result = asyncio.run(
+        pentest_result = asyncio.run(
             run_local_pentest(
                 repo_name=args.repo_name,
                 repo_dir=args.repo_dir,
@@ -303,22 +303,22 @@ def run(argv: list[str] | None = None) -> int:
         push_response = _push_pentest_or_warn(
             api_url=args.api_url,
             token=args.api_token,
-            result=result,
+            result=pentest_result,  # keyword must stay `result`: push_pentest_result's signature
         )
-        verb = "CONFIRMED" if result.confirmed else "not confirmed"
-        sys.stderr.write(f"sentinel: pentest {verb} — finding {result.finding_id} status={result.status}\n")
-        if result.local_trace_path:
-            sys.stderr.write(f"sentinel: full trace saved locally -> {result.local_trace_path}\n")
+        verb = "CONFIRMED" if pentest_result.confirmed else "not confirmed"
+        sys.stderr.write(f"sentinel: pentest {verb} — finding {pentest_result.finding_id} status={pentest_result.status}\n")
+        if pentest_result.local_trace_path:
+            sys.stderr.write(f"sentinel: full trace saved locally -> {pentest_result.local_trace_path}\n")
         print(
             json.dumps(
                 {
-                    "finding_id": result.finding_id,
-                    "confirmed": result.confirmed,
-                    "status": result.status,
-                    "evidence": result.evidence,
-                    "payloads": result.payloads,
-                    "local_run_id": result.local_run_id,
-                    "local_trace_path": result.local_trace_path,
+                    "finding_id": pentest_result.finding_id,
+                    "confirmed": pentest_result.confirmed,
+                    "status": pentest_result.status,
+                    "evidence": pentest_result.evidence,
+                    "payloads": pentest_result.payloads,
+                    "local_run_id": pentest_result.local_run_id,
+                    "local_trace_path": pentest_result.local_trace_path,
                     "push": push_response,
                 }
             )
