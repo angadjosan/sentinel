@@ -3,7 +3,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from sentinel_worker.migrations import CURRENT_SCHEMA_VERSION, apply_migrations
+from sentinel_worker.migrations import CURRENT_SCHEMA_VERSION, _alembic_head, apply_migrations
 
 
 @pytest.mark.asyncio
@@ -30,5 +30,7 @@ async def test_preexisting_repos_table_is_upgraded_with_pentest_config():
     await engine.dispose()
 
 
-def test_current_schema_version_is_bumped():
-    assert CURRENT_SCHEMA_VERSION == "0005_repo_pentest_config_blob"
+def test_current_schema_version_tracks_alembic_head():
+    """The SQLite marker must name the same revision Postgres migrates to, so a
+    new revision can't be added without the dev-mode schema being updated too."""
+    assert CURRENT_SCHEMA_VERSION == _alembic_head()

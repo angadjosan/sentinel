@@ -40,5 +40,8 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"]
+  // `api` is excluded so the /api/* rewrite to the API project passes through
+  // untouched — the API authenticates those requests itself via the Bearer token
+  // or session cookie, and redirecting them to /login would break every client.
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"]
 };
